@@ -38,11 +38,13 @@ pub const Call = enum(u8) {
     sync_full,
     /// Darwin `F_BARRIERFSYNC`.
     sync_barrier,
-    /// Linux `fdatasync`.
+    /// A data-only durable sync: Linux `fdatasync`, Windows
+    /// `NtFlushBuffersFileEx(DATA_SYNC_ONLY)`.
     sync_data,
     /// Plain `fsync` where it is the end of a fallback chain (Darwin, BSD).
     sync_plain,
-    /// Darwin `fsync` used as a writeout before one device flush.
+    /// A writeout without a device flush, before one flush per volume:
+    /// Darwin `fsync`, Windows `NtFlushBuffersFileEx(NO_SYNC)`.
     sync_writeout,
     /// A directory opened so it can be synced and named relative to.
     open_dir,
@@ -66,8 +68,6 @@ pub const Call = enum(u8) {
     volume_name,
     /// Windows rename by handle (`FileRenameInformationEx`).
     win_rename_ex,
-    /// Windows `NtFlushBuffersFileEx` with a flag.
-    win_flush_ex,
     /// Linux `fcntl(F_GETFL)`: is a directory handle `O_PATH`?
     getfl,
 };
@@ -745,7 +745,11 @@ pub fn flushWindows(io: Io, handle: windows.HANDLE, call: Call, path: ?[]const u
 /// `no_sync`, FAT and exFAT): ReFS, redirectors.
 // ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn flushExWindows(io: Io, handle: windows.HANDLE, flag: FlushEx, path: ?[]const u8) SyncError!void {
-    const status = try retryingNt(io, .win_flush_ex, path, ntFlushEx, .{ handle, @backingInt(flag) });
+    const call: Call = switch (flag) {
+        .data_sync_only => .sync_data,
+        .no_sync => .sync_writeout,
+    };
+    const status = try retryingNt(io, call, path, ntFlushEx, .{ handle, @backingInt(flag) });
     if (status == .SUCCESS) return;
     if (isRefusalNt(status)) return error.Refused;
     return ntSyncFailure(status);

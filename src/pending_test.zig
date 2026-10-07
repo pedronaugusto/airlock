@@ -19,7 +19,7 @@ const is_tested_os = is_linux or is_darwin or is_windows;
 const io_error: harness.Code = if (is_windows) .IO_DEVICE_ERROR else .IO;
 
 /// The first call that syncs the temp at `data`.
-const temp_sync: Call = if (is_darwin) .sync_barrier else if (is_linux) .sync_data else if (is_windows) .win_flush_ex else .sync_plain;
+const temp_sync: Call = if (is_darwin) .sync_barrier else if (is_linux) .sync_data else if (is_windows) .sync_data else .sync_plain;
 
 fn expectContents(s: *harness.Scratch, name: []const u8, expected: ?[]const u8) !void {
     var buffer: [64]u8 = undefined;
@@ -49,7 +49,7 @@ test "a replace at data: 2 F on Linux and Windows, 1 B + 1 F on Darwin" {
     try expectContents(&s, "HEAD", "new");
     try expectNoTemps(&s);
     if (is_windows) {
-        try expectCalls(h, &.{ .create_temp, .win_flush_ex, .open_dir, .win_rename_ex, .sync_dir, .close, .close });
+        try expectCalls(h, &.{ .create_temp, .sync_data, .open_dir, .win_rename_ex, .sync_dir, .close, .close });
     } else {
         try expectCalls(h, &.{ .create_temp, temp_sync, .close, .rename, .sync_dir });
     }
@@ -64,7 +64,7 @@ test "a replace at ordered stops before the directory; at none it syncs nothing"
     const ordered = try airlock.writeFile(h.io(), s.dir(), "a", "1", .{ .commit = .{ .level = .ordered } });
     try testing.expectEqual(airlock.Reached.ordered, ordered.reached);
     if (is_windows) {
-        try expectCalls(h, &.{ .create_temp, .win_flush_ex, .win_rename_ex, .close });
+        try expectCalls(h, &.{ .create_temp, .sync_data, .win_rename_ex, .close });
     } else {
         try expectCalls(h, &.{ .create_temp, temp_sync, .close, .rename });
     }

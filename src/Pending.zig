@@ -466,8 +466,17 @@ fn removeTemp(p: *Pending, io: Io) void {
         sys.release(io, p.file.handle);
         p.file_open = false;
     }
+    if (p.parent_open) {
+        // ziglint-ignore: Z026 cleanup after a failure the caller already gets
+        sys.unlink(io, p.parent.handle, p.tempName()) catch {};
+        return;
+    }
+    // A batch closed the parent: name the temp from the caller's directory.
+    var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const parent = p.parentSubPath() orelse "";
+    const path = if (parent.len == 0) p.tempName() else std.mem.print(&buffer, "{s}/{s}", .{ parent, p.tempName() }) catch return;
     // ziglint-ignore: Z026 cleanup after a failure the caller already gets
-    if (p.parent_open) sys.unlink(io, p.parent.handle, p.tempName()) catch {};
+    sys.unlink(io, p.root.handle, path) catch {};
 }
 
 fn releaseParent(p: *Pending, io: Io) void {
@@ -627,8 +636,9 @@ fn finish(p: *Pending, io: Io) void {
 /// unlinks, so it cannot remove a name someone else now owns.
 pub fn discard(p: *Pending, io: Io) void {
     switch (p.state) {
-        .open, .synced, .poisoned => p.removeTemp(io),
-        .published, .kept, .discarded => {},
+        .open, .synced => p.removeTemp(io),
+        // A poisoned pending removed its temp when the sync failed.
+        .poisoned, .published, .kept, .discarded => {},
     }
     p.finish(io);
     p.state = .discarded;

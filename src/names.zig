@@ -18,7 +18,7 @@ pub const RenameOptions = struct {
     busy_deadline: Io.Duration = .fromMilliseconds(2000),
 };
 
-pub const RenameError = Io.Dir.RenameError || platform.DirSyncError;
+pub const RenameError = Io.Dir.RenameError || platform.DirSyncError || Io.File.StatError;
 
 /// Renames `old` (relative to `old_dir`) to `new` (relative to `new_dir`),
 /// replacing `new` if it exists, then syncs the directory that holds `new`

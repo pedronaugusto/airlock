@@ -37,8 +37,8 @@ test "each level makes the platform's call and reports what it reached" {
         try testing.expectEqual(airlock.Reached.expected(level), reached);
         const expected: []const Call = switch (level) {
             .none => &.{},
-            .ordered => if (is_darwin) &.{.sync_barrier} else if (is_linux) &.{.sync_data} else if (is_windows) &.{.win_flush_ex} else &.{.sync_plain},
-            .data => if (is_darwin) &.{.sync_full} else if (is_linux) &.{.sync_data} else if (is_windows) &.{.win_flush_ex} else &.{.sync_plain},
+            .ordered => if (is_darwin) &.{.sync_barrier} else if (is_linux) &.{.sync_data} else if (is_windows) &.{.sync_data} else &.{.sync_plain},
+            .data => if (is_darwin) &.{.sync_full} else if (is_linux) &.{.sync_data} else if (is_windows) &.{.sync_data} else &.{.sync_plain},
             .full => if (is_darwin or is_linux or is_windows) &.{.sync_full} else &.{.sync_plain},
         };
         try expectCalls(h, expected);
@@ -64,7 +64,7 @@ test "a refused call falls back to the next one, never to a weaker one first" {
     const file = try scratchFile(&s);
     defer file.close(testing.io);
 
-    const first: Call = if (is_darwin) .sync_full else if (is_linux) .sync_data else .win_flush_ex;
+    const first: Call = if (is_darwin) .sync_full else if (is_linux) .sync_data else .sync_data;
     const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(first, refusal)} });
     defer h.destroy();
     const reached = try airlock.syncFile(h.io(), file, .{ .level = .data });
@@ -89,7 +89,7 @@ test "refuse returns LevelUnavailable where the fallback falls below the level" 
     const plan = if (is_darwin)
         &[_]harness.RawPlan.Entry{harness.always(.sync_full, refusal)}
     else
-        &[_]harness.RawPlan.Entry{ harness.always(if (is_linux) .sync_data else .win_flush_ex, refusal), harness.always(.sync_full, refusal) };
+        &[_]harness.RawPlan.Entry{ harness.always(if (is_linux) .sync_data else .sync_data, refusal), harness.always(.sync_full, refusal) };
     const h = try Harness.create(testing.allocator, testing.io, .{ .plan = plan });
     defer h.destroy();
     try testing.expectError(error.LevelUnavailable, airlock.syncFile(h.io(), file, .{ .level = .data, .fallback = .refuse }));
@@ -116,7 +116,7 @@ test "a failed sync is returned once: no retry, no weaker call" {
     defer s.cleanup();
     const file = try scratchFile(&s);
     defer file.close(testing.io);
-    const first: Call = if (is_darwin) .sync_full else if (is_linux) .sync_data else if (is_windows) .win_flush_ex else .sync_plain;
+    const first: Call = if (is_darwin) .sync_full else if (is_linux) .sync_data else if (is_windows) .sync_data else .sync_plain;
     const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(first, io_error)} });
     defer h.destroy();
     try testing.expectError(error.InputOutput, airlock.syncFile(h.io(), file, .{ .level = .data }));

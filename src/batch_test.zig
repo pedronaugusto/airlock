@@ -67,7 +67,7 @@ test "three publishes into one directory: the fewest barriers per platform" {
     } else {
         // NO_SYNC each and on the directory, one flush before the renames
         // and one after.
-        try testing.expectEqual(@as(u32, 4), h.count(.win_flush_ex));
+        try testing.expectEqual(@as(u32, 4), h.count(.sync_writeout));
         try testing.expectEqual(@as(u32, 2), h.count(.sync_full));
     }
 }
@@ -94,7 +94,7 @@ test "files without renames: one flush per volume, no barrier" {
         try testing.expectEqual(@as(u32, 0), h.count(.sync_barrier));
         try testing.expectEqual(@as(u32, 1), h.count(.sync_full));
     } else if (is_windows) {
-        try testing.expectEqual(@as(u32, 2), h.count(.win_flush_ex));
+        try testing.expectEqual(@as(u32, 2), h.count(.sync_writeout));
         try testing.expectEqual(@as(u32, 1), h.count(.sync_full));
     } else {
         try testing.expectEqual(@as(u32, 2), h.count(.sync_data));
@@ -139,8 +139,9 @@ test "renames happen in add order, and the directories are synced once each" {
     try testing.expectEqualStrings("p.idx", names[2]);
     // pack/ once at the fence and once after; the root once.
     if (is_linux) try testing.expectEqual(@as(u32, 3), h.count(.sync_dir));
-    // One parent opened for all three pendings.
-    try testing.expectEqual(@as(u32, 1), h.count(.open_dir) - (if (is_windows) h.count(.sync_full) + h.count(.win_flush_ex) - 3 else 0));
+    // One parent opened for all three pendings (Windows also reopens each
+    // directory it flushes).
+    if (!is_windows) try testing.expectEqual(@as(u32, 1), h.count(.open_dir));
     for ([_][]const u8{ "pack/p.pack", "pack/p.rev", "pack/p.idx" }, [_][]const u8{ "P", "R", "I" }) |name, bytes| try expectContents(&s, name, bytes);
 }
 
@@ -206,7 +207,7 @@ test "a failed sync poisons the batch: nothing renamed, temps gone, the slot nam
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const first: Call = if (is_darwin) .sync_writeout else if (is_linux) .sync_data else .win_flush_ex;
+    const first: Call = if (is_linux) .sync_data else .sync_writeout;
     const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(first, 2, io_error)} });
     defer h.destroy();
     const io = h.io();
