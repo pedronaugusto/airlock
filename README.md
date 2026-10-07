@@ -178,7 +178,7 @@ pages and Microsoft's documentation, and on the crash model below.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the `FaultIo`,
-  clock and single-fault sweep the tests run on, fetched only for them.
+  clock and `everyFault` the tests run on, fetched only for them.
 
 ## Testing
 
@@ -187,7 +187,7 @@ of a [shakedown](https://github.com/pedronaugusto/shakedown) `FaultIo`, so the
 tests assert the exact calls each level makes on each platform, which fixes
 the barrier counts above. They fault each call with each class of error: a
 refusal, `EIO`, `ENOSPC`, `EINTR`, a cancel and, on Windows, a sharing
-violation and a pending delete. The single-fault sweep runs every one of those
+violation and a pending delete. shakedown's `everyFault` runs every one of those
 at every step of a sync, a replace in each publish mode, a rename, a remove,
 a link swap, a `makePath` and a batch with a fence, and checks that the
 destination is old or new and never torn, that no temp is left, that a failed

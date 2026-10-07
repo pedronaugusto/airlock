@@ -1,8 +1,8 @@
 //! The hooked `Io` airlock's tests run on: shakedown's `FaultIo`, seeded so
 //! temp names repeat from run to run (by its `random_seed`, or by `Seed`
-//! over one a sweep made), under the layer whose `fileSync` is
+//! over one `everyFault` made), under the layer whose `fileSync` is
 //! `sys.hookedSync`. Every raw call airlock makes is a foreign step of the
-//! `FaultIo`, so plans, traces and the single-fault sweep see airlock's
+//! `FaultIo`, so plans, traces and `everyFault` see airlock's
 //! calls and std's in one sequence. A test of a retry deadline puts
 //! shakedown's `Clock` under the `FaultIo` and runs the call through
 //! `drive`.
@@ -20,7 +20,7 @@ pub const RawPlan = shakedown.Plan(Call, Result);
 pub const Hooked = shakedown.Layer(sys.HookedState, .{ .fileSync = sys.hookedSync });
 
 /// `io.random` from a generator seeded per run, for a `FaultIo` someone
-/// else made: shakedown's single-fault sweep makes one per run without a
+/// else made: shakedown's `everyFault` makes one per run without a
 /// `random_seed`, and its determinism check needs every run to draw the
 /// same temp names. A harness of the test's own seeds its `FaultIo`
 /// instead.
@@ -51,7 +51,7 @@ pub const Options = struct {
 pub const Harness = struct {
     gpa: std.mem.Allocator,
     fio: *shakedown.FaultIo,
-    /// Whether `fio` is the harness's own (a sweep hands one in).
+    /// Whether `fio` is the harness's own (`everyFault` hands one in).
     owns_fio: bool,
     plan: RawPlan,
     counters: [16]u32 = undefined,
@@ -85,7 +85,7 @@ pub const Harness = struct {
         return h;
     }
 
-    /// A harness over a `FaultIo` someone else owns, as a sweep's `setUp`
+    /// A harness over a `FaultIo` someone else owns, as an `everyFault` `setUp`
     /// gets one, its `io.random` seeded here.
     pub fn over(gpa: std.mem.Allocator, fio: *shakedown.FaultIo, options: Options) !*Harness {
         const h = try build(gpa, fio, options);
@@ -134,7 +134,7 @@ pub const Harness = struct {
         var future = try base.concurrent(Wrapped.go, .{ task, &done });
         defer future.await(base);
         while (!done.load(.acquire)) {
-            clock.awaitArmed(1, .fromMilliseconds(5)) catch |err| switch (err) {
+            clock.awaitArmed(1, .{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } }) catch |err| switch (err) {
                 // Not sleeping now: running, or done.
                 error.Timeout => continue,
                 error.Canceled => return err,

@@ -1,6 +1,6 @@
-//! The single-fault sweep: every class of error at every step of each
-//! operation, airlock's raw calls and std's `Io` calls alike, through
-//! shakedown's `sweep`. After each run the check asserts what the operation
+//! Every single fault at every step of each operation, airlock's raw calls
+//! and std's `Io` calls alike, through shakedown's `everyFault`. After each
+//! run the check asserts what the operation
 //! promises whatever failed: the destination is old or new and never torn,
 //! no temp is left, a failed sync is never followed by another sync of that
 //! file, an interrupted call is made again, what a run reported is no more
@@ -60,20 +60,15 @@ fn faultClasses(call: Call) []const shakedown.IoFault {
     };
 }
 
-const Sweep = struct {
+const Operation = struct {
     kind: Kind,
     scratch: harness.Scratch = undefined,
     h: *Harness = undefined,
-    pendings: [3]airlock.Pending = undefined,
-    pending_count: usize = 0,
     reached: airlock.Reached = .none,
     published: bool = false,
-    /// A run's scratch and harness outlive its `tearDown`, for `check`;
-    /// the next `setUp` or `finish` ends them.
-    live: bool = false,
 
     /// The destinations each operation writes, and what was there before.
-    fn dests(s: *const Sweep) []const []const u8 {
+    fn dests(s: *const Operation) []const []const u8 {
         return switch (s.kind) {
             .batch => &.{ "a", "b", "c" },
             .batch_two_dirs => &.{ "a", "sub/b", "sub/c" },
@@ -82,8 +77,7 @@ const Sweep = struct {
         };
     }
 
-    pub fn setUp(s: *Sweep, fio: *shakedown.FaultIo) !void {
-        s.finish();
+    pub fn setUp(s: *Operation, fio: *shakedown.FaultIo) !void {
         s.scratch = .init();
         errdefer s.scratch.cleanup();
         try s.scratch.dir().createDirPath(testing.io, "sub");
@@ -100,26 +94,17 @@ const Sweep = struct {
             try s.scratch.dir().symLink(testing.io, "old-target", "a", .{});
         }
         s.h = try Harness.over(testing.allocator, fio, .{});
-        s.live = true;
-        s.pending_count = 0;
         s.reached = .none;
         s.published = false;
     }
 
-    /// What a caller's defer does: every pending ends.
-    pub fn tearDown(s: *Sweep) void {
-        for (s.pendings[0..s.pending_count]) |*p| p.discard(testing.io);
-        s.pending_count = 0;
-    }
-
-    fn finish(s: *Sweep) void {
-        if (!s.live) return;
+    /// `check` has judged the run by now: the harness and the scratch go.
+    pub fn tearDown(s: *Operation) void {
         s.h.destroy();
         s.scratch.cleanup();
-        s.live = false;
     }
 
-    pub fn run(s: *Sweep, base: Io) !void {
+    pub fn run(s: *Operation, base: Io) !void {
         _ = base;
         const io = s.h.io();
         const dir = s.scratch.dir();
@@ -149,31 +134,35 @@ const Sweep = struct {
         s.published = true;
     }
 
-    fn runBatch(s: *Sweep, io: Io) !void {
+    fn runBatch(s: *Operation, io: Io) !void {
+        // What a caller's defers do: every pending ends with the call.
+        var pendings: [3]airlock.Pending = undefined;
+        var count: usize = 0;
+        defer for (pendings[0..count]) |*p| p.discard(io);
         const dir = s.scratch.dir();
         for (s.dests()) |d| {
-            s.pendings[s.pending_count] = try airlock.create(io, dir, d, .{});
-            s.pending_count += 1;
-            try s.pendings[s.pending_count - 1].file().writePositionalAll(io, "new", 0);
+            pendings[count] = try airlock.create(io, dir, d, .{});
+            count += 1;
+            try pendings[count - 1].file().writePositionalAll(io, "new", 0);
         }
         var slots: [8]airlock.Batch.Slot = undefined;
         var batch: airlock.Batch = .init(&slots);
         defer batch.reset(io);
-        try batch.addPending(io, &s.pendings[0], .replace);
-        try batch.addPending(io, &s.pendings[1], .replace);
+        try batch.addPending(io, &pendings[0], .replace);
+        try batch.addPending(io, &pendings[1], .replace);
         try batch.fence();
-        try batch.addPending(io, &s.pendings[2], .replace);
+        try batch.addPending(io, &pendings[2], .replace);
         try batch.addDir(dir);
         s.reached = try batch.commit(io, .{ .parallel = 1 });
     }
 
-    pub fn faultsFor(s: *Sweep, record: shakedown.IoTrace.Record) []const shakedown.IoFault {
+    pub fn faultsFor(s: *Operation, record: shakedown.IoTrace.Record) []const shakedown.IoFault {
         _ = s;
         const f = record.event.foreign orelse return &.{};
         return faultClasses(@fromBackingInt(@as(u8, @intCast(f.call))));
     }
 
-    pub fn check(s: *Sweep, base: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+    pub fn check(s: *Operation, base: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
         _ = base;
         const err: ?anyerror = if (result) |_| null else |e| e;
         try s.checkFiles(err);
@@ -184,7 +173,7 @@ const Sweep = struct {
 
     /// Old or new, never torn; new once the operation succeeded; untouched
     /// if it failed before publishing anything.
-    fn checkFiles(s: *Sweep, err: ?anyerror) !void {
+    fn checkFiles(s: *Operation, err: ?anyerror) !void {
         var buffer: [16]u8 = undefined;
         const published = err == null or err.? == error.PublishedNotDurable;
         const initially: ?[]const u8 = if (s.kind == .create_new or s.kind == .keep_existing) null else "old";
@@ -215,7 +204,7 @@ const Sweep = struct {
         }
     }
 
-    fn checkNoTemps(s: *Sweep, err: ?anyerror) !void {
+    fn checkNoTemps(s: *Operation, err: ?anyerror) !void {
         _ = err;
         try testing.expectEqual(@as(usize, 0), (try s.scratch.entries(".")).prefixed);
         var sub = try s.scratch.dir().openDir(testing.io, "sub", .{ .iterate = true });
@@ -226,7 +215,7 @@ const Sweep = struct {
         }
     }
 
-    fn checkInjected(s: *Sweep, inj: shakedown.Injected, err: ?anyerror) !void {
+    fn checkInjected(s: *Operation, inj: shakedown.Injected, err: ?anyerror) !void {
         if (inj.call != .foreign) return;
         const records = s.h.fio.trace().records();
         var at: ?usize = null;
@@ -260,7 +249,7 @@ const Sweep = struct {
         }
     }
 
-    fn checkModel(s: *Sweep, err: ?anyerror) !void {
+    fn checkModel(s: *Operation, err: ?anyerror) !void {
         if (s.kind == .batch_two_dirs or s.kind == .rename or s.kind == .remove or s.kind == .sync_file or s.kind == .make_path) return;
         var m: model_mod.Model = .init(model_mod.native());
         // The batch's fence comes after its first two renames.
@@ -288,68 +277,67 @@ fn eqlPath(a: ?[]const u8, b: ?[]const u8) bool {
     return std.mem.eql(u8, a.?, b.?);
 }
 
-fn sweepOne(kind: Kind) !void {
+fn everyFault(kind: Kind) !void {
     if (!is_tested_os) return error.SkipZigTest;
-    var ctx: Sweep = .{ .kind = kind };
-    defer ctx.finish();
-    var report: shakedown.SweepReport = .{};
-    defer report.deinit(testing.allocator);
-    const result = shakedown.sweep(testing.allocator, testing.io, &ctx, .{
+    var ctx: Operation = .{ .kind = kind };
+    var report: shakedown.EveryFaultReport = .{};
+    defer report.deinit();
+    const result = shakedown.everyFault(testing.allocator, testing.io, &ctx, .{
         .short = true,
         .diagnostics = &report,
         .errors = &.{ error.InputOutput, error.NoSpaceLeft },
     });
     _ = result catch |err| {
         if (report.failure) |f| {
-            std.debug.print("sweep {t}: {t} at {any}\n{s}\n", .{ kind, f.err, f.injected, f.trace });
+            std.debug.print("every fault {t}: {t} at {any}\n{s}\n", .{ kind, f.err, f.injected, f.trace });
         }
         return err;
     };
 }
 
-test "sweep: replace at data" {
-    try sweepOne(.replace);
+test "every fault: replace at data" {
+    try everyFault(.replace);
 }
 
-test "sweep: replace at ordered" {
-    try sweepOne(.ordered);
+test "every fault: replace at ordered" {
+    try everyFault(.ordered);
 }
 
-test "sweep: create_new" {
-    try sweepOne(.create_new);
+test "every fault: create_new" {
+    try everyFault(.create_new);
 }
 
-test "sweep: keep_existing" {
-    try sweepOne(.keep_existing);
+test "every fault: keep_existing" {
+    try everyFault(.keep_existing);
 }
 
-test "sweep: syncFile" {
-    try sweepOne(.sync_file);
+test "every fault: syncFile" {
+    try everyFault(.sync_file);
 }
 
-test "sweep: rename" {
-    try sweepOne(.rename);
+test "every fault: rename" {
+    try everyFault(.rename);
 }
 
-test "sweep: remove" {
-    try sweepOne(.remove);
+test "every fault: remove" {
+    try everyFault(.remove);
 }
 
-test "sweep: a batch of three with a fence" {
-    try sweepOne(.batch);
+test "every fault: a batch of three with a fence" {
+    try everyFault(.batch);
 }
 
-test "sweep: a batch over two directories" {
-    try sweepOne(.batch_two_dirs);
+test "every fault: a batch over two directories" {
+    try everyFault(.batch_two_dirs);
 }
 
-test "sweep: a symbolic link swap" {
+test "every fault: a symbolic link swap" {
     if (is_windows) return error.SkipZigTest;
-    try sweepOne(.sym_link);
+    try everyFault(.sym_link);
 }
 
-test "sweep: makePath" {
-    try sweepOne(.make_path);
+test "every fault: makePath" {
+    try everyFault(.make_path);
 }
 
 test "the model proves what a real replace reports, and no more" {
