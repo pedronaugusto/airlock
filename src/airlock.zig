@@ -1,6 +1,7 @@
 //! Durable files: sync a file or a directory at a chosen level and learn
-//! what was reached, publish a file atomically, put many files under one
-//! barrier, and tell files apart by identity.
+//! what was reached, publish a file or a symbolic link atomically, create
+//! directories durably, put many files under one barrier, remove the temps
+//! a crash left, and tell files apart by identity.
 //!
 //! Every call that may block takes `io: Io` first and never stores it;
 //! nothing allocates; buffers and slot storage belong to the caller.
@@ -36,7 +37,7 @@ pub const syncPath = platform.syncPath;
 pub const Pending = @import("Pending.zig");
 /// The temp name of a `Pending`: random with a prefix, or exact.
 pub const Temp = Pending.Temp;
-/// The permissions a `Pending` gets.
+/// The permissions a `Pending` gets: by default the destination's.
 pub const Mode = Pending.Mode;
 /// How `create` names, opens and sets up the temp.
 pub const CreateOptions = Pending.CreateOptions;
@@ -51,6 +52,10 @@ pub const WriteFileOptions = Pending.WriteFileOptions;
 /// What `writeFile` can fail with.
 pub const WriteFileError = Pending.WriteFileError;
 
+/// Where a call puts the error behind `error.PublishedNotDurable`.
+pub const Diagnostics = names.Diagnostics;
+/// The errors a sync after a name changed can fail with.
+pub const SyncAfterError = names.SyncAfterError;
 /// The directory syncs and the Windows retry of `rename` and `remove`.
 pub const RenameOptions = names.RenameOptions;
 /// What `rename` can fail with.
@@ -61,6 +66,26 @@ pub const rename = names.rename;
 pub const RemoveError = names.RemoveError;
 /// Removes a file and syncs its directory.
 pub const remove = names.remove;
+/// The syncs of `makePath`.
+pub const MakePathOptions = names.MakePathOptions;
+/// What `makePath` can fail with.
+pub const MakePathError = names.MakePathError;
+/// What `makePath` created and reached.
+pub const Made = names.Made;
+/// Creates the missing directories of a path and syncs each new entry.
+pub const makePath = names.makePath;
+/// The syncs and the temp prefix of `symLink`.
+pub const SymLinkOptions = names.SymLinkOptions;
+/// What `symLink` can fail with.
+pub const SymLinkError = names.SymLinkError;
+/// Points a name at a target atomically: a temp link renamed over it.
+pub const symLink = names.symLink;
+/// How old a leftover temp must be for `pruneTemps`.
+pub const PruneOptions = names.PruneOptions;
+/// What `pruneTemps` can fail with.
+pub const PruneError = names.PruneError;
+/// Removes the random temps a crash left behind, by prefix and age.
+pub const pruneTemps = names.pruneTemps;
 
 /// Many files, publishes and directories under the fewest barriers.
 pub const Batch = @import("Batch.zig");

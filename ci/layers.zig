@@ -10,6 +10,9 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/platform.zig",
         "src/FileId.zig",
     } },
+    .{ .name = "staging", .patterns = &.{
+        "src/Staged.zig",
+    } },
     .{ .name = "operations", .patterns = &.{
         "src/Pending.zig",
         "src/names.zig",
@@ -72,5 +75,7 @@ pub const owned: []const gantry.rules.TokenRule = &.{
         "renameatx_np",
         "linkat",
         "unlinkat",
+        "mkdirat",
+        "symlinkat",
     }, .owners = &.{ "src/sys.zig", "bench/baseline/**" } },
 };

@@ -6,6 +6,7 @@ const Io = std.Io;
 const airlock = @import("airlock.zig");
 const harness = @import("testing/harness.zig");
 const Harness = harness.Harness;
+const expectCalls = harness.expectCalls;
 
 const os = builtin.target.os.tag;
 const is_windows = os == .windows;
@@ -73,7 +74,10 @@ test "a refused directory sync after a rename leaves it ordered, or refuses" {
     const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.sync_dir, .INVAL)} });
     defer h.destroy();
     try testing.expectEqual(airlock.Reached.ordered, try airlock.rename(h.io(), s.dir(), "a", s.dir(), "b", .{}));
-    try testing.expectError(error.LevelUnavailable, airlock.rename(h.io(), s.dir(), "b", s.dir(), "c", .{ .sync = .{ .fallback = .refuse } }));
+    // Refused after the rename: renamed, and not durable.
+    var diagnostics: airlock.Diagnostics = .{};
+    try testing.expectError(error.PublishedNotDurable, airlock.rename(h.io(), s.dir(), "b", s.dir(), "c", .{ .sync = .{ .fallback = .refuse }, .diagnostics = &diagnostics }));
+    try testing.expectEqual(@as(?airlock.SyncAfterError, error.LevelUnavailable), diagnostics.cause);
 }
 
 test "two handles to one file are one file; two files are two" {
@@ -143,4 +147,133 @@ test "a socket cannot be opened as a file, and still has an identity" {
     defer server.deinit(io);
     const by_path = try airlock.FileId.ofPath(io, Io.Dir.cwd(), sock_path, .{});
     try testing.expect(by_path.eql(try airlock.FileId.ofPath(io, s.dir(), "s.sock", .{})));
+}
+
+test "a directory sync that fails after a rename or a remove is PublishedNotDurable" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    try s.write("a", "1");
+    const io_error: harness.Code = if (is_windows) .IO_DEVICE_ERROR else .IO;
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.sync_dir, io_error)} });
+    defer h.destroy();
+    // The name moved; only its durability is in doubt.
+    var diagnostics: airlock.Diagnostics = .{};
+    try testing.expectError(error.PublishedNotDurable, airlock.rename(h.io(), s.dir(), "a", s.dir(), "b", .{ .diagnostics = &diagnostics }));
+    try testing.expectEqual(@as(?airlock.SyncAfterError, error.InputOutput), diagnostics.cause);
+    var buffer: [4]u8 = undefined;
+    try testing.expectEqualStrings("1", s.read("b", &buffer).?);
+    diagnostics = .{};
+    try testing.expectError(error.PublishedNotDurable, airlock.remove(h.io(), s.dir(), "b", .{ .diagnostics = &diagnostics }));
+    try testing.expectEqual(@as(?airlock.SyncAfterError, error.InputOutput), diagnostics.cause);
+    try testing.expectEqual(@as(?[]const u8, null), s.read("b", &buffer));
+}
+
+test "makePath creates each missing directory and syncs the one it went into" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const h = try Harness.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    const io = h.io();
+    const made = try airlock.makePath(io, s.dir(), "objects/ab/cd", .{});
+    try testing.expectEqual(@as(u32, 3), made.created);
+    try testing.expect(made.reached.atLeast(.data));
+    try testing.expectEqual(@as(u32, 3), h.count(.make_dir));
+    // The root, objects/ and objects/ab/ each received a name.
+    try testing.expectEqual(@as(u32, 3), h.count(.sync_dir));
+    (try s.dir().openDir(testing.io, "objects/ab/cd", .{})).close(testing.io);
+
+    // Only what is missing: objects/ab exists, objects/ab/ef does not.
+    h.reset();
+    const one = try airlock.makePath(io, s.dir(), "objects/ab/ef/", .{});
+    try testing.expectEqual(@as(u32, 1), one.created);
+    try testing.expectEqual(@as(u32, 1), h.count(.sync_dir));
+
+    // Nothing missing: nothing created, nothing synced, and nothing claimed.
+    h.reset();
+    const none = try airlock.makePath(io, s.dir(), "objects/ab", .{});
+    try testing.expectEqual(airlock.Made{ .reached = .none, .created = 0 }, none);
+    try testing.expectEqual(@as(u32, 0), h.count(.make_dir) + h.count(.sync_dir));
+
+    // A file in the way.
+    try s.write("objects/file", "x");
+    try testing.expectError(error.NotDir, airlock.makePath(io, s.dir(), "objects/file/x", .{}));
+}
+
+test "makePath starts again when a directory vanishes under it" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const gone: harness.Code = if (is_windows) .OBJECT_PATH_NOT_FOUND else .NOENT;
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(.make_dir, 1, gone)} });
+    defer h.destroy();
+    const made = try airlock.makePath(h.io(), s.dir(), "a/b", .{});
+    try testing.expectEqual(@as(u32, 2), made.created);
+    (try s.dir().openDir(testing.io, "a/b", .{})).close(testing.io);
+}
+
+test "makePath reports a failed sync after a create as PublishedNotDurable" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const io_error: harness.Code = if (is_windows) .IO_DEVICE_ERROR else .IO;
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(.sync_dir, 1, io_error)} });
+    defer h.destroy();
+    var diagnostics: airlock.Diagnostics = .{};
+    try testing.expectError(error.PublishedNotDurable, airlock.makePath(h.io(), s.dir(), "a/b", .{ .diagnostics = &diagnostics }));
+    try testing.expectEqual(@as(?airlock.SyncAfterError, error.InputOutput), diagnostics.cause);
+}
+
+test "symLink swaps a link in one rename, and syncs the link before its name" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    if (is_windows) {
+        try testing.expectError(error.OperationUnsupported, airlock.symLink(testing.io, s.dir(), "release-1", "current", .{}));
+        return;
+    }
+    try s.write("release-1", "1");
+    try s.write("release-2", "2");
+    const h = try Harness.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    const io = h.io();
+    try testing.expect((try airlock.symLink(io, s.dir(), "release-1", "current", .{})).atLeast(.data));
+    try expectCalls(h, &.{ .symlink, .sync_dir, .rename, .sync_dir });
+    h.reset();
+    _ = try airlock.symLink(io, s.dir(), "release-2", "current", .{ .sync = .{ .level = .ordered } });
+    try expectCalls(h, &.{ .symlink, .sync_dir, .rename });
+    var buffer: [64]u8 = undefined;
+    try testing.expectEqualStrings("release-2", buffer[0..try s.dir().readLink(testing.io, "current", &buffer)]);
+    try testing.expectEqualStrings("2", s.read("current", &buffer).?);
+    try testing.expectEqual(@as(usize, 0), (try s.entries(".")).prefixed);
+}
+
+test "symLink leaves nothing behind when the rename fails" {
+    if (is_windows or !is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(.rename, 1, .ACCES)} });
+    defer h.destroy();
+    try testing.expectError(error.AccessDenied, airlock.symLink(h.io(), s.dir(), "release-1", "current", .{}));
+    try testing.expectEqual(@as(usize, 0), (try s.entries(".")).count);
+}
+
+test "pruneTemps removes old random temps and nothing else" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const temps = [_][]const u8{ ".aaaaaaaaaaaaaaaaaaaaaaaaaa", ".h7777777777777777777777777" };
+    const kept = [_][]const u8{ "keep", ".gitignore", "main.lock", ".i7777777777777777777777777", "tmp_obj_aaaaaaaaaaaaaaaaaaaaaaaaaa" };
+    for (temps ++ kept) |name| try s.write(name, "x");
+    const h = try Harness.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    // Fresh temps may be another process's work in progress.
+    try testing.expectEqual(@as(u32, 0), try airlock.pruneTemps(h.io(), s.dir(), ".", .{}));
+    try testing.expectEqual(@as(u32, 2), try airlock.pruneTemps(h.io(), s.dir(), ".", .{ .older_than = .fromNanoseconds(0) }));
+    try testing.expectEqual(@as(u32, 2), h.count(.unlink));
+    var buffer: [4]u8 = undefined;
+    for (temps) |name| try testing.expectEqual(@as(?[]const u8, null), s.read(name, &buffer));
+    for (kept) |name| try testing.expect(s.read(name, &buffer) != null);
+    try testing.expectError(error.BadPathName, airlock.pruneTemps(h.io(), s.dir(), "a/", .{}));
 }

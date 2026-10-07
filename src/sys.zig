@@ -70,6 +70,10 @@ pub const Call = enum(u8) {
     win_rename_ex,
     /// Linux `fcntl(F_GETFL)`: is a directory handle `O_PATH`?
     getfl,
+    /// A new directory: `mkdirat`; on Windows a directory created by name.
+    make_dir,
+    /// A new symbolic link: `symlinkat`.
+    symlink,
 };
 
 /// An errno on POSIX, an NTSTATUS on Windows.
@@ -575,6 +579,70 @@ pub fn unlink(io: Io, dir: Handle, name: []const u8) UnlinkError!void {
     };
 }
 
+pub const MakeDirError = Io.Dir.CreateDirError;
+
+fn mkdiratRaw(dir: posix.fd_t, path: [*:0]const u8, mode: posix.mode_t) if (is_linux) usize else c_int {
+    if (is_linux) return linux.mkdirat(dir, path, mode);
+    return std.c.mkdirat(dir, path, mode);
+}
+
+/// `mkdirat(name, 0777)`: umask applies. Windows creates it by name.
+pub fn makeDir(io: Io, dir: Handle, name: []const u8) MakeDirError!void {
+    if (is_windows) return makeDirWindows(io, dir, name);
+    const path = try posix.toPosixPath(name);
+    const e = try retrying(io, .make_dir, name, mkdiratRaw, .{ dir, &path, 0o777 });
+    return switch (e) {
+        .SUCCESS => {},
+        .EXIST => error.PathAlreadyExists,
+        .NOENT => error.FileNotFound,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .DQUOT => error.DiskQuota,
+        .LOOP => error.SymLinkLoop,
+        .MLINK => error.LinkQuotaExceeded,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOMEM => error.SystemResources,
+        .NOSPC => error.NoSpaceLeft,
+        .NOTDIR => error.NotDir,
+        .ROFS => error.ReadOnlyFileSystem,
+        else => posix.unexpectedErrno(e),
+    };
+}
+
+pub const SymLinkError = Io.Dir.SymLinkError || error{OperationUnsupported};
+
+fn symlinkatRaw(target: [*:0]const u8, dir: posix.fd_t, path: [*:0]const u8) if (is_linux) usize else c_int {
+    if (is_linux) return linux.symlinkat(target, dir, path);
+    return std.c.symlinkat(target, dir, path);
+}
+
+/// `symlinkat(target, dir, name)`. Windows: `error.OperationUnsupported`,
+/// since creating a symbolic link there needs a privilege or developer
+/// mode.
+// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
+pub fn symLink(io: Io, target: []const u8, dir: Handle, name: []const u8) SymLinkError!void {
+    if (is_windows) return error.OperationUnsupported;
+    const target_z = try posix.toPosixPath(target);
+    const path = try posix.toPosixPath(name);
+    const e = try retrying(io, .symlink, name, symlinkatRaw, .{ &target_z, dir, &path });
+    return switch (e) {
+        .SUCCESS => {},
+        .EXIST => error.PathAlreadyExists,
+        .NOENT => error.FileNotFound,
+        .ACCES => error.AccessDenied,
+        .PERM => error.PermissionDenied,
+        .DQUOT => error.DiskQuota,
+        .IO => error.FileSystem,
+        .LOOP => error.SymLinkLoop,
+        .NAMETOOLONG => error.NameTooLong,
+        .NOMEM => error.SystemResources,
+        .NOSPC => error.NoSpaceLeft,
+        .NOTDIR => error.NotDir,
+        .ROFS => error.ReadOnlyFileSystem,
+        else => posix.unexpectedErrno(e),
+    };
+}
+
 /// A file's identity as the filesystem numbers it.
 pub const Id = struct { volume: u64, file: u128 };
 
@@ -819,6 +887,36 @@ pub fn openDirWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, flush_
         .NOT_SUPPORTED, .INVALID_DEVICE_REQUEST => error.NoDevice,
         else => windows.unexpectedStatus(status),
     };
+}
+
+fn makeDirWindows(io: Io, root: windows.HANDLE, name: []const u8) MakeDirError!void {
+    const space = try ntName(root, name);
+    var nt = space.string();
+    const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
+    const attr: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = if (absolute) null else root, .ObjectName = &nt };
+    const access: windows.ACCESS_MASK = .{
+        .STANDARD = .{ .SYNCHRONIZE = true },
+        .SPECIFIC = .{ .FILE_DIRECTORY = .{ .LIST = true, .READ_ATTRIBUTES = true } },
+    };
+    var handle: windows.HANDLE = undefined;
+    const status = try retryingNt(io, .make_dir, name, ntCreate, .{
+        &handle,                                                                  access,
+        &attr,                                                                    windows.FILE.ATTRIBUTE{ .NORMAL = true },
+        windows.FILE.SHARE.VALID_FLAGS,                                           windows.FILE.CREATE_DISPOSITION.CREATE,
+        windows.FILE.MODE{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
+    });
+    switch (status) {
+        .SUCCESS => release(io, handle),
+        .OBJECT_NAME_COLLISION => return error.PathAlreadyExists,
+        .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
+        .NOT_A_DIRECTORY => return error.NotDir,
+        .ACCESS_DENIED => return error.AccessDenied,
+        .OBJECT_NAME_INVALID => return error.BadPathName,
+        .DISK_FULL => return error.NoSpaceLeft,
+        .MEDIA_WRITE_PROTECTED => return error.ReadOnlyFileSystem,
+        .BAD_NETWORK_PATH, .BAD_NETWORK_NAME => return error.NetworkNotFound,
+        else => return windows.unexpectedStatus(status),
+    }
 }
 
 /// What a Windows file open by name is for.

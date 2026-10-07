@@ -214,3 +214,37 @@ test "the real calls, without a hook, reach what the table says" {
     }
     try testing.expectEqual(airlock.Reached.full, try airlock.syncDir(testing.io, s.dir(), .{}));
 }
+
+test "a retry waits with doubling, jittered sleeps on the clock until its deadline" {
+    const platform = @import("platform.zig");
+    const h = try Harness.create(testing.allocator, testing.io, .{ .clock = true });
+    defer h.destroy();
+    const Retry = struct {
+        io: Io,
+        tries: u32 = 0,
+        result: Io.Cancelable!void = {},
+
+        const Self = @This();
+
+        pub fn run(r: *Self) void {
+            var backoff: platform.Backoff = .start(r.io, .fromMilliseconds(2000));
+            while (true) {
+                r.tries += 1;
+                const again = backoff.wait(r.io) catch |err| {
+                    r.result = err;
+                    return;
+                };
+                if (!again) return;
+            }
+        }
+    };
+    var retry: Retry = .{ .io = h.io() };
+    try h.drive(testing.io, &retry);
+    try retry.result;
+    // From 1 ms, doubling to a 100 ms cap, each scaled by [0.5, 1.5):
+    // about 25 sleeps fill 2 s; the last one ends at the deadline.
+    const sleeps = h.fio.count(.sleep);
+    try testing.expect(sleeps >= 15 and sleeps <= 45);
+    try testing.expectEqual(@as(u64, retry.tries - 1), sleeps);
+    try testing.expectEqual(@as(i96, std.time.ns_per_s + 2 * std.time.ns_per_s), h.clock.?.read(.awake).nanoseconds);
+}

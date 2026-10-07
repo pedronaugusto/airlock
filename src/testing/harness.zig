@@ -1,8 +1,11 @@
-//! The hooked `Io` airlock's tests run on: shakedown's `FaultIo` under a
-//! seeded random layer, under the layer whose `fileSync` is
+//! The hooked `Io` airlock's tests run on: shakedown's `FaultIo`, seeded so
+//! temp names repeat from run to run (by its `random_seed`, or by `Seed`
+//! over one a sweep made), under the layer whose `fileSync` is
 //! `sys.hookedSync`. Every raw call airlock makes is a foreign step of the
 //! `FaultIo`, so plans, traces and the single-fault sweep see airlock's
-//! calls and std's in one sequence.
+//! calls and std's in one sequence. A test of a retry deadline puts
+//! shakedown's `Clock` under the `FaultIo` and runs the call through
+//! `drive`.
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -14,51 +17,33 @@ pub const Result = sys.Result;
 pub const Code = sys.Code;
 pub const RawPlan = shakedown.Plan(Call, Result);
 
-/// `io.random` from a generator the test seeds, so temp names repeat from
-/// run to run.
+pub const Hooked = shakedown.Layer(sys.HookedState, .{ .fileSync = sys.hookedSync });
+
+/// `io.random` from a generator seeded per run, for a `FaultIo` someone
+/// else made: shakedown's single-fault sweep makes one per run without a
+/// `random_seed`, and its determinism check needs every run to draw the
+/// same temp names. A harness of the test's own seeds its `FaultIo`
+/// instead.
 pub const Seed = struct {
     prng: std.Random.DefaultPrng,
 
     fn random(userdata: ?*anyopaque, buffer: []u8) void {
-        const layer = Seeded.of(userdata);
-        layer.state.prng.random().bytes(buffer);
+        Seeded.of(userdata).state.prng.random().bytes(buffer);
     }
 };
 pub const Seeded = shakedown.Layer(Seed, .{ .random = Seed.random });
-
-pub const Hooked = shakedown.Layer(sys.HookedState, .{ .fileSync = sys.hookedSync });
-
-/// Time that moves only when the code under test sleeps: a sleep returns
-/// at once and moves the clock by its length. For retry loops with a
-/// deadline, which then run to their deadline without waiting.
-pub const Time = struct {
-    nanoseconds: i96 = std.time.ns_per_s,
-    sleeps: u32 = 0,
-
-    fn now(userdata: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
-        _ = clock;
-        return .fromNanoseconds(Timed.of(userdata).state.nanoseconds);
-    }
-
-    fn sleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
-        const t = &Timed.of(userdata).state;
-        t.sleeps += 1;
-        switch (timeout) {
-            .none => {},
-            .duration => |d| t.nanoseconds += d.raw.nanoseconds,
-            .deadline => |d| t.nanoseconds = @max(t.nanoseconds, d.raw.nanoseconds),
-        }
-    }
-};
-pub const Timed = shakedown.Layer(Time, .{ .now = Time.now, .sleep = Time.sleep });
 
 pub const Options = struct {
     /// Faults by airlock call: the n-th `sync_full`, say.
     plan: []const RawPlan.Entry = &.{},
     trace: shakedown.IoTrace.Mode = .all,
     seed: u64 = 1,
-    /// Run on `Time` under the `FaultIo`: sleeps return at once.
-    timed: bool = false,
+    /// Put shakedown's `Clock` under the `FaultIo`: time moves only when
+    /// `drive` moves it.
+    clock: bool = false,
+    /// POSIX: count this process's open descriptors at every raw call and
+    /// keep the most seen in `peak_descriptors`.
+    sample_descriptors: bool = false,
 };
 
 /// One test's hooked `Io` over a `FaultIo`. Must not move after `io()`;
@@ -73,32 +58,43 @@ pub const Harness = struct {
     fired: [32]RawPlan.Fired = undefined,
     mutex: std.atomic.Mutex = .unlocked,
     hook: sys.Hook,
-    seeded: Seeded,
+    /// The seeded layer over a `FaultIo` someone else made (see `Seed`).
+    seeded: ?Seeded = null,
     hooked: Hooked,
-    /// The time layer under `fio`, with `Options.timed`.
-    timed: ?*Timed = null,
+    /// The clock under `fio`, with `Options.clock`.
+    clock: ?*shakedown.Clock = null,
+    /// With `Options.sample_descriptors`: the most descriptors open at any
+    /// raw call since the last `reset`.
+    peak_descriptors: ?usize = null,
 
     pub fn create(gpa: std.mem.Allocator, base: Io, options: Options) !*Harness {
-        var timed: ?*Timed = null;
+        var clock: ?*shakedown.Clock = null;
         var under = base;
-        if (options.timed) {
-            const t = try gpa.create(Timed);
-            t.* = .init(base, .{});
-            timed = t;
-            under = t.io();
+        if (options.clock) {
+            const c = try gpa.create(shakedown.Clock);
+            c.* = .init(base, .{});
+            clock = c;
+            under = c.io();
         }
-        errdefer if (timed) |t| gpa.destroy(t);
-        const fio = try shakedown.FaultIo.init(gpa, under, .{ .trace = options.trace });
+        errdefer if (clock) |c| gpa.destroy(c);
+        const fio = try shakedown.FaultIo.init(gpa, under, .{ .trace = options.trace, .random_seed = options.seed });
         errdefer fio.deinit();
-        const h = try over(gpa, fio, options);
+        const h = try build(gpa, fio, options);
         h.owns_fio = true;
-        h.timed = timed;
+        h.clock = clock;
         return h;
     }
 
     /// A harness over a `FaultIo` someone else owns, as a sweep's `setUp`
-    /// gets one.
+    /// gets one, its `io.random` seeded here.
     pub fn over(gpa: std.mem.Allocator, fio: *shakedown.FaultIo, options: Options) !*Harness {
+        const h = try build(gpa, fio, options);
+        h.seeded = .init(fio.io(), .{ .prng = .init(options.seed) });
+        h.hooked = .init(h.seeded.?.io(), .{ .hook = &h.hook });
+        return h;
+    }
+
+    fn build(gpa: std.mem.Allocator, fio: *shakedown.FaultIo, options: Options) !*Harness {
         const h = try gpa.create(Harness);
         h.* = .{
             .gpa = gpa,
@@ -106,20 +102,45 @@ pub const Harness = struct {
             .owns_fio = false,
             .plan = undefined,
             .hook = undefined,
-            .seeded = .init(fio.io(), .{ .prng = .init(options.seed) }),
             .hooked = undefined,
         };
         std.debug.assert(options.plan.len <= h.counters.len);
+        if (options.sample_descriptors) h.peak_descriptors = 0;
         h.plan = .init(options.plan, .{ .steps = fio.steps(), .counters = &h.counters, .fired = &h.fired });
         h.hook = .{ .ctx = h, .call = decide, .base = fio.io() };
-        h.hooked = .init(h.seeded.io(), .{ .hook = &h.hook });
+        h.hooked = .init(fio.io(), .{ .hook = &h.hook });
         return h;
     }
 
     pub fn destroy(h: *Harness) void {
         if (h.owns_fio) h.fio.deinit();
-        if (h.timed) |t| h.gpa.destroy(t);
+        if (h.clock) |c| h.gpa.destroy(c);
         h.gpa.destroy(h);
+    }
+
+    /// Runs `task.run()` on another task of `base`, moving the clock to
+    /// each timer it arms until it returns, so a retry loop with a deadline
+    /// runs to that deadline without waiting for it. Needs `Options.clock`.
+    pub fn drive(h: *Harness, base: Io, task: anytype) !void {
+        const clock = h.clock.?;
+        const Task = @TypeOf(task.*);
+        var done: std.atomic.Value(bool) = .init(false);
+        const Wrapped = struct {
+            fn go(t: *Task, finished: *std.atomic.Value(bool)) void {
+                t.run();
+                finished.store(true, .release);
+            }
+        };
+        var future = try base.concurrent(Wrapped.go, .{ task, &done });
+        defer future.await(base);
+        while (!done.load(.acquire)) {
+            clock.awaitArmed(1, .fromMilliseconds(5)) catch |err| switch (err) {
+                // Not sleeping now: running, or done.
+                error.Timeout => continue,
+                error.Canceled => return err,
+            };
+            _ = clock.advanceToNext();
+        }
     }
 
     /// The `Io` to hand airlock.
@@ -129,6 +150,7 @@ pub const Harness = struct {
 
     fn decide(ctx: *anyopaque, call: Call, path: ?[]const u8) ?Result {
         const h: *Harness = @ptrCast(@alignCast(ctx)); // safe: the hook's ctx is its harness
+        if (h.peak_descriptors) |peak| h.peak_descriptors = @max(peak, openDescriptors());
         const begun = h.fio.beginForeign(Call, call, path);
         var result: ?Result = null;
         if (begun.fault) |fault| switch (fault) {
@@ -175,12 +197,30 @@ pub const Harness = struct {
         h.plan = .init(&.{}, .{ .steps = h.fio.steps(), .counters = &h.counters, .fired = &h.fired });
     }
 
-    /// Forgets the trace and the counts, keeping the plan.
+    /// Forgets the trace, the counts and the descriptor peak, keeping the
+    /// plan.
     pub fn reset(h: *Harness) void {
         h.fio.reset();
         h.plan.reset();
+        if (h.peak_descriptors != null) h.peak_descriptors = 0;
     }
 };
+
+/// How many descriptors this process has open (POSIX; 0 elsewhere).
+pub fn openDescriptors() usize {
+    const os = builtin.target.os.tag;
+    if (os == .windows) return 0;
+    var n: usize = 0;
+    var fd: i32 = 0;
+    while (fd < 4096) : (fd += 1) {
+        const open = if (os == .linux)
+            std.os.linux.errno(std.os.linux.fcntl(fd, std.os.linux.F.GETFD, 0)) == .SUCCESS
+        else
+            std.c.fcntl(fd, std.c.F.GETFD) != -1;
+        if (open) n += 1;
+    }
+    return n;
+}
 
 /// The error a fault names, as a code the hook returns: `error.IO` is
 /// `EIO`, `error.SHARING_VIOLATION` is that NTSTATUS. `error.Canceled` is a

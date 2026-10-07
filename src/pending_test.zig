@@ -31,6 +31,18 @@ fn expectContents(s: *harness.Scratch, name: []const u8, expected: ?[]const u8) 
     }
 }
 
+/// A commit for `Harness.drive` to run on another task.
+const Commit = struct {
+    p: *airlock.Pending,
+    io: Io,
+    options: airlock.Pending.CommitOptions,
+    result: airlock.Pending.CommitError!airlock.Pending.Committed = undefined,
+
+    pub fn run(c: *Commit) void {
+        c.result = c.p.commit(c.io, c.options);
+    }
+};
+
 /// No temp is left: no entry starts with the default prefix.
 fn expectNoTemps(s: *harness.Scratch) !void {
     try testing.expectEqual(@as(usize, 0), (try s.entries(".")).prefixed);
@@ -48,10 +60,12 @@ test "a replace at data: 2 F on Linux and Windows, 1 B + 1 F on Darwin" {
     try testing.expectEqual(if (is_darwin) airlock.Reached.full else airlock.Reached.data, done.reached);
     try expectContents(&s, "HEAD", "new");
     try expectNoTemps(&s);
+    // The temp takes the permissions of the file it replaces (on Windows
+    // only a read-only attribute, which "HEAD" does not have).
     if (is_windows) {
         try expectCalls(h, &.{ .create_temp, .sync_data, .open_dir, .win_rename_ex, .sync_dir, .close, .close });
     } else {
-        try expectCalls(h, &.{ .create_temp, temp_sync, .close, .rename, .sync_dir });
+        try expectCalls(h, &.{ .create_temp, .set_mode, temp_sync, .close, .rename, .sync_dir });
     }
 }
 
@@ -166,10 +180,10 @@ test "a failed sync poisons: the temp is gone, the destination untouched, no ren
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "HEAD", .{});
     defer p.discard(h.io());
-    try p.file.writePositionalAll(h.io(), "new", 0);
+    try p.file().writePositionalAll(h.io(), "new", 0);
     try testing.expectError(error.InputOutput, p.commit(h.io(), .{}));
-    try testing.expectEqual(airlock.Pending.State.poisoned, p.state);
-    try testing.expectEqual(@as(?anyerror, error.InputOutput), p.cause);
+    try testing.expectEqual(airlock.Pending.State.poisoned, p.state());
+    try testing.expectEqual(@as(?anyerror, error.InputOutput), p.cause());
     try testing.expectError(error.Poisoned, p.commit(h.io(), .{}));
     try expectContents(&s, "HEAD", "old");
     try expectNoTemps(&s);
@@ -203,10 +217,10 @@ test "a directory sync that fails after the rename is PublishedNotDurable, with 
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
-    try p.file.writePositionalAll(h.io(), "new", 0);
+    try p.file().writePositionalAll(h.io(), "new", 0);
     try testing.expectError(error.PublishedNotDurable, p.commit(h.io(), .{}));
-    try testing.expectEqual(@as(?anyerror, error.InputOutput), p.cause);
-    try testing.expectEqual(airlock.Pending.State.published, p.state);
+    try testing.expectEqual(@as(?anyerror, error.InputOutput), p.cause());
+    try testing.expectEqual(airlock.Pending.State.published, p.state());
     try expectContents(&s, "a", "new");
     try expectNoTemps(&s);
 }
@@ -221,7 +235,7 @@ test "a cancel before the rename publishes nothing; after it, PublishedNotDurabl
     var p = try airlock.create(before.io(), s.dir(), "a", .{});
     defer p.discard(before.io());
     try testing.expectError(error.Canceled, p.commit(before.io(), .{}));
-    try testing.expectEqual(airlock.Pending.State.synced, p.state);
+    try testing.expectEqual(airlock.Pending.State.synced, p.state());
     try expectContents(&s, "a", null);
     // The retry renames without a second sync.
     _ = try p.commit(before.io(), .{});
@@ -233,7 +247,7 @@ test "a cancel before the rename publishes nothing; after it, PublishedNotDurabl
     var q = try airlock.create(after.io(), s.dir(), "b", .{});
     defer q.discard(after.io());
     try testing.expectError(error.PublishedNotDurable, q.commit(after.io(), .{}));
-    try testing.expectEqual(@as(?anyerror, error.Canceled), q.cause);
+    try testing.expectEqual(@as(?anyerror, error.Canceled), q.cause());
 }
 
 test "a rename refused for access stays synced, and the retry makes no second sync" {
@@ -242,17 +256,19 @@ test "a rename refused for access stays synced, and the retry makes no second sy
     defer s.cleanup();
     const rename_call: Call = if (is_windows) .win_rename_ex else .rename;
     const denied: harness.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
-    // Windows retries a denial until the deadline: the time layer makes
-    // that instant.
+    // Windows retries a denial until the deadline: the clock makes that
+    // instant.
     const h = try Harness.create(testing.allocator, testing.io, .{
         .plan = &.{.{ .at = .{ .nth = .{ .call = rename_call, .n = 1 } }, .fault = .{ .code = denied }, .times = if (is_windows) 0 else 1 }},
-        .timed = true,
+        .clock = true,
     });
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
-    try testing.expectError(error.AccessDenied, p.commit(h.io(), .{ .busy_deadline = .fromMilliseconds(50) }));
-    try testing.expectEqual(airlock.Pending.State.synced, p.state);
+    var first: Commit = .{ .p = &p, .io = h.io(), .options = .{ .busy_deadline = .fromMilliseconds(50) } };
+    try h.drive(testing.io, &first);
+    try testing.expectError(error.AccessDenied, first.result);
+    try testing.expectEqual(airlock.Pending.State.synced, p.state());
     h.clearPlan();
     _ = try p.commit(h.io(), .{});
     try testing.expectEqual(@as(u32, 1), h.count(temp_sync));
@@ -263,17 +279,19 @@ test "Windows retries a busy rename with backoff until the deadline" {
     if (!is_windows) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.win_rename_ex, .SHARING_VIOLATION)}, .timed = true });
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.win_rename_ex, .SHARING_VIOLATION)}, .clock = true });
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
-    try testing.expectError(error.FileBusy, p.commit(h.io(), .{ .busy_deadline = .fromMilliseconds(2000) }));
-    const t = h.timed.?.state;
+    var commit: Commit = .{ .p = &p, .io = h.io(), .options = .{ .busy_deadline = .fromMilliseconds(2000) } };
+    try h.drive(testing.io, &commit);
+    try testing.expectError(error.FileBusy, commit.result);
     // Doubling from 1 ms, capped at 100 ms, with jitter in [0.5, 1.5):
     // about 25 sleeps fill 2 s, and the last one stops at the deadline.
-    try testing.expect(t.sleeps >= 15 and t.sleeps <= 45);
-    try testing.expectEqual(t.sleeps + 1, h.count(.win_rename_ex));
-    try testing.expectEqual(airlock.Pending.State.synced, p.state);
+    const sleeps = h.fio.count(.sleep);
+    try testing.expect(sleeps >= 15 and sleeps <= 45);
+    try testing.expectEqual(sleeps + 1, h.count(.win_rename_ex));
+    try testing.expectEqual(airlock.Pending.State.synced, p.state());
 }
 
 test "refuse on Darwin decides before the rename: a refused flush publishes nothing" {
@@ -288,7 +306,7 @@ test "refuse on Darwin decides before the rename: a refused flush publishes noth
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
-    try p.file.writePositionalAll(h.io(), "new", 0);
+    try p.file().writePositionalAll(h.io(), "new", 0);
     try testing.expectError(error.LevelUnavailable, p.commit(h.io(), .{ .fallback = .refuse }));
     try testing.expectEqual(@as(u32, 0), h.count(.rename));
     p.discard(h.io());
@@ -305,7 +323,7 @@ test "refuse on Linux learns of a refused directory sync after the rename" {
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
     try testing.expectError(error.PublishedNotDurable, p.commit(h.io(), .{ .fallback = .refuse }));
-    try testing.expectEqual(@as(?anyerror, error.LevelUnavailable), p.cause);
+    try testing.expectEqual(@as(?anyerror, error.LevelUnavailable), p.cause());
     // Reported, a refused directory sync leaves the publish ordered.
     const reported = try airlock.writeFile(h.io(), s.dir(), "b", "2", .{});
     try testing.expectEqual(airlock.Reached.ordered, reported.reached);
@@ -321,7 +339,7 @@ test "an exact name is a lock: taken is PathAlreadyExists, and it publishes" {
     defer lock.discard(io);
     try testing.expectError(error.PathAlreadyExists, airlock.create(io, s.dir(), "refs/heads/main", .{ .temp = .{ .exact = "main.lock" } }));
     try testing.expectError(error.BadPathName, airlock.create(io, s.dir(), "refs/heads/main", .{ .temp = .{ .exact = "a/main.lock" } }));
-    try lock.file.writePositionalAll(io, "0123", 0);
+    try lock.file().writePositionalAll(io, "0123", 0);
     // relic's lock commit at ordered: one file sync, no directory sync.
     const h = try Harness.create(testing.allocator, io, .{});
     defer h.destroy();
@@ -388,7 +406,7 @@ test "a writeback error is a failed sync at commit" {
     const w = p.writer(h.io(), &buffer);
     try testing.expectError(error.WriteFailed, w.writeAll("0123456789"));
     try testing.expectError(error.InputOutput, p.commit(h.io(), .{}));
-    try testing.expectEqual(airlock.Pending.State.poisoned, p.state);
+    try testing.expectEqual(airlock.Pending.State.poisoned, p.state());
     try expectNoTemps(&s);
 }
 
@@ -434,4 +452,73 @@ test "Windows: a replace succeeds while a reader holds the target with delete sh
     defer reader.close(testing.io);
     _ = try airlock.writeFile(testing.io, s.dir(), "a", "new", .{});
     try expectContents(&s, "a", "new");
+}
+
+test "a retried commit asking for a stronger level than its first sync is LevelUnavailable" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const rename_call: Call = if (is_windows) .win_rename_ex else .rename;
+    const denied: harness.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(rename_call, 1, denied)} });
+    defer h.destroy();
+    var p = try airlock.create(h.io(), s.dir(), "a", .{});
+    defer p.discard(h.io());
+    try testing.expectError(error.AccessDenied, p.commit(h.io(), .{ .level = .ordered, .busy_deadline = .fromNanoseconds(0) }));
+    // In every build mode: the temp was synced at ordered, and on POSIX it
+    // is closed, so nothing can make it stronger now.
+    try testing.expectError(error.LevelUnavailable, p.commit(h.io(), .{ .level = .data }));
+    try testing.expectEqual(airlock.Reached.ordered, (try p.commit(h.io(), .{ .level = .ordered })).reached);
+    try expectContents(&s, "a", "");
+}
+
+test "a replace keeps a private file private" {
+    if (is_windows or !is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const io = testing.io;
+    try s.write("credentials", "old");
+    try s.dir().setFilePermissions(io, "credentials", .fromMode(0o600), .{});
+    _ = try airlock.writeFile(io, s.dir(), "credentials", "new", .{});
+    try testing.expectEqual(@as(std.posix.mode_t, 0o600), (try s.dir().statFile(io, "credentials", .{})).permissions.toMode() & 0o777);
+    try expectContents(&s, "credentials", "new");
+}
+
+test "a failed write through the writer poisons the pending" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    try s.write("a", "old");
+    const h = try Harness.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    try h.fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .file_write_streaming, .n = 1 } }, .fault = .{ .fail = error.NoSpaceLeft } }});
+    var p = try airlock.create(h.io(), s.dir(), "a", .{});
+    defer p.discard(h.io());
+    var buffer: [4]u8 = undefined;
+    const w = p.writer(h.io(), &buffer);
+    try testing.expectError(error.WriteFailed, w.writeAll("0123456789"));
+    // A caller that commits anyway: what reached the file is unknown, so
+    // nothing is published.
+    try testing.expectError(error.NoSpaceLeft, p.commit(h.io(), .{}));
+    try expectContents(&s, "a", "old");
+    try expectNoTemps(&s);
+}
+
+test "the writer writes a long run of one byte in a few calls" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const h = try Harness.create(testing.allocator, testing.io, .{ .trace = .off });
+    defer h.destroy();
+    var p = try airlock.create(h.io(), s.dir(), "pad", .{});
+    defer p.discard(h.io());
+    var buffer: [4096]u8 = undefined;
+    const w = p.writer(h.io(), &buffer);
+    try w.writeAll("head");
+    try w.splatByteAll(0, 1 << 16);
+    _ = try p.commit(h.io(), .{});
+    // A buffer's worth per call: 64 KiB through a 4 KiB buffer.
+    try testing.expect(h.fio.count(.file_write_streaming) <= 24);
+    const stat = try s.dir().statFile(testing.io, "pad", .{});
+    try testing.expectEqual(@as(u64, 4 + (1 << 16)), stat.size);
 }

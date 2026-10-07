@@ -86,7 +86,7 @@ const Sweep = struct {
             for (s.dests()) |d| try s.scratch.write(d, "old");
         }
         if (s.kind == .rename) try s.scratch.write("src", "new");
-        s.h = try Harness.over(testing.allocator, fio, .{ .timed = false });
+        s.h = try Harness.over(testing.allocator, fio, .{});
         s.live = true;
         s.pending_count = 0;
         s.reached = .none;
@@ -139,7 +139,7 @@ const Sweep = struct {
         for (s.dests()) |d| {
             s.pendings[s.pending_count] = try airlock.create(io, dir, d, .{});
             s.pending_count += 1;
-            try s.pendings[s.pending_count - 1].file.writePositionalAll(io, "new", 0);
+            try s.pendings[s.pending_count - 1].file().writePositionalAll(io, "new", 0);
         }
         var slots: [8]airlock.Batch.Slot = undefined;
         var batch: airlock.Batch = .init(&slots);

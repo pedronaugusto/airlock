@@ -32,7 +32,7 @@ fn expectContents(s: *harness.Scratch, name: []const u8, expected: ?[]const u8) 
 fn pending(io: Io, dir: Io.Dir, name: []const u8, bytes: []const u8) !airlock.Pending {
     var p = try airlock.create(io, dir, name, .{});
     errdefer p.discard(io);
-    try p.file.writePositionalAll(io, bytes, 0);
+    try p.file().writePositionalAll(io, bytes, 0);
     return p;
 }
 
@@ -197,10 +197,24 @@ test "keep_existing on a taken name syncs the existing file inside the batch" {
     try batch.addPending(io, &p, .keep_existing);
     const reached = try batch.commit(io, .{ .parallel = 1 });
     try testing.expect(reached.atLeast(.data));
-    try testing.expectEqual(airlock.Pending.State.kept, p.state);
+    try testing.expectEqual(airlock.Pending.State.kept, p.state());
     try expectContents(&s, "obj", "theirs");
     try testing.expectEqual(@as(u32, 1), h.count(.open_file));
     try testing.expectEqual(@as(usize, 0), (try s.entries(".")).prefixed);
+    // Whoever made the name may never have synced its directory: the
+    // batch syncs the entry as it syncs the file.
+    if (is_linux) {
+        try testing.expectEqual(@as(u32, 1), h.count(.sync_dir));
+    } else {
+        // A W on the directory, which names no file, before the one flush.
+        var dir_writeouts: u32 = 0;
+        for (h.fio.trace().records()) |r| {
+            const f = r.event.foreign orelse continue;
+            if (f.call == @backingInt(Call.sync_writeout) and r.event.subject.path == null) dir_writeouts += 1;
+        }
+        try testing.expectEqual(@as(u32, 1), dir_writeouts);
+        try testing.expectEqual(@as(u32, 1), h.count(.sync_full));
+    }
 }
 
 test "a failed sync poisons the batch: nothing renamed, temps gone, the slot named" {
@@ -224,8 +238,8 @@ test "a failed sync poisons the batch: nothing renamed, temps gone, the slot nam
     const failure = batch.failure().?;
     try testing.expectEqual(@as(u32, 1), failure.slot);
     try testing.expectEqual(@as(anyerror, error.InputOutput), failure.cause);
-    try testing.expectEqual(airlock.Pending.State.poisoned, b.state);
-    try testing.expectEqual(airlock.Pending.State.discarded, a.state);
+    try testing.expectEqual(airlock.Pending.State.poisoned, b.state());
+    try testing.expectEqual(airlock.Pending.State.discarded, a.state());
     try expectContents(&s, "a", null);
     try expectContents(&s, "b", null);
     try testing.expectEqual(@as(usize, 0), (try s.entries(".")).count);
@@ -296,7 +310,7 @@ test "two hundred nested pendings stay within one descriptor each, plus parallel
     var slots: [count]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    const before = try openDescriptors();
+    const before = harness.openDescriptors();
     for (&ps, &names, 0..) |*p, *name, i| {
         const n = std.mem.print(name, "d{d}/f", .{i % 50}) catch unreachable; // unreachable: 16 bytes hold the name
         if (i < 50) try s.dir().createDirPath(io, n[0 .. n.len - 2]);
@@ -304,20 +318,9 @@ test "two hundred nested pendings stay within one descriptor each, plus parallel
         try batch.addPending(io, p, .replace);
     }
     defer for (&ps) |*p| p.discard(io);
-    try testing.expect(try openDescriptors() - before <= count);
+    try testing.expect(harness.openDescriptors() - before <= count);
     _ = try batch.commit(io, .{ .parallel = 1 });
-    try testing.expectEqual(before, try openDescriptors());
-}
-
-/// How many descriptors this process has open.
-fn openDescriptors() !usize {
-    var n: usize = 0;
-    var fd: i32 = 0;
-    while (fd < 4096) : (fd += 1) {
-        const rc = if (is_linux) std.os.linux.fcntl(fd, std.os.linux.F.GETFD, 0) else @as(usize, @bitCast(@as(isize, std.c.fcntl(fd, std.c.F.GETFD)))); // safe: fcntl's int result, widened
-        if (std.posix.errno(rc) == .SUCCESS) n += 1;
-    }
-    return n;
+    try testing.expectEqual(before, harness.openDescriptors());
 }
 
 test "Windows: two directories that differ only in the device name are two volumes" {
@@ -361,4 +364,111 @@ test "Windows: NO_SYNC refused (ReFS) flushes each file instead" {
     try testing.expectEqual(airlock.Reached.full, try batch.commit(io, .{}));
     // A flush per file, and no volume flush for what they covered.
     try testing.expectEqual(@as(u32, 2), h.count(.sync_full));
+}
+
+test "pendings in as many directories as slots stay within one descriptor per slot, plus parallel, at the peak" {
+    if (is_windows or !is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const count = 96;
+    const parallel = 4;
+    const h = try Harness.create(testing.allocator, testing.io, .{ .trace = .off, .sample_descriptors = true });
+    defer h.destroy();
+    const io = h.io();
+    var names: [count][16]u8 = undefined;
+    var ps: [count]airlock.Pending = undefined;
+    var slots: [count]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    const before = harness.openDescriptors();
+    for (&ps, &names, 0..) |*p, *name, i| {
+        const n = std.mem.print(name, "d{d}/f", .{i}) catch unreachable; // unreachable: 16 bytes hold the name
+        try s.dir().createDirPath(testing.io, n[0 .. n.len - 2]);
+        p.* = try pending(io, s.dir(), n, "x");
+        try batch.addPending(io, p, .replace);
+    }
+    defer for (&ps) |*p| p.discard(io);
+    h.reset();
+    _ = try batch.commit(io, .{ .parallel = parallel });
+    // Each pending holds its temp; the batch may add `parallel` more.
+    try testing.expect(h.peak_descriptors.? - before <= count + parallel);
+    try testing.expectEqual(before, harness.openDescriptors());
+}
+
+test "addPath files are opened parallel at a time and closed after their sync" {
+    if (is_windows or !is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const count = 64;
+    const parallel = 4;
+    var names: [count][8]u8 = undefined;
+    for (&names, 0..) |*name, i| try s.write(std.mem.print(name, "f{d}", .{i}) catch unreachable, "x"); // unreachable: 8 bytes hold the name
+    const h = try Harness.create(testing.allocator, testing.io, .{ .trace = .off, .sample_descriptors = true });
+    defer h.destroy();
+    const io = h.io();
+    var slots: [count]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    for (&names, 0..) |*name, i| try batch.addPath(s.dir(), std.mem.print(name, "f{d}", .{i}) catch unreachable); // unreachable: as above
+    const before = harness.openDescriptors();
+    h.reset();
+    try testing.expect((try batch.commit(io, .{ .parallel = parallel })).atLeast(.data));
+    // At most `parallel` open at once, and on macOS one more kept for the
+    // volume's flush.
+    try testing.expect(h.peak_descriptors.? - before <= parallel + 1);
+    try testing.expectEqual(before, harness.openDescriptors());
+}
+
+test "a pending a refused rename left synced joins a batch without a second sync" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    try s.write("a", "old");
+    const rename_call: Call = if (is_windows) .win_rename_ex else .rename;
+    const denied: harness.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(rename_call, 1, denied)} });
+    defer h.destroy();
+    const io = h.io();
+    var p = try pending(io, s.dir(), "a", "new");
+    defer p.discard(io);
+    try testing.expectError(error.AccessDenied, p.commit(io, .{ .busy_deadline = .fromNanoseconds(0) }));
+    h.clearPlan();
+    h.reset();
+    var slots: [2]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    try batch.addPending(io, &p, .replace);
+    try testing.expect((try batch.commit(io, .{ .parallel = 1 })).atLeast(.data));
+    try expectContents(&s, "a", "new");
+    // The temp was synced by the first commit and, on POSIX, closed: the
+    // batch makes no call on it before the rename.
+    for (h.fio.trace().records()) |r| {
+        const f = r.event.foreign orelse continue;
+        const c: Call = @fromBackingInt(@as(u8, @intCast(f.call)));
+        if (c == rename_call) break;
+        switch (c) {
+            .sync_full, .sync_barrier, .sync_data, .sync_plain, .sync_writeout => return error.TestUnexpectedSync,
+            else => {},
+        }
+    }
+}
+
+test "a synced pending below the batch's level is LevelUnavailable" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const rename_call: Call = if (is_windows) .win_rename_ex else .rename;
+    const denied: harness.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(rename_call, 1, denied)} });
+    defer h.destroy();
+    const io = h.io();
+    var p = try pending(io, s.dir(), "a", "new");
+    defer p.discard(io);
+    try testing.expectError(error.AccessDenied, p.commit(io, .{ .level = .ordered, .busy_deadline = .fromNanoseconds(0) }));
+    var slots: [2]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    try batch.addPending(io, &p, .replace);
+    try testing.expectError(error.LevelUnavailable, batch.commit(io, .{ .level = .data, .parallel = 1 }));
+    try expectContents(&s, "a", null);
 }
