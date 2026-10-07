@@ -42,9 +42,10 @@
 //! | `renameat2(NOREPLACE)`, `renameatx_np(RENAME_EXCL)` | `EINVAL`, `ENOSYS`, `ENOTSUP` | `linkat` + `unlinkat` | unchanged |
 //!
 //! EINTR is retried after a cancel check for syncs, opens, renames and
-//! stats; `close` is never retried. With `Fallback.refuse`, a result below
-//! the level asked for is `error.LevelUnavailable`; a fallback to a stronger
-//! call is not a refusal.
+//! stats; `close` is never retried. A call that refuses (`commitOrRefuse`,
+//! `writeFileOrRefuse`, `Batch.commitOrRefuse`, `symLinkOrRefuse`) returns
+//! `error.LevelUnavailable` for a result below the level asked for; a
+//! fallback to a stronger call is not a refusal.
 //!
 //! Limits stated rather than tested: macOS and Windows have no block-level
 //! crash replay, so their rows rest on the man pages and Microsoft's
@@ -71,11 +72,6 @@ pub const Os = enum { linux, darwin, windows, bsd };
 
 /// The platform this build targets, as the table's columns name it.
 pub const os: Os = if (is_linux) .linux else if (is_darwin) .darwin else if (is_windows) .windows else .bsd;
-
-pub const SyncError = Io.File.SyncError || error{LevelUnavailable};
-
-/// The sync errors of one call, before a refusal becomes a fallback.
-const CallError = sys.SyncError;
 
 /// The file sync `level` asks for, through its fallback chain, without the
 /// refuse check. `subject` names the file for the test seam.
@@ -185,12 +181,6 @@ pub fn volumeBarrier(io: Io, handle: sys.Handle, barrier: bool, subject: ?[]cons
     return volumeFlush(io, handle, subject);
 }
 
-/// Applies `fallback` to what a chain reached for `level`.
-pub fn decide(reached: Reached, level: Level, fallback: level_mod.Fallback) error{LevelUnavailable}!Reached {
-    if (fallback == .refuse and !reached.atLeast(level)) return error.LevelUnavailable;
-    return reached;
-}
-
 /// Syncs an open file at `options.level`, through the fallback chain, and
 /// reports what was reached.
 ///
@@ -198,13 +188,11 @@ pub fn decide(reached: Reached, level: Level, fallback: level_mod.Fallback) erro
 /// synced. Any error means the file's dirty contents are unknown; a failed
 /// sync is never retried or answered with a weaker call, since the kernel
 /// may already have dropped the pages and cleared the error.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
-pub fn syncFile(io: Io, file: Io.File, options: SyncOptions) SyncError!Reached {
-    const reached = try syncChain(io, file.handle, options.level, options.barrier, null);
-    return decide(reached, options.level, options.fallback);
+pub fn syncFile(io: Io, file: Io.File, options: SyncOptions) Io.File.SyncError!Reached {
+    return syncChain(io, file.handle, options.level, options.barrier, null);
 }
 
-pub const DirSyncError = SyncError || Io.Dir.OpenError;
+pub const DirSyncError = Io.File.SyncError || Io.Dir.OpenError;
 
 /// What a directory sync came to: what it reached, and whether the
 /// filesystem refused it (which leaves an operation `.ordered`).
@@ -217,15 +205,13 @@ pub const default_busy_deadline: Io.Duration = .fromMilliseconds(2000);
 /// it. Any `Dir`: an `O_PATH` handle (Linux), `cwd()` or a read-only handle
 /// (Windows) is reopened for the sync. At `ordered` or `none` there is no
 /// call and the answer is `.none`.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn syncDir(io: Io, dir: Io.Dir, options: SyncOptions) DirSyncError!Reached {
     if (@backingInt(options.level) <= @backingInt(Level.ordered)) return .none;
     const outcome = try dirSync(io, dir.handle, default_busy_deadline, null);
-    return decide(outcome.reached, options.level, options.fallback);
+    return outcome.reached;
 }
 
 /// The directory sync of `handle`, at `data` or `full` (they are one call).
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn dirSync(io: Io, handle: sys.Handle, busy: Io.Duration, subject: ?[]const u8) DirSyncError!DirOutcome {
     if (is_windows) {
         const flush = try openDirFlush(io, handle, busy);
@@ -302,7 +288,7 @@ pub const Backoff = struct {
     }
 };
 
-pub const SyncPathError = SyncError || Io.File.OpenError;
+pub const SyncPathError = Io.File.SyncError || Io.File.OpenError;
 
 /// Opens `sub_path` (for write on Windows, where a flush needs it;
 /// read-only elsewhere) and syncs it.
@@ -311,10 +297,8 @@ pub const SyncPathError = SyncError || Io.File.OpenError;
 /// kernel already reported to another descriptor (Linux errseq) or dropped
 /// (Darwin) is not seen here, so a lost write can come back as success.
 /// Prefer the writing handle when you have it.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn syncPath(io: Io, dir: Io.Dir, sub_path: []const u8, options: SyncOptions) SyncPathError!Reached {
     const handle = try sys.openFile(io, dir.handle, sub_path);
     defer sys.release(io, handle);
-    const reached = try syncChain(io, handle, options.level, options.barrier, sub_path);
-    return decide(reached, options.level, options.fallback);
+    return syncChain(io, handle, options.level, options.barrier, sub_path);
 }

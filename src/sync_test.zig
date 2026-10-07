@@ -6,8 +6,9 @@ const testing = std.testing;
 const Io = std.Io;
 const airlock = @import("airlock.zig");
 const harness = @import("testing/harness.zig");
-const Harness = harness.Harness;
-const Call = harness.Call;
+const seam = @import("airlock.testing");
+const Seam = seam.Seam;
+const Call = seam.Call;
 const expectCalls = harness.expectCalls;
 
 const os = builtin.target.os.tag;
@@ -22,8 +23,8 @@ fn scratchFile(s: *harness.Scratch) !Io.File {
 }
 
 /// The code each platform's first sync call refuses with.
-const refusal: harness.Code = if (is_windows) .INVALID_PARAMETER else if (is_darwin) .NOTTY else .INVAL;
-const io_error: harness.Code = if (is_windows) .IO_DEVICE_ERROR else .IO;
+const refusal: seam.Code = if (is_windows) .INVALID_PARAMETER else if (is_darwin) .NOTTY else .INVAL;
+const io_error: seam.Code = if (is_windows) .IO_DEVICE_ERROR else .IO;
 
 test "each level makes the platform's call and reports what it reached" {
     var s: harness.Scratch = .init();
@@ -31,7 +32,7 @@ test "each level makes the platform's call and reports what it reached" {
     const file = try scratchFile(&s);
     defer file.close(testing.io);
     inline for ([_]airlock.Level{ .none, .ordered, .data, .full }) |level| {
-        const h = try Harness.create(testing.allocator, testing.io, .{});
+        const h = try Seam.create(testing.allocator, testing.io, .{});
         defer h.destroy();
         const reached = try airlock.syncFile(h.io(), file, .{ .level = level });
         try testing.expectEqual(airlock.Reached.expected(level), reached);
@@ -51,7 +52,7 @@ test "a Darwin barrier is a full flush with barrier off" {
     defer s.cleanup();
     const file = try scratchFile(&s);
     defer file.close(testing.io);
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     try testing.expectEqual(airlock.Reached.full, try airlock.syncFile(h.io(), file, .{ .level = .ordered, .barrier = false }));
     try expectCalls(h, &.{.sync_full});
@@ -65,7 +66,7 @@ test "a refused call falls back to the next one, never to a weaker one first" {
     defer file.close(testing.io);
 
     const first: Call = if (is_darwin) .sync_full else if (is_linux) .sync_data else .sync_data;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(first, refusal)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(first, refusal)} });
     defer h.destroy();
     const reached = try airlock.syncFile(h.io(), file, .{ .level = .data });
     if (is_darwin) {
@@ -80,23 +81,52 @@ test "a refused call falls back to the next one, never to a weaker one first" {
     }
 }
 
-test "refuse returns LevelUnavailable where the fallback falls below the level" {
+test "a chain that ends below the level says so in what it reached" {
     if (!is_linux and !is_darwin and !is_windows) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
     const file = try scratchFile(&s);
     defer file.close(testing.io);
     const plan = if (is_darwin)
-        &[_]harness.RawPlan.Entry{harness.always(.sync_full, refusal)}
+        &[_]seam.Plan.Entry{seam.always(.sync_full, refusal)}
     else
-        &[_]harness.RawPlan.Entry{ harness.always(.sync_data, refusal), harness.always(.sync_full, if (is_windows) .NOT_SUPPORTED else refusal) };
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = plan });
+        &[_]seam.Plan.Entry{ seam.always(.sync_data, refusal), seam.always(.sync_full, if (is_windows) .NOT_SUPPORTED else refusal) };
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = plan });
     defer h.destroy();
-    try testing.expectError(error.LevelUnavailable, airlock.syncFile(h.io(), file, .{ .level = .data, .fallback = .refuse }));
-    // Reported, the same chain ends below the level, and says so.
-    h.reset();
     const reached = try airlock.syncFile(h.io(), file, .{ .level = .data });
     try testing.expectEqual(if (is_darwin) airlock.Reached.written else airlock.Reached.none, reached);
+    try testing.expect(!reached.atLeast(.data));
+}
+
+/// Whether `function` can return `error.<name>`.
+fn canReturn(comptime name: []const u8, comptime function: anytype) bool {
+    const returned = @typeInfo(@TypeOf(function)).@"fn".return_type.?;
+    const set = @typeInfo(returned).error_union.error_set;
+    for (@typeInfo(set).error_set.error_names.?) |error_name| {
+        if (std.mem.eql(u8, error_name, name)) return true;
+    }
+    return false;
+}
+
+test "only a call that refuses can return LevelUnavailable: one that degrades reports instead" {
+    inline for (.{
+        airlock.syncFile,
+        airlock.syncDir,
+        airlock.syncPath,
+        airlock.writeFile,
+        airlock.Pending.commit,
+        airlock.Batch.commit,
+        airlock.rename,
+        airlock.remove,
+        airlock.makePath,
+        airlock.symLink,
+    }) |function| try testing.expect(comptime !canReturn("LevelUnavailable", function));
+    inline for (.{
+        airlock.writeFileOrRefuse,
+        airlock.Pending.commitOrRefuse,
+        airlock.Batch.commitOrRefuse,
+        airlock.symLinkOrRefuse,
+    }) |function| try testing.expect(comptime canReturn("LevelUnavailable", function));
 }
 
 test "a Darwin barrier refused goes to the full flush, which keeps the order" {
@@ -105,9 +135,9 @@ test "a Darwin barrier refused goes to the full flush, which keeps the order" {
     defer s.cleanup();
     const file = try scratchFile(&s);
     defer file.close(testing.io);
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.sync_barrier, .NOTTY)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(.sync_barrier, .NOTTY)} });
     defer h.destroy();
-    try testing.expectEqual(airlock.Reached.full, try airlock.syncFile(h.io(), file, .{ .level = .ordered, .fallback = .refuse }));
+    try testing.expectEqual(airlock.Reached.full, try airlock.syncFile(h.io(), file, .{ .level = .ordered }));
     try expectCalls(h, &.{ .sync_barrier, .sync_full });
 }
 
@@ -117,7 +147,7 @@ test "a failed sync is returned once: no retry, no weaker call" {
     const file = try scratchFile(&s);
     defer file.close(testing.io);
     const first: Call = if (is_darwin) .sync_full else if (is_linux) .sync_data else if (is_windows) .sync_data else .sync_plain;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(first, io_error)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(first, io_error)} });
     defer h.destroy();
     try testing.expectError(error.InputOutput, airlock.syncFile(h.io(), file, .{ .level = .data }));
     try expectCalls(h, &.{first});
@@ -130,12 +160,12 @@ test "an interrupted sync is made again, and a cancel ends it" {
     const file = try scratchFile(&s);
     defer file.close(testing.io);
     const first: Call = if (is_darwin) .sync_full else if (is_linux) .sync_data else .sync_plain;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(first, 1, .INTR)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(first, 1, .INTR)} });
     defer h.destroy();
     try testing.expectEqual(airlock.Reached.expected(.data), try airlock.syncFile(h.io(), file, .{ .level = .data }));
     try expectCalls(h, &.{ first, first });
 
-    const c = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{.{ .at = .{ .nth = .{ .call = first, .n = 1 } }, .fault = .canceled }} });
+    const c = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{.{ .at = .{ .nth = .{ .call = first, .n = 1 } }, .fault = .canceled }} });
     defer c.destroy();
     try testing.expectError(error.Canceled, airlock.syncFile(c.io(), file, .{ .level = .data }));
 }
@@ -144,7 +174,7 @@ test "a directory sync is the platform's directory call; none at ordered" {
     var s: harness.Scratch = .init();
     defer s.cleanup();
     try s.write("a", "1");
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     try testing.expectEqual(airlock.Reached.none, try airlock.syncDir(h.io(), s.dir(), .{ .level = .ordered }));
     try expectCalls(h, &.{});
@@ -159,7 +189,7 @@ test "a directory sync is the platform's directory call; none at ordered" {
 }
 
 test "cwd and an O_PATH handle are reopened for the sync; a bad number is returned" {
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     try testing.expectEqual(airlock.Reached.full, try airlock.syncDir(h.io(), Io.Dir.cwd(), .{}));
     if (!is_windows) try expectCalls(h, &.{ .open_dir, .sync_dir, .close });
@@ -180,21 +210,20 @@ test "cwd and an O_PATH handle are reopened for the sync; a bad number is return
     try expectCalls(h, &.{ .sync_dir, .getfl });
 }
 
-test "a refused directory sync reports none, or refuses" {
+test "a refused directory sync reports none" {
     if (!is_linux) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.sync_dir, .INVAL)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(.sync_dir, .INVAL)} });
     defer h.destroy();
     try testing.expectEqual(airlock.Reached.none, try airlock.syncDir(h.io(), s.dir(), .{}));
-    try testing.expectError(error.LevelUnavailable, airlock.syncDir(h.io(), s.dir(), .{ .fallback = .refuse }));
 }
 
 test "syncPath opens the file and syncs it" {
     var s: harness.Scratch = .init();
     defer s.cleanup();
     try s.write("data", "contents");
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     try testing.expectEqual(airlock.Reached.expected(.data), try airlock.syncPath(h.io(), s.dir(), "data", .{}));
     var buffer: [8]Call = undefined;
@@ -217,7 +246,7 @@ test "the real calls, without a hook, reach what the table says" {
 
 test "a retry waits with doubling, jittered sleeps on the clock until its deadline" {
     const platform = @import("platform.zig");
-    const h = try Harness.create(testing.allocator, testing.io, .{ .clock = true });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .clock = true });
     defer h.destroy();
     const Retry = struct {
         io: Io,

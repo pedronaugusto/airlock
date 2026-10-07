@@ -6,8 +6,9 @@ const testing = std.testing;
 const Io = std.Io;
 const airlock = @import("airlock.zig");
 const harness = @import("testing/harness.zig");
-const Harness = harness.Harness;
-const Call = harness.Call;
+const seam = @import("airlock.testing");
+const Seam = seam.Seam;
+const Call = seam.Call;
 const expectCalls = harness.expectCalls;
 
 const os = builtin.target.os.tag;
@@ -16,7 +17,7 @@ const is_linux = os == .linux;
 const is_darwin = os.isDarwin();
 const is_tested_os = is_linux or is_darwin or is_windows;
 
-const io_error: harness.Code = if (is_windows) .IO_DEVICE_ERROR else .IO;
+const io_error: seam.Code = if (is_windows) .IO_DEVICE_ERROR else .IO;
 
 fn expectContents(s: *harness.Scratch, name: []const u8, expected: ?[]const u8) !void {
     var buffer: [64]u8 = undefined;
@@ -40,7 +41,7 @@ test "three publishes into one directory: the fewest barriers per platform" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
     var ps: [3]airlock.Pending = undefined;
@@ -77,7 +78,7 @@ test "files without renames: one flush per volume, no barrier" {
     var s: harness.Scratch = .init();
     defer s.cleanup();
     for ([_][]const u8{ "x", "y" }) |name| try s.write(name, name);
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
     const x = try s.dir().openFile(testing.io, "x", .{ .mode = .read_write });
@@ -106,7 +107,7 @@ test "renames happen in add order, and the directories are synced once each" {
     var s: harness.Scratch = .init();
     defer s.cleanup();
     try s.dir().createDirPath(testing.io, "pack");
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
     var pack = try pending(io, s.dir(), "pack/p.pack", "P");
@@ -151,7 +152,7 @@ test "a fence on Darwin writes out every directory touched, then one barrier" {
     defer s.cleanup();
     try s.dir().createDirPath(testing.io, "one");
     try s.dir().createDirPath(testing.io, "two");
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
     var a = try pending(io, s.dir(), "one/a", "a");
@@ -186,7 +187,7 @@ test "keep_existing on a taken name syncs the existing file inside the batch" {
     var s: harness.Scratch = .init();
     defer s.cleanup();
     try s.write("obj", "theirs");
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
     var p = try pending(io, s.dir(), "obj", "ours");
@@ -223,7 +224,7 @@ test "a failed sync poisons the batch: nothing renamed, temps gone, the slot nam
     var s: harness.Scratch = .init();
     defer s.cleanup();
     const first: Call = if (is_linux) .sync_data else .sync_writeout;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(first, 2, io_error)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(first, 2, io_error)} });
     defer h.destroy();
     const io = h.io();
     var a = try pending(io, s.dir(), "a", "a");
@@ -252,7 +253,7 @@ test "a failure after a rename is PublishedNotDurable" {
     defer s.cleanup();
     const after: Call = if (is_linux) .sync_dir else if (is_darwin) .sync_full else .sync_full;
     const n: u32 = if (is_windows) 2 else 1;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(after, n, io_error)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(after, n, io_error)} });
     defer h.destroy();
     const io = h.io();
     var a = try pending(io, s.dir(), "a", "a");
@@ -280,7 +281,7 @@ test "Linux syncs concurrently and the calls are the same multiset" {
     var names: [16][8]u8 = undefined;
     var counts: [2][@typeInfo(Call).@"enum".field_names.len]u32 = undefined;
     for ([_]u8{ 1, 16 }, 0..) |parallel, round| {
-        const h = try Harness.create(testing.allocator, testing.io, .{});
+        const h = try Seam.create(testing.allocator, testing.io, .{});
         defer h.destroy();
         const io = h.io();
         var ps: [16]airlock.Pending = undefined;
@@ -311,7 +312,7 @@ test "two hundred nested pendings stay within one descriptor each, plus parallel
     var slots: [count]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    const before = harness.openDescriptors();
+    const before = seam.openDescriptors();
     for (&ps, &names, 0..) |*p, *name, i| {
         const n = std.mem.print(name, "d{d}/f", .{i % 50}) catch unreachable; // unreachable: 16 bytes hold the name
         if (i < 50) try s.dir().createDirPath(io, n[0 .. n.len - 2]);
@@ -319,9 +320,9 @@ test "two hundred nested pendings stay within one descriptor each, plus parallel
         try batch.addPending(io, p, .replace);
     }
     defer for (&ps) |*p| p.discard(io);
-    try testing.expect(harness.openDescriptors() - before <= count);
+    try testing.expect(seam.openDescriptors() - before <= count);
     _ = try batch.commit(io, .{ .parallel = 1 });
-    try testing.expectEqual(before, harness.openDescriptors());
+    try testing.expectEqual(before, seam.openDescriptors());
 }
 
 test "Windows: two directories that differ only in the device name are two volumes" {
@@ -330,7 +331,7 @@ test "Windows: two directories that differ only in the device name are two volum
     defer s.cleanup();
     // A cloned volume keeps the serial and the file ids; only the NT
     // device name tells it apart. Give the second slot another one.
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{
         .{ .at = .{ .nth = .{ .call = .volume_name, .n = 2 } }, .fault = .{ .value = 0xfeed } },
     } });
     defer h.destroy();
@@ -350,7 +351,7 @@ test "Windows: NO_SYNC refused (ReFS) flushes each file instead" {
     var s: harness.Scratch = .init();
     defer s.cleanup();
     for ([_][]const u8{ "x", "y" }) |name| try s.write(name, name);
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.sync_writeout, .INVALID_PARAMETER)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(.sync_writeout, .INVALID_PARAMETER)} });
     defer h.destroy();
     const io = h.io();
     const x = try s.dir().openFile(testing.io, "x", .{ .mode = .read_write });
@@ -373,7 +374,7 @@ test "pendings in as many directories as slots stay within one descriptor per sl
     defer s.cleanup();
     const count = 96;
     const parallel = 4;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .trace = .off, .sample_descriptors = true });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .trace = .off, .sample_descriptors = true });
     defer h.destroy();
     const io = h.io();
     var names: [count][16]u8 = undefined;
@@ -381,7 +382,7 @@ test "pendings in as many directories as slots stay within one descriptor per sl
     var slots: [count]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    const before = harness.openDescriptors();
+    const before = seam.openDescriptors();
     for (&ps, &names, 0..) |*p, *name, i| {
         const n = std.mem.print(name, "d{d}/f", .{i}) catch unreachable; // unreachable: 16 bytes hold the name
         try s.dir().createDirPath(testing.io, n[0 .. n.len - 2]);
@@ -393,7 +394,7 @@ test "pendings in as many directories as slots stay within one descriptor per sl
     _ = try batch.commit(io, .{ .parallel = parallel });
     // Each pending holds its temp; the batch may add `parallel` more.
     try testing.expect(h.peak_descriptors.? - before <= count + parallel);
-    try testing.expectEqual(before, harness.openDescriptors());
+    try testing.expectEqual(before, seam.openDescriptors());
 }
 
 test "addPath files are opened parallel at a time and closed after their sync" {
@@ -404,20 +405,20 @@ test "addPath files are opened parallel at a time and closed after their sync" {
     const parallel = 4;
     var names: [count][8]u8 = undefined;
     for (&names, 0..) |*name, i| try s.write(std.mem.print(name, "f{d}", .{i}) catch unreachable, "x"); // unreachable: 8 bytes hold the name
-    const h = try Harness.create(testing.allocator, testing.io, .{ .trace = .off, .sample_descriptors = true });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .trace = .off, .sample_descriptors = true });
     defer h.destroy();
     const io = h.io();
     var slots: [count]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
     for (&names, 0..) |*name, i| try batch.addPath(s.dir(), std.mem.print(name, "f{d}", .{i}) catch unreachable); // unreachable: as above
-    const before = harness.openDescriptors();
+    const before = seam.openDescriptors();
     h.reset();
     try testing.expect((try batch.commit(io, .{ .parallel = parallel })).atLeast(.data));
     // At most `parallel` open at once, and on macOS one more kept for the
     // volume's flush.
     try testing.expect(h.peak_descriptors.? - before <= parallel + 1);
-    try testing.expectEqual(before, harness.openDescriptors());
+    try testing.expectEqual(before, seam.openDescriptors());
 }
 
 test "a pending a refused rename left synced joins a batch without a second sync" {
@@ -426,14 +427,14 @@ test "a pending a refused rename left synced joins a batch without a second sync
     defer s.cleanup();
     try s.write("a", "old");
     const rename_call: Call = if (is_windows) .win_rename_ex else .rename;
-    const denied: harness.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(rename_call, 1, denied)} });
+    const denied: seam.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(rename_call, 1, denied)} });
     defer h.destroy();
     const io = h.io();
     var p = try pending(io, s.dir(), "a", "new");
     defer p.discard(io);
     try testing.expectError(error.AccessDenied, p.commit(io, .{ .busy_deadline = .fromNanoseconds(0) }));
-    h.clearPlan();
+    h.setPlan(&.{});
     h.reset();
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
@@ -454,24 +455,33 @@ test "a pending a refused rename left synced joins a batch without a second sync
     }
 }
 
-test "a synced pending below the batch's level is LevelUnavailable" {
+test "a synced pending is what its first sync reached: a batch refuses it below the level, or reports it" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
     const rename_call: Call = if (is_windows) .win_rename_ex else .rename;
-    const denied: harness.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(rename_call, 1, denied)} });
+    const denied: seam.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{ seam.fail(rename_call, 1, denied), seam.fail(rename_call, 2, denied) } });
     defer h.destroy();
     const io = h.io();
+    // Two pendings committed with no sync, their renames denied: synced at
+    // `none`, and on POSIX closed, so nothing can sync them now.
     var p = try pending(io, s.dir(), "a", "new");
     defer p.discard(io);
-    try testing.expectError(error.AccessDenied, p.commit(io, .{ .level = .ordered, .busy_deadline = .fromNanoseconds(0) }));
+    var q = try pending(io, s.dir(), "b", "new");
+    defer q.discard(io);
+    try testing.expectError(error.AccessDenied, p.commit(io, .{ .level = .none, .busy_deadline = .fromNanoseconds(0) }));
+    try testing.expectError(error.AccessDenied, q.commit(io, .{ .level = .none, .busy_deadline = .fromNanoseconds(0) }));
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
     try batch.addPending(io, &p, .replace);
-    try testing.expectError(error.LevelUnavailable, batch.commit(io, .{ .level = .data, .parallel = 1 }));
+    try testing.expectError(error.LevelUnavailable, batch.commitOrRefuse(io, .{ .level = .data, .parallel = 1 }));
     try expectContents(&s, "a", null);
+    batch.reset(io);
+    try batch.addPending(io, &q, .replace);
+    try testing.expectEqual(airlock.Reached.none, try batch.commit(io, .{ .level = .data, .parallel = 1 }));
+    try expectContents(&s, "b", "new");
 }
 
 test "Windows: a batch syncs a read-only file it keeps, and leaves it read-only" {
@@ -482,7 +492,7 @@ test "Windows: a batch syncs a read-only file it keeps, and leaves it read-only"
     const read_only: Io.File.Permissions = @fromBackingInt(1); // FILE_ATTRIBUTE_READONLY
     _ = try airlock.writeFile(testing.io, s.dir(), "obj", "theirs", .{ .create = .{ .mode = .{ .exact = read_only } } });
     try expectReadOnly(s.dir(), "obj");
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
     var p = try pending(io, s.dir(), "obj", "ours");

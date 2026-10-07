@@ -7,11 +7,8 @@
 //! code to an error and tells a refusal (the filesystem cannot be asked)
 //! apart from a failure (the bytes did not get down).
 //!
-//! The seam: when the `Io` a call is given is a layer whose `fileSync` is
-//! `hookedSync`, its state is a `HookedState`, and the hook decides the call
-//! first. A test builds that layer with shakedown; production pays one
-//! function-pointer compare per call. A layered vtable is a copy per layer
-//! type, so the slot is compared, never the vtable's address.
+//! The seam (`seam.zig`) decides each call first when the `Io` carries a
+//! test's hook; production pays one function-pointer compare per call.
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -24,99 +21,11 @@ const is_windows = native_os == .windows;
 const is_linux = native_os == .linux;
 const is_darwin = native_os.isDarwin();
 
-/// Every raw call airlock makes, one value each. A test plan names these.
-pub const Call = enum(u8) {
-    /// Exclusive create of a temp file or lock in the destination's directory.
-    create_temp,
-    /// Permissions set on the open temp (`fchmod`; the read-only attribute on Windows).
-    set_mode,
-    /// Linux `sync_file_range(WRITE)` from `Pending.writer`.
-    writeback,
-    /// `close` of a handle airlock opened. Never retried.
-    close,
-    /// The platform's full sync: Linux `fsync`, Darwin `F_FULLFSYNC`, Windows `NtFlushBuffersFile`.
-    sync_full,
-    /// Darwin `F_BARRIERFSYNC`.
-    sync_barrier,
-    /// A data-only durable sync: Linux `fdatasync`, Windows
-    /// `NtFlushBuffersFileEx(DATA_SYNC_ONLY)`.
-    sync_data,
-    /// Plain `fsync` where it is the end of a fallback chain (Darwin, BSD).
-    sync_plain,
-    /// A writeout without a device flush, before one flush per volume:
-    /// Darwin `fsync`, Windows `NtFlushBuffersFileEx(NO_SYNC)`.
-    sync_writeout,
-    /// A directory opened so it can be synced and named relative to.
-    open_dir,
-    /// A file opened by name: an existing file a batch syncs, or a rename or delete source on Windows.
-    open_file,
-    /// A directory's own sync.
-    sync_dir,
-    /// A rename that replaces.
-    rename,
-    /// A rename that never replaces: `renameat2(NOREPLACE)`, `renameatx_np(RENAME_EXCL)`.
-    rename_noreplace,
-    /// `linkat`, the no-replace fallback.
-    link,
-    /// `unlinkat`.
-    unlink,
-    /// Windows delete by handle with POSIX semantics.
-    dispose,
-    /// A file's identity (`statx`, `fstat`, `fstatat`, `FileIdInformation`).
-    stat_id,
-    /// Windows: the volume's NT device name, hashed.
-    volume_name,
-    /// Windows rename by handle (`FileRenameInformationEx`).
-    win_rename_ex,
-    /// Linux `fcntl(F_GETFL)`: is a directory handle `O_PATH`?
-    getfl,
-    /// A new directory: `mkdirat`; on Windows a directory created by name.
-    make_dir,
-    /// A new symbolic link: `symlinkat`.
-    symlink,
-};
+const seam = @import("seam");
 
-/// An errno on POSIX, an NTSTATUS on Windows.
-pub const Code = if (is_windows) windows.NTSTATUS else posix.E;
-
-/// What a hook makes of a call instead of the system.
-pub const Result = union(enum) {
-    /// The call returns this failure code without being made. A success
-    /// code runs the real call.
-    code: Code,
-    /// The call is interrupted and a cancel is pending: `error.Canceled`.
-    canceled,
-    /// The call succeeds with this value without being made. Only
-    /// `volume_name` reads one; any other call runs for real.
-    value: u64,
-};
-
-/// Routes airlock's raw calls to a test. `base` is the `Io` a std-level
-/// `fileSync` through the hooked layer goes to.
-pub const Hook = struct {
-    ctx: *anyopaque,
-    /// Returns what the call does instead, or null to make the real call.
-    call: *const fn (ctx: *anyopaque, call: Call, path: ?[]const u8) ?Result,
-    base: Io,
-};
-
-/// The state of the layer that carries a hook. The layer's `fileSync` must
-/// be `hookedSync`; that is how a raw call finds the hook.
-pub const HookedState = struct { hook: *const Hook };
-
-/// The hooked layer's `fileSync`: a std-level sync passes through to the
-/// hook's base.
-pub fn hookedSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
-    const state: *HookedState = @ptrCast(@alignCast(userdata.?)); // safe: an Io whose fileSync is hookedSync carries a HookedState as userdata
-    return file.sync(state.hook.base);
-}
-
-/// The hook's answer for this call, if `io` carries one.
-fn intercept(io: Io, call: Call, path: ?[]const u8) ?Result {
-    if (io.vtable.fileSync != &hookedSync) return null;
-    const state: *const HookedState = @ptrCast(@alignCast(io.userdata.?)); // safe: an Io whose fileSync is hookedSync carries a HookedState as userdata
-    return state.hook.call(state.hook.ctx, call, path);
-}
+pub const Call = seam.Call;
+const Code = seam.Code;
+const intercept = seam.intercept;
 
 /// A failure code the hook injects in place of `call`, or null to run it.
 fn injected(io: Io, call: Call, path: ?[]const u8) Io.Cancelable!?Code {
@@ -186,7 +95,6 @@ fn cFsync(fd: posix.fd_t) c_int {
 }
 
 /// Darwin `F_FULLFSYNC`: the device writes its cache down.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn fullFsync(io: Io, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncError!void {
     const e = try retrying(io, call, path, darwinFcntl, .{ fd, darwin_full_fsync });
     return switch (e) {
@@ -198,7 +106,6 @@ pub fn fullFsync(io: Io, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncErro
 
 /// Darwin `F_BARRIERFSYNC`: everything handed to the device before it is
 /// written before anything after it.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn barrierFsync(io: Io, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
     const e = try retrying(io, .sync_barrier, path, darwinFcntl, .{ fd, darwin_barrier_fsync });
     return switch (e) {
@@ -209,7 +116,6 @@ pub fn barrierFsync(io: Io, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
 }
 
 /// Plain `fsync` on Darwin and the BSDs: a writeout, or the end of a chain.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn plainFsync(io: Io, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncError!void {
     const e = if (is_linux)
         try retrying(io, call, path, linux.fsync, .{fd})
@@ -223,7 +129,6 @@ pub fn plainFsync(io: Io, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncErr
 }
 
 /// Linux `fdatasync`.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn dataFsync(io: Io, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
     const e = try retrying(io, .sync_data, path, linux.fdatasync, .{fd});
     return switch (e) {
@@ -426,7 +331,6 @@ pub const CreateTempError = Io.File.OpenError || error{Busy};
 /// Exclusive create of `name` in `dir`: `O_CREAT | O_EXCL`, so an existing
 /// name is never clobbered. Windows: share read and delete only, with
 /// delete access held, so a scanner can never block the rename.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn createTemp(io: Io, dir: Handle, name: []const u8, mode: Io.File.Permissions, read: bool) CreateTempError!Handle {
     if (is_windows) return createTempWindows(io, dir, name, read);
     const path = try posix.toPosixPath(name);
@@ -620,7 +524,6 @@ fn symlinkatRaw(target: [*:0]const u8, dir: posix.fd_t, path: [*:0]const u8) if 
 /// `symlinkat(target, dir, name)`. Windows: `error.OperationUnsupported`,
 /// since creating a symbolic link there needs a privilege or developer
 /// mode.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn symLink(io: Io, target: []const u8, dir: Handle, name: []const u8) SymLinkError!void {
     if (is_windows) return error.OperationUnsupported;
     const target_z = try posix.toPosixPath(target);
@@ -802,7 +705,6 @@ fn ntFlushEx(handle: windows.HANDLE, flags: u32) windows.NTSTATUS {
 }
 
 /// `NtFlushBuffersFile`: contents, metadata and the device cache.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn flushWindows(io: Io, handle: windows.HANDLE, call: Call, path: ?[]const u8) SyncError!void {
     const status = try retryingNt(io, call, path, ntFlush, .{handle});
     if (status == .SUCCESS) return;
@@ -812,7 +714,6 @@ pub fn flushWindows(io: Io, handle: windows.HANDLE, call: Call, path: ?[]const u
 
 /// `NtFlushBuffersFileEx` with one flag. Refused outside NTFS (and for
 /// `no_sync`, FAT and exFAT): ReFS, redirectors.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn flushExWindows(io: Io, handle: windows.HANDLE, flag: FlushEx, path: ?[]const u8) SyncError!void {
     const call: Call = switch (flag) {
         .data_sync_only => .sync_data,

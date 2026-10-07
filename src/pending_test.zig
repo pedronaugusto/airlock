@@ -6,8 +6,9 @@ const testing = std.testing;
 const Io = std.Io;
 const airlock = @import("airlock.zig");
 const harness = @import("testing/harness.zig");
-const Harness = harness.Harness;
-const Call = harness.Call;
+const seam = @import("airlock.testing");
+const Seam = seam.Seam;
+const Call = seam.Call;
 const expectCalls = harness.expectCalls;
 
 const os = builtin.target.os.tag;
@@ -16,7 +17,7 @@ const is_linux = os == .linux;
 const is_darwin = os.isDarwin();
 const is_tested_os = is_linux or is_darwin or is_windows;
 
-const io_error: harness.Code = if (is_windows) .IO_DEVICE_ERROR else .IO;
+const io_error: seam.Code = if (is_windows) .IO_DEVICE_ERROR else .IO;
 
 /// The first call that syncs the temp at `data`.
 const temp_sync: Call = if (is_darwin) .sync_barrier else if (is_linux) .sync_data else if (is_windows) .sync_data else .sync_plain;
@@ -31,7 +32,7 @@ fn expectContents(s: *harness.Scratch, name: []const u8, expected: ?[]const u8) 
     }
 }
 
-/// A commit for `Harness.drive` to run on another task.
+/// A commit for `Seam.drive` to run on another task.
 const Commit = struct {
     p: *airlock.Pending,
     io: Io,
@@ -53,7 +54,7 @@ test "a replace at data: 2 F on Linux and Windows, 1 B + 1 F on Darwin" {
     var s: harness.Scratch = .init();
     defer s.cleanup();
     try s.write("HEAD", "old");
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const done = try airlock.writeFile(h.io(), s.dir(), "HEAD", "new", .{});
     try testing.expect(!done.kept);
@@ -73,7 +74,7 @@ test "a replace at ordered stops before the directory; at none it syncs nothing"
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const ordered = try airlock.writeFile(h.io(), s.dir(), "a", "1", .{ .commit = .{ .level = .ordered } });
     try testing.expectEqual(airlock.Reached.ordered, ordered.reached);
@@ -98,7 +99,7 @@ test "Darwin with barrier off: a full flush on the file and on the directory" {
     if (!is_darwin) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const done = try airlock.writeFile(h.io(), s.dir(), "a", "1", .{ .commit = .{ .barrier = false } });
     try testing.expectEqual(airlock.Reached.full, done.reached);
@@ -110,7 +111,7 @@ test "a nested destination opens its directory once and syncs that one" {
     var s: harness.Scratch = .init();
     defer s.cleanup();
     try s.dir().createDirPath(testing.io, "refs/heads");
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     _ = try airlock.writeFile(h.io(), s.dir(), "refs/heads/main", "abc", .{});
     try expectContents(&s, "refs/heads/main", "abc");
@@ -147,8 +148,8 @@ test "no-replace without the rename falls back to a link, then to a check withou
     if (is_windows or !is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const refusal: harness.Code = .INVAL;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.rename_noreplace, refusal)} });
+    const refusal: seam.Code = .INVAL;
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(.rename_noreplace, refusal)} });
     defer h.destroy();
     _ = try airlock.writeFile(h.io(), s.dir(), "a", "1", .{ .commit = .{ .publish = .create_new } });
     try expectContents(&s, "a", "1");
@@ -156,9 +157,9 @@ test "no-replace without the rename falls back to a link, then to a check withou
     try testing.expectEqual(@as(u32, 1), h.count(.link));
     try testing.expectEqual(@as(u32, 1), h.count(.unlink));
 
-    const nolink = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{
-        harness.always(.rename_noreplace, refusal),
-        harness.always(.link, .PERM),
+    const nolink = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{
+        seam.always(.rename_noreplace, refusal),
+        seam.always(.link, .PERM),
     } });
     defer nolink.destroy();
     try testing.expectError(error.OperationUnsupported, airlock.writeFile(nolink.io(), s.dir(), "b", "2", .{ .commit = .{ .publish = .create_new } }));
@@ -176,7 +177,7 @@ test "a failed sync poisons: the temp is gone, the destination untouched, no ren
     var s: harness.Scratch = .init();
     defer s.cleanup();
     try s.write("HEAD", "old");
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(temp_sync, io_error)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(temp_sync, io_error)} });
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "HEAD", .{});
     defer p.discard(h.io());
@@ -196,13 +197,13 @@ test "EIO from close is a failed sync, and EINTR from close is closed" {
     if (is_windows or !is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(.close, 1, .IO)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(.close, 1, .IO)} });
     defer h.destroy();
     try testing.expectError(error.InputOutput, airlock.writeFile(h.io(), s.dir(), "a", "1", .{}));
     try expectContents(&s, "a", null);
     try expectNoTemps(&s);
 
-    const intr = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(.close, 1, .INTR)} });
+    const intr = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(.close, 1, .INTR)} });
     defer intr.destroy();
     _ = try airlock.writeFile(intr.io(), s.dir(), "b", "2", .{});
     try testing.expectEqual(@as(u32, 1), intr.count(.close));
@@ -213,7 +214,7 @@ test "a directory sync that fails after the rename is PublishedNotDurable, with 
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.sync_dir, io_error)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(.sync_dir, io_error)} });
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
@@ -230,7 +231,7 @@ test "a cancel before the rename publishes nothing; after it, PublishedNotDurabl
     var s: harness.Scratch = .init();
     defer s.cleanup();
     const rename_call: Call = if (is_windows) .win_rename_ex else .rename;
-    const before = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{.{ .at = .{ .nth = .{ .call = rename_call, .n = 1 } }, .fault = .canceled }} });
+    const before = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{.{ .at = .{ .nth = .{ .call = rename_call, .n = 1 } }, .fault = .canceled }} });
     defer before.destroy();
     var p = try airlock.create(before.io(), s.dir(), "a", .{});
     defer p.discard(before.io());
@@ -242,7 +243,7 @@ test "a cancel before the rename publishes nothing; after it, PublishedNotDurabl
     try testing.expectEqual(@as(u32, 1), before.count(temp_sync));
     try expectContents(&s, "a", "");
 
-    const after = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{.{ .at = .{ .nth = .{ .call = .sync_dir, .n = 1 } }, .fault = .canceled }} });
+    const after = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{.{ .at = .{ .nth = .{ .call = .sync_dir, .n = 1 } }, .fault = .canceled }} });
     defer after.destroy();
     var q = try airlock.create(after.io(), s.dir(), "b", .{});
     defer q.discard(after.io());
@@ -255,10 +256,10 @@ test "a rename refused for access stays synced, and the retry makes no second sy
     var s: harness.Scratch = .init();
     defer s.cleanup();
     const rename_call: Call = if (is_windows) .win_rename_ex else .rename;
-    const denied: harness.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
+    const denied: seam.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
     // Windows retries a denial until the deadline: the clock makes that
     // instant.
-    const h = try Harness.create(testing.allocator, testing.io, .{
+    const h = try Seam.create(testing.allocator, testing.io, .{
         .plan = &.{.{ .at = .{ .nth = .{ .call = rename_call, .n = 1 } }, .fault = .{ .code = denied }, .times = if (is_windows) 0 else 1 }},
         .clock = true,
     });
@@ -269,7 +270,7 @@ test "a rename refused for access stays synced, and the retry makes no second sy
     try h.drive(testing.io, &first);
     try testing.expectError(error.AccessDenied, first.result);
     try testing.expectEqual(airlock.Pending.State.synced, p.state());
-    h.clearPlan();
+    h.setPlan(&.{});
     _ = try p.commit(h.io(), .{});
     try testing.expectEqual(@as(u32, 1), h.count(temp_sync));
     try expectContents(&s, "a", "");
@@ -279,7 +280,7 @@ test "Windows retries a busy rename with backoff until the deadline" {
     if (!is_windows) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.win_rename_ex, .SHARING_VIOLATION)}, .clock = true });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(.win_rename_ex, .SHARING_VIOLATION)}, .clock = true });
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
@@ -299,30 +300,47 @@ test "refuse on Darwin decides before the rename: a refused flush publishes noth
     var s: harness.Scratch = .init();
     defer s.cleanup();
     try s.write("a", "old");
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{
-        harness.always(.sync_barrier, .NOTTY),
-        harness.always(.sync_full, .NOTTY),
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{
+        seam.always(.sync_barrier, .NOTTY),
+        seam.always(.sync_full, .NOTTY),
     } });
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
     try p.file().writePositionalAll(h.io(), "new", 0);
-    try testing.expectError(error.LevelUnavailable, p.commit(h.io(), .{ .fallback = .refuse }));
+    try testing.expectError(error.LevelUnavailable, p.commitOrRefuse(h.io(), .{}));
     try testing.expectEqual(@as(u32, 0), h.count(.rename));
     p.discard(h.io());
     try expectContents(&s, "a", "old");
     try expectNoTemps(&s);
 }
 
+test "Darwin: a directory flush does not make durable a file no sync reached" {
+    if (!is_darwin) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    // Every sync of the temp is refused, so its bytes never left the page
+    // cache; the directory's own F_FULLFSYNC is accepted.
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{
+        seam.always(.sync_barrier, .NOTTY),
+        seam.always(.sync_full, .NOTTY),
+        seam.always(.sync_plain, .INVAL),
+    } });
+    defer h.destroy();
+    const committed = try airlock.writeFile(h.io(), s.dir(), "a", "new", .{});
+    try testing.expectEqual(@as(u32, 1), h.count(.sync_dir));
+    try testing.expectEqual(airlock.Reached.none, committed.reached);
+}
+
 test "refuse on Linux learns of a refused directory sync after the rename" {
     if (!is_linux) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.sync_dir, .INVAL)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(.sync_dir, .INVAL)} });
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
-    try testing.expectError(error.PublishedNotDurable, p.commit(h.io(), .{ .fallback = .refuse }));
+    try testing.expectError(error.PublishedNotDurable, p.commitOrRefuse(h.io(), .{}));
     try testing.expectEqual(@as(?anyerror, error.LevelUnavailable), p.cause());
     // Reported, a refused directory sync leaves the publish ordered.
     const reported = try airlock.writeFile(h.io(), s.dir(), "b", "2", .{});
@@ -341,7 +359,7 @@ test "an exact name is a lock: taken is PathAlreadyExists, and it publishes" {
     try testing.expectError(error.BadPathName, airlock.create(io, s.dir(), "refs/heads/main", .{ .temp = .{ .exact = "a/main.lock" } }));
     try lock.file().writePositionalAll(io, "0123", 0);
     // relic's lock commit at ordered: one file sync, no directory sync.
-    const h = try Harness.create(testing.allocator, io, .{});
+    const h = try Seam.create(testing.allocator, io, .{});
     defer h.destroy();
     _ = try lock.commit(h.io(), .{ .level = .ordered });
     try testing.expectEqual(@as(u32, 1), h.count(temp_sync));
@@ -354,8 +372,8 @@ test "a random name that collides is drawn again" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const exists: harness.Code = if (is_windows) .OBJECT_NAME_COLLISION else .EXIST;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(.create_temp, 1, exists)} });
+    const exists: seam.Code = if (is_windows) .OBJECT_NAME_COLLISION else .EXIST;
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(.create_temp, 1, exists)} });
     defer h.destroy();
     _ = try airlock.writeFile(h.io(), s.dir(), "a", "1", .{ .create = .{ .temp = .{ .random = "tmp_obj_" } } });
     try testing.expectEqual(@as(u32, 2), h.count(.create_temp));
@@ -381,7 +399,7 @@ test "the writer is flushed by commit, with writeback along the way on Linux" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "log", .{ .writeback_bytes = 8 });
     defer p.discard(h.io());
@@ -398,7 +416,7 @@ test "a writeback error is a failed sync at commit" {
     if (!is_linux) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.writeback, .IO)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(.writeback, .IO)} });
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "log", .{ .writeback_bytes = 4 });
     defer p.discard(h.io());
@@ -422,7 +440,7 @@ test "discard is idempotent and never unlinks after the publish" {
     try expectContents(&s, "a", null);
     var q = try airlock.create(io, s.dir(), "b", .{});
     _ = try q.commit(io, .{});
-    const h = try Harness.create(testing.allocator, io, .{});
+    const h = try Seam.create(testing.allocator, io, .{});
     defer h.destroy();
     q.discard(h.io());
     q.discard(h.io());
@@ -434,10 +452,10 @@ test "Windows: a pending delete on the lock name is Busy, a real denial is not" 
     if (!is_windows) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(.create_temp, 1, .DELETE_PENDING)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(.create_temp, 1, .DELETE_PENDING)} });
     defer h.destroy();
     try testing.expectError(error.Busy, airlock.create(h.io(), s.dir(), "HEAD", .{ .temp = .{ .exact = "HEAD.lock" } }));
-    const denied = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(.create_temp, 1, .ACCESS_DENIED)} });
+    const denied = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(.create_temp, 1, .ACCESS_DENIED)} });
     defer denied.destroy();
     try testing.expectError(error.AccessDenied, airlock.create(denied.io(), s.dir(), "HEAD", .{ .temp = .{ .exact = "HEAD.lock" } }));
 }
@@ -454,21 +472,27 @@ test "Windows: a replace succeeds while a reader holds the target with delete sh
     try expectContents(&s, "a", "new");
 }
 
-test "a retried commit asking for a stronger level than its first sync is LevelUnavailable" {
+test "a retried commit keeps what its first sync reached: reported, or refused" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
     const rename_call: Call = if (is_windows) .win_rename_ex else .rename;
-    const denied: harness.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(rename_call, 1, denied)} });
+    const denied: seam.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(rename_call, 1, denied)} });
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
-    try testing.expectError(error.AccessDenied, p.commit(h.io(), .{ .level = .ordered, .busy_deadline = .fromNanoseconds(0) }));
-    // In every build mode: the temp was synced at ordered, and on POSIX it
-    // is closed, so nothing can make it stronger now.
-    try testing.expectError(error.LevelUnavailable, p.commit(h.io(), .{ .level = .data }));
-    try testing.expectEqual(airlock.Reached.ordered, (try p.commit(h.io(), .{ .level = .ordered })).reached);
+    // The first commit asks for no sync, and its rename is denied.
+    try testing.expectError(error.AccessDenied, p.commit(h.io(), .{ .level = .none, .busy_deadline = .fromNanoseconds(0) }));
+    try testing.expectEqual(airlock.Pending.State.synced, p.state());
+    // On POSIX the temp is closed, so nothing can sync it now: refused,
+    // nothing is published and the pending is as it was...
+    try testing.expectError(error.LevelUnavailable, p.commitOrRefuse(h.io(), .{ .level = .data }));
+    try testing.expectEqual(airlock.Pending.State.synced, p.state());
+    try testing.expectEqual(@as(?[]const u8, null), s.read("a", &.{}));
+    // ...or reported: published, and no more durable than its first sync.
+    const committed = try p.commit(h.io(), .{ .level = .data });
+    try testing.expectEqual(airlock.Reached.none, committed.reached);
     try expectContents(&s, "a", "");
 }
 
@@ -489,7 +513,7 @@ test "a failed write through the writer poisons the pending" {
     var s: harness.Scratch = .init();
     defer s.cleanup();
     try s.write("a", "old");
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     try h.fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .file_write_streaming, .n = 1 } }, .fault = .{ .fail = error.NoSpaceLeft } }});
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
@@ -508,7 +532,7 @@ test "the writer writes a long run of one byte in a few calls" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{ .trace = .off });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .trace = .off });
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "pad", .{});
     defer p.discard(h.io());
@@ -530,7 +554,7 @@ test "Windows: the legacy rename replaces a read-only file without waiting out t
     const read_only: Io.File.Permissions = @fromBackingInt(1); // FILE_ATTRIBUTE_READONLY
     _ = try airlock.writeFile(testing.io, s.dir(), "a", "old", .{ .create = .{ .mode = .{ .exact = read_only } } });
     // FAT and systems before RS5 have no POSIX rename by handle.
-    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.win_rename_ex, .NOT_SUPPORTED)} });
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(.win_rename_ex, .NOT_SUPPORTED)} });
     defer h.destroy();
     _ = try airlock.writeFile(h.io(), s.dir(), "a", "new", .{ .commit = .{ .busy_deadline = .fromNanoseconds(0) } });
     try expectContents(&s, "a", "new");

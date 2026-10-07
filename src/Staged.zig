@@ -47,9 +47,7 @@ exact: []const u8,
 state: State = .open,
 /// Whether `file`'s handle is open.
 file_open: bool = true,
-/// The level the temp was synced at, for a retried commit.
-synced_level: Level = .none,
-/// What the temp's sync reached.
+/// What the temp's sync reached, for a retried commit too.
 file_reached: Reached = .none,
 /// The writer `writer` hands out, and whether it is in use.
 writer_state: Writer = undefined,
@@ -119,7 +117,6 @@ const max_draws = 4;
 
 /// Creates the temp for `dest_sub_path`, relative to `dir`, as
 /// `Pending.create` documents.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOptions) CreateError!Staged {
     const base_start = baseStart(dest_sub_path);
     const base = dest_sub_path[base_start..];
@@ -357,7 +354,6 @@ pub const Publish = enum {
 
 pub const CommitOptions = struct {
     level: Level = .data,
-    fallback: Fallback = .report,
     publish: Publish = .replace,
     /// Windows: how long to retry a rename a scanner or indexer is
     /// blocking. 0 = once.
@@ -385,29 +381,42 @@ pub const CommitError = platform.DirSyncError || Io.Dir.RenameError || Io.Dir.De
     OperationUnsupported,
 };
 
+/// `CommitError`, and a filesystem that cannot keep the level.
+pub const CommitOrRefuseError = CommitError || error{
+    /// The filesystem refused a call the level needs. Darwin and Windows
+    /// know before the rename, and nothing is published; the pending stays
+    /// as it was, to commit at a lower level or discard. Linux learns of a
+    /// refused directory sync only after it: that is `PublishedNotDurable`
+    /// with `cause` `LevelUnavailable`.
+    LevelUnavailable,
+};
+
+/// What `commit` can fail with, as `fallback` decides.
+fn CommitErrorOf(comptime fallback: Fallback) type {
+    return if (fallback == .refuse) CommitOrRefuseError else CommitError;
+}
+
 /// Syncs the temp, publishes it and syncs its directory, as
-/// `Pending.commit` documents.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
-pub fn commit(p: *Staged, io: Io, options: CommitOptions) CommitError!Committed {
+/// `Pending.commit` and `Pending.commitOrRefuse` document.
+pub fn commit(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOptions) CommitErrorOf(fallback)!Committed {
     switch (p.state) {
         .poisoned => return error.Poisoned,
         .published, .kept, .discarded => unreachable, // unreachable: commit after the pending ended is a caller bug
         .synced => {
             // The temp was synced once; on POSIX it is closed, so nothing
-            // can make it stronger now.
-            if (@backingInt(options.level) > @backingInt(p.synced_level)) return error.LevelUnavailable;
-            return p.publishSynced(io, options);
+            // can make it stronger now: what it reached is what it has.
+            if (fallback == .refuse and !fileMeets(p.file_reached, options)) return error.LevelUnavailable;
+            return p.publishSynced(fallback, io, options);
         },
         .open => {},
     }
     try p.flushWriter(io);
-    try p.syncTemp(io, options);
-    return p.publishSynced(io, options);
+    try p.syncTemp(fallback, io, options);
+    return p.publishSynced(fallback, io, options);
 }
 
 /// Flushes a writer in use. Any failure, a write's or a writeback's, is a
 /// failed sync.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn flushWriter(p: *Staged, io: Io) CommitError!void {
     if (p.cause) |cause| return p.poison(io, cause);
     if (!p.writer_active) return;
@@ -431,23 +440,20 @@ fn fileMeets(reached: Reached, options: CommitOptions) bool {
     return is_darwin and reached == .ordered and options.barrier;
 }
 
-fn syncTemp(p: *Staged, io: Io, options: CommitOptions) CommitError!void {
+fn syncTemp(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOptions) CommitErrorOf(fallback)!void {
     const reached = platform.syncChain(io, p.file.handle, fileLevel(options), options.barrier, p.tempName()) catch |err| switch (err) {
         // EINTR and a cancel are not a failed sync: the kernel kept its state.
         error.Canceled => return error.Canceled,
         else => |e| return p.poison(io, e),
     };
-    if (options.fallback == .refuse and !fileMeets(reached, options)) return error.LevelUnavailable;
-    try p.markSynced(io, options.level, reached);
+    if (fallback == .refuse and !fileMeets(reached, options)) return error.LevelUnavailable;
+    try p.markSynced(io, reached);
 }
 
-/// Records the temp's sync at `level`, which reached `reached`. POSIX
-/// closes the temp, checking `close` once: an NFS deferred write fails
-/// there.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
-pub fn markSynced(p: *Staged, io: Io, level: Level, reached: Reached) CommitError!void {
+/// Records what the temp's sync reached. POSIX closes the temp, checking
+/// `close` once: an NFS deferred write fails there.
+pub fn markSynced(p: *Staged, io: Io, reached: Reached) CommitError!void {
     p.file_reached = reached;
-    p.synced_level = level;
     p.state = .synced;
     if (!is_windows) {
         p.file_open = false;
@@ -502,14 +508,14 @@ fn releaseParent(p: *Staged, io: Io) void {
 }
 
 /// Steps 4 to 8 of a commit, from a synced temp.
-fn publishSynced(p: *Staged, io: Io, options: CommitOptions) CommitError!Committed {
+fn publishSynced(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOptions) CommitErrorOf(fallback)!Committed {
     var flush: ?sys.Handle = null;
     defer if (flush) |h| sys.release(io, h);
     var dir_refused = false;
     if (is_windows and @backingInt(options.level) >= @backingInt(Level.data)) {
         flush = platform.openDirFlush(io, p.parent.handle, options.busy_deadline) catch |err| switch (err) {
             error.NoDevice => blk: {
-                if (options.fallback == .refuse) return error.LevelUnavailable;
+                if (fallback == .refuse) return error.LevelUnavailable;
                 dir_refused = true;
                 break :blk null;
             },
@@ -522,7 +528,7 @@ fn publishSynced(p: *Staged, io: Io, options: CommitOptions) CommitError!Committ
         .taken => return p.taken(io, options.publish),
     }
     p.state = .published;
-    const reached = p.syncParent(io, options, flush, dir_refused) catch |err| {
+    const reached = p.syncParent(fallback, io, options, flush, dir_refused) catch |err| {
         p.cause = err;
         p.finish(io);
         return error.PublishedNotDurable;
@@ -532,7 +538,7 @@ fn publishSynced(p: *Staged, io: Io, options: CommitOptions) CommitError!Committ
 }
 
 /// After the rename: the directory sync, and what the commit reached.
-fn syncParent(p: *Staged, io: Io, options: CommitOptions, flush: ?sys.Handle, refused_before: bool) anyerror!Reached {
+fn syncParent(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOptions, flush: ?sys.Handle, refused_before: bool) anyerror!Reached {
     const cut: Reached = Reached.min(p.file_reached, .ordered);
     if (@backingInt(options.level) < @backingInt(Level.data)) return cut;
     try io.checkCancel();
@@ -541,7 +547,7 @@ fn syncParent(p: *Staged, io: Io, options: CommitOptions, flush: ?sys.Handle, re
     else
         try platform.dirSync(io, p.parent.handle, options.busy_deadline, p.baseName());
     if (outcome.refused) {
-        if (options.fallback == .refuse) return error.LevelUnavailable;
+        if (fallback == .refuse) return error.LevelUnavailable;
         // The data was ordered before the name; the name may be lost.
         return cut;
     }
@@ -550,9 +556,10 @@ fn syncParent(p: *Staged, io: Io, options: CommitOptions, flush: ?sys.Handle, re
 
 /// What a file sync followed by a successful directory sync reached. On
 /// Darwin the directory's `F_FULLFSYNC` persists everything handed to the
-/// device before it, so it upgrades the file.
+/// device before it, so it upgrades a file that was handed to it; a file
+/// no sync reached is still only in the page cache.
 fn combine(file: Reached, dir: Reached) Reached {
-    if (is_darwin and dir == .full) return .full;
+    if (is_darwin and dir == .full and file != .none) return .full;
     return Reached.min(file, dir);
 }
 
@@ -682,7 +689,6 @@ pub fn adoptParent(p: *Staged, parent: Io.Dir) void {
 
 /// Renames a synced temp as `publish` says: true if renamed, false if
 /// `keep_existing` found the name taken.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn renameSynced(p: *Staged, io: Io, publish: Publish, busy: Io.Duration) CommitError!bool {
     const options: CommitOptions = .{ .publish = publish, .busy_deadline = busy };
     switch (try p.rename(io, options)) {

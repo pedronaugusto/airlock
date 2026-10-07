@@ -136,8 +136,8 @@ pub fn addPath(b: *Batch, dir: Io.Dir, sub_path: []const u8) AddError!void {
 /// A pending publish: synced through its own handle, renamed in add order,
 /// its directory synced. A parent airlock opened for it is closed now and
 /// reopened, once per distinct directory, at commit.
-/// A pending a failed rename left synced is renamed without a second sync,
-/// at the level it was synced at or below.
+/// A pending a failed rename left synced is renamed without a second sync;
+/// what that first sync reached is its part of the batch.
 pub fn addPending(b: *Batch, io: Io, p: *Pending, publish: Pending.Publish) AddError!void {
     const staged = &p.staged;
     std.debug.assert(staged.state == .open or staged.state == .synced);
@@ -163,7 +163,6 @@ pub fn fence(b: *Batch) AddError!void {
 
 pub const Options = struct {
     level: Level = .data,
-    fallback: Fallback = .report,
     /// Linux: how many syncs run at once; 1 = one after another.
     parallel: u8 = 16,
     /// Windows: how long to retry a rename a scanner is blocking.
@@ -173,6 +172,19 @@ pub const Options = struct {
 };
 
 pub const Error = Pending.CommitError || platform.SyncPathError || platform.DirSyncError || Io.File.StatError || error{BatchFull};
+
+/// `Error`, and a filesystem that cannot keep the level.
+pub const CommitOrRefuseError = Error || error{
+    /// A part of the batch reached less than the level. Darwin and Windows
+    /// know before the first rename, and nothing is published; Linux
+    /// learns of a refused directory sync only after the renames, and
+    /// that is `PublishedNotDurable`.
+    LevelUnavailable,
+};
+
+fn ErrorOf(comptime fallback: Fallback) type {
+    return if (fallback == .refuse) CommitOrRefuseError else Error;
+}
 
 /// After a failed commit: the slot (in add order) whose call failed, and
 /// its error.
@@ -199,11 +211,22 @@ fn closeSlot(io: Io, s: *Slot) void {
 }
 
 /// Makes everything in the batch durable at `options.level`, as the table
-/// above says, and reports what was reached. Empties the batch on success.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
+/// above says, and reports what was reached: a filesystem that refuses a
+/// call gets the strongest one it accepts, and the result says so. Empties
+/// the batch on success.
 pub fn commit(b: *Batch, io: Io, options: Options) Error!Reached {
+    return b.commitAs(.report, io, options);
+}
+
+/// `commit`, but a part that reaches less than `options.level` is
+/// `error.LevelUnavailable` rather than a weaker result.
+pub fn commitOrRefuse(b: *Batch, io: Io, options: Options) CommitOrRefuseError!Reached {
+    return b.commitAs(.refuse, io, options);
+}
+
+fn commitAs(b: *Batch, comptime fallback: Fallback, io: Io, options: Options) ErrorOf(fallback)!Reached {
     b.failed = null;
-    var run: Run = .{ .batch = b, .options = options, .io = io };
+    var run: Run(fallback) = .{ .batch = b, .options = options, .io = io };
     const reached = run.go() catch |err| {
         b.poison(io);
         if (run.renamed and err != error.PublishedNotDurable) return error.PublishedNotDurable;
@@ -244,508 +267,510 @@ const Volume = struct {
 
 const max_volumes = 16;
 
-/// The state of one commit.
-const Run = struct {
-    batch: *Batch,
-    options: Options,
-    /// The commit's `Io`, for the length of the call.
-    io: Io,
-    volumes: [max_volumes]Volume = undefined,
-    volume_count: u8 = 0,
-    /// The weakest any part reached so far.
-    reached: Reached = .full,
-    renames: u32 = 0,
-    renamed: bool = false,
+/// The state of one commit, refusing or reporting as `fallback` says.
+fn Run(comptime fallback: Fallback) type {
+    return struct {
+        const Self = @This();
+        /// What a step that can refuse fails with.
+        const E = ErrorOf(fallback);
 
-    fn slots(r: *Run) []Slot {
-        return r.batch.slots[0..r.batch.len];
-    }
+        batch: *Batch,
+        options: Options,
+        /// The commit's `Io`, for the length of the call.
+        io: Io,
+        volumes: [max_volumes]Volume = undefined,
+        volume_count: u8 = 0,
+        /// The weakest any part reached so far.
+        reached: Reached = .full,
+        renames: u32 = 0,
+        renamed: bool = false,
 
-    /// Records a failure at `s` (the first one wins) and returns `err`.
-    fn fail(r: *Run, s: *const Slot, err: Error) Error {
-        if (r.batch.failed == null) r.batch.failed = .{ .slot = s.index, .cause = err };
-        if (s.pending) |p| if (p.state == .open) p.markFailed(r.io, err);
-        return err;
-    }
-
-    /// Folds in what one part reached, refusing below the level if asked.
-    fn part(r: *Run, s: *const Slot, reached: Reached) Error!void {
-        if (r.options.fallback == .refuse and !reached.atLeast(r.options.level)) return r.fail(s, error.LevelUnavailable);
-        r.reached = Reached.min(r.reached, reached);
-    }
-
-    fn go(r: *Run) Error!Reached {
-        for (r.slots()) |s| if (s.kind == .pending) {
-            r.renames += 1;
-        };
-        const level = r.options.level;
-        try r.openDirs();
-        if (level != .none) try r.syncFiles();
-        if (level != .none and r.renames > 0) try r.barrier();
-        try r.closeTemps();
-        try r.publish();
-        if (@backingInt(level) < @backingInt(Level.data)) {
-            return if (level == .none) .none else Reached.min(r.reached, .ordered);
+        fn slots(r: *Self) []Slot {
+            return r.batch.slots[0..r.batch.len];
         }
-        try r.syncDirs();
-        try r.flushVolumes();
-        return r.reached;
-    }
 
-    // -- directories ------------------------------------------------------
+        /// Records a failure at `s` (the first one wins) and returns `err`.
+        fn fail(r: *Self, s: *const Slot, err: E) E {
+            if (r.batch.failed == null) r.batch.failed = .{ .slot = s.index, .cause = err };
+            if (s.pending) |p| if (p.state == .open) p.markFailed(r.io, err);
+            return err;
+        }
 
-    /// Opens each `addDirPath` directory; `cwd()` is reopened as `"."`,
-    /// which a sync can use. Pending parents are opened at their renames.
-    fn openDirs(r: *Run) Error!void {
-        for (r.slots()) |*s| switch (s.kind) {
-            .dir_path => {
-                s.handle = sys.openDir(r.io, s.root, s.path) catch |err| return r.fail(s, err);
-                s.owned = true;
-                s.open = true;
-            },
-            .dir => try r.ownCwd(s),
-            else => {},
-        };
-    }
+        /// Folds in what one part reached, refusing below the level if asked.
+        fn part(r: *Self, s: *const Slot, reached: Reached) E!void {
+            if (fallback == .refuse and !reached.atLeast(r.options.level)) return r.fail(s, error.LevelUnavailable);
+            r.reached = Reached.min(r.reached, reached);
+        }
 
-    /// A slot whose directory is `cwd()` gets its own handle on `"."`.
-    fn ownCwd(r: *Run, s: *Slot) Error!void {
-        if (is_windows or s.handle != sys.at_fdcwd) return;
-        s.handle = sys.openDir(r.io, sys.at_fdcwd, ".") catch |err| return r.fail(s, err);
-        s.owned = true;
-        s.open = true;
-    }
+        fn go(r: *Self) E!Reached {
+            for (r.slots()) |s| if (s.kind == .pending) {
+                r.renames += 1;
+            };
+            const level = r.options.level;
+            try r.openDirs();
+            if (level != .none) try r.syncFiles();
+            if (level != .none and r.renames > 0) try r.barrier();
+            try r.closeTemps();
+            try r.publish();
+            if (@backingInt(level) < @backingInt(Level.data)) {
+                return if (level == .none) .none else Reached.min(r.reached, .ordered);
+            }
+            try r.syncDirs();
+            try r.flushVolumes();
+            return r.reached;
+        }
 
-    /// Opens a pending's parent before its rename: the handle an earlier
-    /// pending already holds on it, or a new one. On macOS and Windows it
-    /// then stands for its volume's flush.
-    fn openParent(r: *Run, s: *Slot, earlier: []const Slot) Error!void {
-        const p = s.pending.?;
-        s.root = p.root.handle;
-        s.path = p.parentSubPath() orelse "";
-        if (findParent(earlier, s)) |shared| {
-            s.handle = shared;
-            s.open = true;
-        } else if (s.path.len == 0) {
-            s.handle = s.root;
-            s.open = true;
-            try r.ownCwd(s);
-        } else {
-            s.handle = sys.openDir(r.io, s.root, s.path) catch |err| return r.fail(s, err);
+        // -- directories ------------------------------------------------------
+
+        /// Opens each `addDirPath` directory; `cwd()` is reopened as `"."`,
+        /// which a sync can use. Pending parents are opened at their renames.
+        fn openDirs(r: *Self) E!void {
+            for (r.slots()) |*s| switch (s.kind) {
+                .dir_path => {
+                    s.handle = sys.openDir(r.io, s.root, s.path) catch |err| return r.fail(s, err);
+                    s.owned = true;
+                    s.open = true;
+                },
+                .dir => try r.ownCwd(s),
+                else => {},
+            };
+        }
+
+        /// A slot whose directory is `cwd()` gets its own handle on `"."`.
+        fn ownCwd(r: *Self, s: *Slot) E!void {
+            if (is_windows or s.handle != sys.at_fdcwd) return;
+            s.handle = sys.openDir(r.io, sys.at_fdcwd, ".") catch |err| return r.fail(s, err);
             s.owned = true;
             s.open = true;
         }
-        p.adoptParent(.{ .handle = s.handle });
-        if (s.on_volume) _ = r.volume(s.id.volume, s.device, s.handle, true, s.index);
-    }
 
-    /// The handle an earlier pending already holds on the same parent.
-    fn findParent(earlier: []const Slot, s: *const Slot) ?sys.Handle {
-        for (earlier) |e| {
-            if (e.kind == .pending and e.open and e.root == s.root and std.mem.eql(u8, e.path, s.path)) return e.handle;
-        }
-        return null;
-    }
-
-    // -- step 1: files ----------------------------------------------------
-
-    fn isFileSlot(s: *const Slot) bool {
-        return s.kind == .file or s.kind == .path or s.kind == .pending;
-    }
-
-    fn syncFiles(r: *Run) Error!void {
-        if (is_linux and r.options.parallel > 1) return r.syncFilesConcurrently();
-        for (r.slots()) |*s| if (isFileSlot(s)) {
-            syncOne(r, s);
-            if (s.err) |err| return r.fail(s, err);
-            try r.part(s, s.reached);
-        };
-    }
-
-    /// Linux: `parallel` syncs at once; the journal merges concurrent
-    /// commits into a few. One after another where the `Io` has no
-    /// concurrency.
-    fn syncFilesConcurrently(r: *Run) Error!void {
-        try r.concurrently(isFileSlot, syncOne);
-        for (r.slots()) |*s| if (isFileSlot(s)) {
-            if (s.err) |err| return r.fail(s, err);
-            try r.part(s, s.reached);
-        };
-    }
-
-    /// Runs `step` on every slot `selected` picks, `parallel` at once, in
-    /// add order (or sorted order, once sorted). Each leaves its result in
-    /// its slot.
-    fn concurrently(r: *Run, comptime selected: fn (*const Slot) bool, comptime step: fn (*Run, *Slot) void) Error!void {
-        const all = r.slots();
-        var start: usize = 0;
-        while (start < all.len) {
-            var group: Io.Group = .init;
-            var started: usize = 0;
-            var i = start;
-            while (i < all.len and started < r.options.parallel) : (i += 1) {
-                const s = &all[i];
-                if (!selected(s)) continue;
-                group.concurrent(r.io, step, .{ r, s }) catch step(r, s);
-                started += 1;
-            }
-            group.await(r.io) catch |err| {
-                group.cancel(r.io);
-                return err;
-            };
-            start = i;
-        }
-    }
-
-    /// One file's step 1, its result left in the slot.
-    fn syncOne(r: *Run, s: *Slot) void {
-        s.err = null;
-        if (s.pending) |p| switch (p.state) {
-            .synced => {
-                syncedPending(r, s, p);
-                return;
-            },
-            else => p.flushWriter(r.io) catch |err| {
-                s.err = err;
-                return;
-            },
-        };
-        const handle = r.fileHandle(s) catch |err| {
-            s.err = err;
-            return;
-        };
-        s.reached = r.syncHandle(s, handle) catch |err| blk: {
-            s.err = err;
-            break :blk .none;
-        };
-        // A path's handle is closed after its sync, unless it stands for
-        // its volume's flush.
-        if (s.kind == .path and s.open and !r.standsForVolume(handle)) {
-            sys.release(r.io, handle);
-            s.open = false;
-            s.owned = false;
-        }
-    }
-
-    /// A pending a failed rename left synced: its temp is not synced again
-    /// (on POSIX it is closed). Its first sync must meet the batch's level.
-    fn syncedPending(r: *Run, s: *Slot, p: *Staged) void {
-        const level = r.options.level;
-        if (@backingInt(level) > @backingInt(p.synced_level)) {
-            s.err = error.LevelUnavailable;
-            return;
-        }
-        // Darwin: a barrier ordered it, and the flush of its directory's
-        // volume after the renames persists it.
-        const flushed_later = is_darwin and p.file_reached == .ordered and @backingInt(level) >= @backingInt(Level.data);
-        s.reached = if (flushed_later) .full else p.file_reached;
-    }
-
-    /// The handle a file slot syncs through, opening a path slot.
-    fn fileHandle(r: *Run, s: *Slot) Error!sys.Handle {
-        switch (s.kind) {
-            .file => return s.handle,
-            .pending => return s.pending.?.file.handle,
-            .path => {
-                s.handle = try sys.openFile(r.io, s.root, s.path);
+        /// Opens a pending's parent before its rename: the handle an earlier
+        /// pending already holds on it, or a new one. On macOS and Windows it
+        /// then stands for its volume's flush.
+        fn openParent(r: *Self, s: *Slot, earlier: []const Slot) E!void {
+            const p = s.pending.?;
+            s.root = p.root.handle;
+            s.path = p.parentSubPath() orelse "";
+            if (findParent(earlier, s)) |shared| {
+                s.handle = shared;
+                s.open = true;
+            } else if (s.path.len == 0) {
+                s.handle = s.root;
+                s.open = true;
+                try r.ownCwd(s);
+            } else {
+                s.handle = sys.openDir(r.io, s.root, s.path) catch |err| return r.fail(s, err);
                 s.owned = true;
                 s.open = true;
-                return s.handle;
-            },
-            else => unreachable, // unreachable: only file slots reach here
-        }
-    }
-
-    /// Linux syncs each file at the level; Darwin and Windows write each one
-    /// out and leave the device flush to one call per volume, made through
-    /// a handle that stays open: a pending's parent once the batch opened
-    /// it, or a file's own.
-    fn syncHandle(r: *Run, s: *Slot, handle: sys.Handle) Error!Reached {
-        const subject = if (s.pending) |p| p.tempName() else s.path;
-        if (!is_darwin and !is_windows) return platform.syncChain(r.io, handle, r.options.level, true, subject);
-        const reached = try platform.writeout(r.io, handle, subject);
-        if (reached != .written) return reached;
-        const id = try sys.statId(r.io, handle);
-        const device = if (is_windows) try sys.volumeName(r.io, handle) else 0;
-        const parent_open = s.kind == .pending and s.open;
-        const rep: ?sys.Handle = if (s.kind != .pending) handle else if (parent_open) s.handle else null;
-        const v = r.volume(id.volume, device, rep, parent_open, s.index) orelse
-            return platform.volumeFlush(r.io, handle, subject);
-        v.needs_flush = true;
-        if (s.kind == .pending and !parent_open) {
-            s.id.volume = id.volume;
-            s.device = device;
-            s.on_volume = true;
-        }
-        if (s.kind == .pending and s.pending.?.state == .open and v.temp == null) {
-            v.temp = handle;
-            v.temp_name = subject;
-        }
-        return .full;
-    }
-
-    /// The volume with this key, added if new; `handle` stands for it if
-    /// none does yet, or if it is a directory and the one there is not.
-    /// Null once the table is full (the caller then flushes at its own
-    /// handle).
-    fn volume(r: *Run, key: u64, device: u64, handle: ?sys.Handle, is_dir: bool, slot: u32) ?*Volume {
-        for (r.volumes[0..r.volume_count]) |*v| {
-            if (v.volume == key and v.device == device) {
-                if (handle != null and (v.handle == null or (is_dir and !v.is_dir))) {
-                    v.handle = handle;
-                    v.is_dir = is_dir;
-                    v.slot = slot;
-                }
-                return v;
             }
+            p.adoptParent(.{ .handle = s.handle });
+            if (s.on_volume) _ = r.volume(s.id.volume, s.device, s.handle, true, s.index);
         }
-        if (r.volume_count == max_volumes) return null;
-        r.volumes[r.volume_count] = .{ .volume = key, .device = device, .handle = handle, .is_dir = is_dir, .slot = slot };
-        r.volume_count += 1;
-        return &r.volumes[r.volume_count - 1];
-    }
 
-    /// Whether `handle` is the one a volume flushes through.
-    fn standsForVolume(r: *Run, handle: sys.Handle) bool {
-        for (r.volumes[0..r.volume_count]) |v| if (v.handle == handle) return true;
-        return false;
-    }
-
-    // -- step 2: one barrier per volume -----------------------------------
-
-    fn barrier(r: *Run) Error!void {
-        if (!is_darwin and !is_windows) return;
-        for (r.volumes[0..r.volume_count]) |v| {
-            const temp = v.temp orelse continue;
-            const slot = &r.batch.slots[v.slot];
-            const reached = (if (is_windows)
-                platform.volumeFlush(r.io, temp, v.temp_name)
-            else
-                platform.volumeBarrier(r.io, temp, r.options.barrier, v.temp_name)) catch |err| return r.fail(slot, err);
-            // A barrier or a flush keeps the order; a refused one leaves
-            // only what the fallback reached.
-            if (!reached.atLeast(.ordered)) try r.part(slot, reached);
+        /// The handle an earlier pending already holds on the same parent.
+        fn findParent(earlier: []const Slot, s: *const Slot) ?sys.Handle {
+            for (earlier) |e| {
+                if (e.kind == .pending and e.open and e.root == s.root and std.mem.eql(u8, e.path, s.path)) return e.handle;
+            }
+            return null;
         }
-    }
 
-    /// POSIX: each temp closed once, its error a failed sync. All of them
-    /// before the first rename, so a failure here publishes nothing.
-    fn closeTemps(r: *Run) Error!void {
-        for (r.slots()) |*s| {
-            const p = s.pending orelse continue;
-            if (p.state != .open) continue;
-            p.markSynced(r.io, r.options.level, s.reached) catch |err| return r.fail(s, err);
+        // -- step 1: files ----------------------------------------------------
+
+        fn isFileSlot(s: *const Slot) bool {
+            return s.kind == .file or s.kind == .path or s.kind == .pending;
         }
-    }
 
-    // -- step 3: renames --------------------------------------------------
-
-    fn publish(r: *Run) Error!void {
-        var segment: usize = 0;
-        const all = r.slots();
-        for (all, 0..) |*s, i| switch (s.kind) {
-            .pending => {
-                r.io.checkCancel() catch |err| return r.fail(s, err);
-                const p = s.pending.?;
-                try r.openParent(s, all[0..i]);
-                const renamed = p.renameSynced(r.io, s.publish, r.options.busy_deadline) catch |err| return r.fail(s, err);
-                // Windows keeps the temp open for the rename by handle;
-                // after it the handle has no use.
-                p.finish(r.io);
-                if (renamed) {
-                    s.touched = true;
-                    r.renamed = true;
-                } else if (r.options.level != .none) {
-                    try r.syncKept(s);
-                }
-            },
-            .fence => {
-                if (r.options.level != .none) try r.fenceDirs(all[segment..i], s);
-                segment = i + 1;
-            },
-            else => {},
-        };
-    }
-
-    /// 3b: `keep_existing` found the name taken. The existing file may have
-    /// been written by someone who never synced it or its name; a batch
-    /// that reports `.data` must not hold such a file. Its directory is
-    /// synced in step 4 with the others.
-    fn syncKept(r: *Run, s: *Slot) Error!void {
-        const p = s.pending.?;
-        const handle = sys.openFile(r.io, s.handle, p.baseName()) catch |err| return r.fail(s, err);
-        defer sys.release(r.io, handle);
-        const reached = r.syncHandle(s, handle) catch |err| return r.fail(s, err);
-        try r.part(s, reached);
-        s.touched = true;
-    }
-
-    /// A fence: every directory renamed into since the last fence is synced
-    /// (Darwin and Windows: written out, then one barrier or flush on the
-    /// last), so the renames after it reach the disk after these. A fence
-    /// the filesystem cannot keep, because it refuses a directory's sync,
-    /// leaves the batch `.written` at best: each file still ends old or
-    /// new, but a crash may show a rename after the fence without those
-    /// before it.
-    fn fenceDirs(r: *Run, segment: []Slot, at: *const Slot) Error!void {
-        var last: ?*Slot = null;
-        for (segment, 0..) |*s, i| {
-            if (s.kind != .pending or !s.touched) continue;
-            if (seenHandle(segment[0..i], s.handle)) continue;
-            last = s;
-            if (is_darwin or is_windows) {
-                const reached = r.writeoutDir(s.handle) catch |err| return r.fail(s, err);
-                if (reached == .none) try r.part(s, .written);
-            } else {
-                syncDirOne(r, s);
+        fn syncFiles(r: *Self) E!void {
+            if (is_linux and r.options.parallel > 1) return r.syncFilesConcurrently();
+            for (r.slots()) |*s| if (isFileSlot(s)) {
+                syncOne(r, s);
                 if (s.err) |err| return r.fail(s, err);
-                try r.part(s, if (s.refused) .written else s.reached);
-            }
-        }
-        const s = last orelse return;
-        if (!is_darwin and !is_windows) return;
-        const reached = r.flushDir(s.handle, true) catch |err| return r.fail(at, err);
-        if (!reached.atLeast(.ordered)) try r.part(s, Reached.min(reached, .written));
-    }
-
-    fn seenHandle(earlier: []const Slot, handle: sys.Handle) bool {
-        for (earlier) |e| if (e.kind == .pending and e.touched and e.handle == handle) return true;
-        return false;
-    }
-
-    // -- steps 4 and 5: directories, then volumes --------------------------
-
-    fn isDirSlot(s: *const Slot) bool {
-        return switch (s.kind) {
-            .dir, .dir_path => true,
-            .pending => s.touched,
-            else => false,
-        };
-    }
-
-    fn syncDirs(r: *Run) Error!void {
-        const all = r.slots();
-        for (all) |*s| if (isDirSlot(s)) {
-            const id = sys.statId(r.io, s.handle) catch |err| return r.fail(s, err);
-            s.id = id;
-            s.device = if (is_windows) sys.volumeName(r.io, s.handle) catch |err| return r.fail(s, err) else 0;
-        };
-        // The rename order is spent: sort by directory key, in place, and
-        // mark the first slot of each distinct directory.
-        std.sort.pdq(Slot, all, {}, dirOrder);
-        for (all, 0..) |*s, i| {
-            s.err = null;
-            s.refused = false;
-            s.reached = .none;
-            s.distinct = isDirSlot(s) and !(i > 0 and isDirSlot(&all[i - 1]) and sameDir(&all[i - 1], s));
-        }
-        if (!is_darwin and !is_windows) {
-            if (r.options.parallel > 1) {
-                try r.concurrently(isDistinctDir, syncDirOne);
-            } else {
-                for (all) |*s| if (isDistinctDir(s)) syncDirOne(r, s);
-            }
-            for (all) |*s| if (isDistinctDir(s)) try r.foldDir(s);
-            return;
-        }
-        for (all) |*s| {
-            if (!isDistinctDir(s)) continue;
-            const reached = r.writeoutDir(s.handle) catch |err| return r.fail(s, err);
-            if (reached == .none) {
-                try r.part(s, .ordered);
-                continue;
-            }
-            const v = r.volume(s.id.volume, s.device, s.handle, true, s.index) orelse {
-                try r.part(s, r.flushDir(s.handle, false) catch |err| return r.fail(s, err));
-                continue;
+                try r.part(s, s.reached);
             };
+        }
+
+        /// Linux: `parallel` syncs at once; the journal merges concurrent
+        /// commits into a few. One after another where the `Io` has no
+        /// concurrency.
+        fn syncFilesConcurrently(r: *Self) E!void {
+            try r.concurrently(isFileSlot, syncOne);
+            for (r.slots()) |*s| if (isFileSlot(s)) {
+                if (s.err) |err| return r.fail(s, err);
+                try r.part(s, s.reached);
+            };
+        }
+
+        /// Runs `step` on every slot `selected` picks, `parallel` at once, in
+        /// add order (or sorted order, once sorted). Each leaves its result in
+        /// its slot.
+        fn concurrently(r: *Self, comptime selected: fn (*const Slot) bool, comptime step: fn (*Self, *Slot) void) E!void {
+            const all = r.slots();
+            var start: usize = 0;
+            while (start < all.len) {
+                var group: Io.Group = .init;
+                var started: usize = 0;
+                var i = start;
+                while (i < all.len and started < r.options.parallel) : (i += 1) {
+                    const s = &all[i];
+                    if (!selected(s)) continue;
+                    group.concurrent(r.io, step, .{ r, s }) catch step(r, s);
+                    started += 1;
+                }
+                group.await(r.io) catch |err| {
+                    group.cancel(r.io);
+                    return err;
+                };
+                start = i;
+            }
+        }
+
+        /// One file's step 1, its result left in the slot.
+        fn syncOne(r: *Self, s: *Slot) void {
+            s.err = null;
+            if (s.pending) |p| switch (p.state) {
+                .synced => {
+                    syncedPending(r, s, p);
+                    return;
+                },
+                else => p.flushWriter(r.io) catch |err| {
+                    s.err = err;
+                    return;
+                },
+            };
+            const handle = r.fileHandle(s) catch |err| {
+                s.err = err;
+                return;
+            };
+            s.reached = r.syncHandle(s, handle) catch |err| blk: {
+                s.err = err;
+                break :blk .none;
+            };
+            // A path's handle is closed after its sync, unless it stands for
+            // its volume's flush.
+            if (s.kind == .path and s.open and !r.standsForVolume(handle)) {
+                sys.release(r.io, handle);
+                s.open = false;
+                s.owned = false;
+            }
+        }
+
+        /// A pending a failed rename left synced: its temp is not synced again
+        /// (on POSIX it is closed), so what its first sync reached is its part.
+        fn syncedPending(r: *Self, s: *Slot, p: *Staged) void {
+            const level = r.options.level;
+            // Darwin: a barrier ordered it, and the flush of its directory's
+            // volume after the renames persists it.
+            const flushed_later = is_darwin and p.file_reached == .ordered and @backingInt(level) >= @backingInt(Level.data);
+            s.reached = if (flushed_later) .full else p.file_reached;
+        }
+
+        /// The handle a file slot syncs through, opening a path slot.
+        fn fileHandle(r: *Self, s: *Slot) Error!sys.Handle {
+            switch (s.kind) {
+                .file => return s.handle,
+                .pending => return s.pending.?.file.handle,
+                .path => {
+                    s.handle = try sys.openFile(r.io, s.root, s.path);
+                    s.owned = true;
+                    s.open = true;
+                    return s.handle;
+                },
+                else => unreachable, // unreachable: only file slots reach here
+            }
+        }
+
+        /// Linux syncs each file at the level; Darwin and Windows write each one
+        /// out and leave the device flush to one call per volume, made through
+        /// a handle that stays open: a pending's parent once the batch opened
+        /// it, or a file's own.
+        fn syncHandle(r: *Self, s: *Slot, handle: sys.Handle) Error!Reached {
+            const subject = if (s.pending) |p| p.tempName() else s.path;
+            if (!is_darwin and !is_windows) return platform.syncChain(r.io, handle, r.options.level, true, subject);
+            const reached = try platform.writeout(r.io, handle, subject);
+            if (reached != .written) return reached;
+            const id = try sys.statId(r.io, handle);
+            const device = if (is_windows) try sys.volumeName(r.io, handle) else 0;
+            const parent_open = s.kind == .pending and s.open;
+            const rep: ?sys.Handle = if (s.kind != .pending) handle else if (parent_open) s.handle else null;
+            const v = r.volume(id.volume, device, rep, parent_open, s.index) orelse
+                return platform.volumeFlush(r.io, handle, subject);
             v.needs_flush = true;
+            if (s.kind == .pending and !parent_open) {
+                s.id.volume = id.volume;
+                s.device = device;
+                s.on_volume = true;
+            }
+            if (s.kind == .pending and s.pending.?.state == .open and v.temp == null) {
+                v.temp = handle;
+                v.temp_name = subject;
+            }
+            return .full;
         }
-    }
 
-    /// The first slot of a distinct directory, once `syncDirs` sorted them.
-    fn isDistinctDir(s: *const Slot) bool {
-        return s.distinct;
-    }
-
-    fn dirOrder(_: void, a: Slot, b: Slot) bool {
-        const da = isDirSlot(&a);
-        const db = isDirSlot(&b);
-        if (da != db) return da;
-        if (a.id.volume != b.id.volume) return a.id.volume < b.id.volume;
-        if (a.device != b.device) return a.device < b.device;
-        if (a.id.file != b.id.file) return a.id.file < b.id.file;
-        return a.index < b.index;
-    }
-
-    fn sameDir(a: *const Slot, b: *const Slot) bool {
-        return a.id.volume == b.id.volume and a.id.file == b.id.file and a.device == b.device;
-    }
-
-    /// Linux and the BSDs: one directory's sync, its outcome left in the
-    /// slot.
-    fn syncDirOne(r: *Run, s: *Slot) void {
-        s.err = null;
-        const outcome = platform.dirSync(r.io, s.handle, r.options.busy_deadline, null) catch |err| {
-            s.err = err;
-            return;
-        };
-        s.reached = outcome.reached;
-        s.refused = outcome.refused;
-    }
-
-    /// Folds in one directory's sync: a refusal leaves the operation
-    /// ordered.
-    fn foldDir(r: *Run, s: *Slot) Error!void {
-        if (s.err) |err| return r.fail(s, err);
-        if (s.refused) {
-            if (r.options.fallback == .refuse) return r.fail(s, error.LevelUnavailable);
-            r.reached = Reached.min(r.reached, .ordered);
-            return;
+        /// The volume with this key, added if new; `handle` stands for it if
+        /// none does yet, or if it is a directory and the one there is not.
+        /// Null once the table is full (the caller then flushes at its own
+        /// handle).
+        fn volume(r: *Self, key: u64, device: u64, handle: ?sys.Handle, is_dir: bool, slot: u32) ?*Volume {
+            for (r.volumes[0..r.volume_count]) |*v| {
+                if (v.volume == key and v.device == device) {
+                    if (handle != null and (v.handle == null or (is_dir and !v.is_dir))) {
+                        v.handle = handle;
+                        v.is_dir = is_dir;
+                        v.slot = slot;
+                    }
+                    return v;
+                }
+            }
+            if (r.volume_count == max_volumes) return null;
+            r.volumes[r.volume_count] = .{ .volume = key, .device = device, .handle = handle, .is_dir = is_dir, .slot = slot };
+            r.volume_count += 1;
+            return &r.volumes[r.volume_count - 1];
         }
-        try r.part(s, s.reached);
-    }
 
-    /// Darwin `fsync` (W) of a directory; Windows `NO_SYNC` on a handle
-    /// reopened for it.
-    fn writeoutDir(r: *Run, handle: sys.Handle) Error!Reached {
-        if (!is_windows) return platform.writeout(r.io, handle, null);
-        const flush = try platform.openDirFlush(r.io, handle, r.options.busy_deadline);
-        defer sys.release(r.io, flush);
-        return platform.writeout(r.io, flush, null);
-    }
+        /// Whether `handle` is the one a volume flushes through.
+        fn standsForVolume(r: *Self, handle: sys.Handle) bool {
+            for (r.volumes[0..r.volume_count]) |v| if (v.handle == handle) return true;
+            return false;
+        }
 
-    /// One device flush through a directory: Darwin `F_FULLFSYNC`, Windows
-    /// `NtFlushBuffersFile` on a handle reopened for it.
-    fn flushDir(r: *Run, handle: sys.Handle, barrier_ok: bool) Error!Reached {
-        if (is_windows) {
+        // -- step 2: one barrier per volume -----------------------------------
+
+        fn barrier(r: *Self) E!void {
+            if (!is_darwin and !is_windows) return;
+            for (r.volumes[0..r.volume_count]) |v| {
+                const temp = v.temp orelse continue;
+                const slot = &r.batch.slots[v.slot];
+                const reached = (if (is_windows)
+                    platform.volumeFlush(r.io, temp, v.temp_name)
+                else
+                    platform.volumeBarrier(r.io, temp, r.options.barrier, v.temp_name)) catch |err| return r.fail(slot, err);
+                // A barrier or a flush keeps the order; a refused one leaves
+                // only what the fallback reached.
+                if (!reached.atLeast(.ordered)) try r.part(slot, reached);
+            }
+        }
+
+        /// POSIX: each temp closed once, its error a failed sync. All of them
+        /// before the first rename, so a failure here publishes nothing.
+        fn closeTemps(r: *Self) E!void {
+            for (r.slots()) |*s| {
+                const p = s.pending orelse continue;
+                if (p.state != .open) continue;
+                p.markSynced(r.io, s.reached) catch |err| return r.fail(s, err);
+            }
+        }
+
+        // -- step 3: renames --------------------------------------------------
+
+        fn publish(r: *Self) E!void {
+            var segment: usize = 0;
+            const all = r.slots();
+            for (all, 0..) |*s, i| switch (s.kind) {
+                .pending => {
+                    r.io.checkCancel() catch |err| return r.fail(s, err);
+                    const p = s.pending.?;
+                    try r.openParent(s, all[0..i]);
+                    const renamed = p.renameSynced(r.io, s.publish, r.options.busy_deadline) catch |err| return r.fail(s, err);
+                    // Windows keeps the temp open for the rename by handle;
+                    // after it the handle has no use.
+                    p.finish(r.io);
+                    if (renamed) {
+                        s.touched = true;
+                        r.renamed = true;
+                    } else if (r.options.level != .none) {
+                        try r.syncKept(s);
+                    }
+                },
+                .fence => {
+                    if (r.options.level != .none) try r.fenceDirs(all[segment..i], s);
+                    segment = i + 1;
+                },
+                else => {},
+            };
+        }
+
+        /// 3b: `keep_existing` found the name taken. The existing file may have
+        /// been written by someone who never synced it or its name; a batch
+        /// that reports `.data` must not hold such a file. Its directory is
+        /// synced in step 4 with the others.
+        fn syncKept(r: *Self, s: *Slot) E!void {
+            const p = s.pending.?;
+            const handle = sys.openFile(r.io, s.handle, p.baseName()) catch |err| return r.fail(s, err);
+            defer sys.release(r.io, handle);
+            const reached = r.syncHandle(s, handle) catch |err| return r.fail(s, err);
+            try r.part(s, reached);
+            s.touched = true;
+        }
+
+        /// A fence: every directory renamed into since the last fence is synced
+        /// (Darwin and Windows: written out, then one barrier or flush on the
+        /// last), so the renames after it reach the disk after these. A fence
+        /// the filesystem cannot keep, because it refuses a directory's sync,
+        /// leaves the batch `.written` at best: each file still ends old or
+        /// new, but a crash may show a rename after the fence without those
+        /// before it.
+        fn fenceDirs(r: *Self, segment: []Slot, at: *const Slot) E!void {
+            var last: ?*Slot = null;
+            for (segment, 0..) |*s, i| {
+                if (s.kind != .pending or !s.touched) continue;
+                if (seenHandle(segment[0..i], s.handle)) continue;
+                last = s;
+                if (is_darwin or is_windows) {
+                    const reached = r.writeoutDir(s.handle) catch |err| return r.fail(s, err);
+                    if (reached == .none) try r.part(s, .written);
+                } else {
+                    syncDirOne(r, s);
+                    if (s.err) |err| return r.fail(s, err);
+                    try r.part(s, if (s.refused) .written else s.reached);
+                }
+            }
+            const s = last orelse return;
+            if (!is_darwin and !is_windows) return;
+            const reached = r.flushDir(s.handle, true) catch |err| return r.fail(at, err);
+            if (!reached.atLeast(.ordered)) try r.part(s, Reached.min(reached, .written));
+        }
+
+        fn seenHandle(earlier: []const Slot, handle: sys.Handle) bool {
+            for (earlier) |e| if (e.kind == .pending and e.touched and e.handle == handle) return true;
+            return false;
+        }
+
+        // -- steps 4 and 5: directories, then volumes --------------------------
+
+        fn isDirSlot(s: *const Slot) bool {
+            return switch (s.kind) {
+                .dir, .dir_path => true,
+                .pending => s.touched,
+                else => false,
+            };
+        }
+
+        fn syncDirs(r: *Self) E!void {
+            const all = r.slots();
+            for (all) |*s| if (isDirSlot(s)) {
+                const id = sys.statId(r.io, s.handle) catch |err| return r.fail(s, err);
+                s.id = id;
+                s.device = if (is_windows) sys.volumeName(r.io, s.handle) catch |err| return r.fail(s, err) else 0;
+            };
+            // The rename order is spent: sort by directory key, in place, and
+            // mark the first slot of each distinct directory.
+            std.sort.pdq(Slot, all, {}, dirOrder);
+            for (all, 0..) |*s, i| {
+                s.err = null;
+                s.refused = false;
+                s.reached = .none;
+                s.distinct = isDirSlot(s) and !(i > 0 and isDirSlot(&all[i - 1]) and sameDir(&all[i - 1], s));
+            }
+            if (!is_darwin and !is_windows) {
+                if (r.options.parallel > 1) {
+                    try r.concurrently(isDistinctDir, syncDirOne);
+                } else {
+                    for (all) |*s| if (isDistinctDir(s)) syncDirOne(r, s);
+                }
+                for (all) |*s| if (isDistinctDir(s)) try r.foldDir(s);
+                return;
+            }
+            for (all) |*s| {
+                if (!isDistinctDir(s)) continue;
+                const reached = r.writeoutDir(s.handle) catch |err| return r.fail(s, err);
+                if (reached == .none) {
+                    try r.part(s, .ordered);
+                    continue;
+                }
+                const v = r.volume(s.id.volume, s.device, s.handle, true, s.index) orelse {
+                    try r.part(s, r.flushDir(s.handle, false) catch |err| return r.fail(s, err));
+                    continue;
+                };
+                v.needs_flush = true;
+            }
+        }
+
+        /// The first slot of a distinct directory, once `syncDirs` sorted them.
+        fn isDistinctDir(s: *const Slot) bool {
+            return s.distinct;
+        }
+
+        fn dirOrder(_: void, a: Slot, b: Slot) bool {
+            const da = isDirSlot(&a);
+            const db = isDirSlot(&b);
+            if (da != db) return da;
+            if (a.id.volume != b.id.volume) return a.id.volume < b.id.volume;
+            if (a.device != b.device) return a.device < b.device;
+            if (a.id.file != b.id.file) return a.id.file < b.id.file;
+            return a.index < b.index;
+        }
+
+        fn sameDir(a: *const Slot, b: *const Slot) bool {
+            return a.id.volume == b.id.volume and a.id.file == b.id.file and a.device == b.device;
+        }
+
+        /// Linux and the BSDs: one directory's sync, its outcome left in the
+        /// slot.
+        fn syncDirOne(r: *Self, s: *Slot) void {
+            s.err = null;
+            const outcome = platform.dirSync(r.io, s.handle, r.options.busy_deadline, null) catch |err| {
+                s.err = err;
+                return;
+            };
+            s.reached = outcome.reached;
+            s.refused = outcome.refused;
+        }
+
+        /// Folds in one directory's sync: a refusal leaves the operation
+        /// ordered.
+        fn foldDir(r: *Self, s: *Slot) E!void {
+            if (s.err) |err| return r.fail(s, err);
+            if (s.refused) {
+                if (fallback == .refuse) return r.fail(s, error.LevelUnavailable);
+                r.reached = Reached.min(r.reached, .ordered);
+                return;
+            }
+            try r.part(s, s.reached);
+        }
+
+        /// Darwin `fsync` (W) of a directory; Windows `NO_SYNC` on a handle
+        /// reopened for it.
+        fn writeoutDir(r: *Self, handle: sys.Handle) Error!Reached {
+            if (!is_windows) return platform.writeout(r.io, handle, null);
             const flush = try platform.openDirFlush(r.io, handle, r.options.busy_deadline);
             defer sys.release(r.io, flush);
-            return platform.flushFull(r.io, flush, .sync_full, null);
+            return platform.writeout(r.io, flush, null);
         }
-        if (barrier_ok) return platform.volumeBarrier(r.io, handle, r.options.barrier, null);
-        return platform.volumeFlush(r.io, handle, null);
-    }
 
-    fn flushVolumes(r: *Run) Error!void {
-        if (!is_darwin and !is_windows) return;
-        for (r.volumes[0..r.volume_count]) |v| {
-            if (!v.needs_flush) continue;
-            const slot = r.findSlot(v.slot);
-            // Every pending on a volume was renamed by now, and its parent
-            // stands for the volume.
-            const handle = v.handle orelse unreachable; // unreachable: a volume without a handle holds only pendings, whose parents opened at their renames
-            const reached = (if (v.is_dir)
-                r.flushDir(handle, false)
-            else
-                platform.volumeFlush(r.io, handle, null)) catch |err| return r.fail(slot, err);
-            try r.part(slot, reached);
+        /// One device flush through a directory: Darwin `F_FULLFSYNC`, Windows
+        /// `NtFlushBuffersFile` on a handle reopened for it.
+        fn flushDir(r: *Self, handle: sys.Handle, barrier_ok: bool) Error!Reached {
+            if (is_windows) {
+                const flush = try platform.openDirFlush(r.io, handle, r.options.busy_deadline);
+                defer sys.release(r.io, flush);
+                return platform.flushFull(r.io, flush, .sync_full, null);
+            }
+            if (barrier_ok) return platform.volumeBarrier(r.io, handle, r.options.barrier, null);
+            return platform.volumeFlush(r.io, handle, null);
         }
-    }
 
-    /// The slot added `index`-th, wherever the sort put it.
-    fn findSlot(r: *Run, index: u32) *Slot {
-        for (r.slots()) |*s| if (s.index == index) return s;
-        unreachable; // unreachable: every index names a slot of this batch
-    }
-};
+        fn flushVolumes(r: *Self) E!void {
+            if (!is_darwin and !is_windows) return;
+            for (r.volumes[0..r.volume_count]) |v| {
+                if (!v.needs_flush) continue;
+                const slot = r.findSlot(v.slot);
+                // Every pending on a volume was renamed by now, and its parent
+                // stands for the volume.
+                const handle = v.handle orelse unreachable; // unreachable: a volume without a handle holds only pendings, whose parents opened at their renames
+                const reached = (if (v.is_dir)
+                    r.flushDir(handle, false)
+                else
+                    platform.volumeFlush(r.io, handle, null)) catch |err| return r.fail(slot, err);
+                try r.part(slot, reached);
+            }
+        }
+
+        /// The slot added `index`-th, wherever the sort put it.
+        fn findSlot(r: *Self, index: u32) *Slot {
+            for (r.slots()) |*s| if (s.index == index) return s;
+            unreachable; // unreachable: every index names a slot of this batch
+        }
+    };
+}

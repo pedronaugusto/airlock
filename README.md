@@ -64,10 +64,14 @@ or the complete new one, never a torn one), `data` (contents, length and any
 name changed are durable) or `full` (all metadata too). Every call returns
 `Reached`, what actually happened, because filesystems refuse calls: `exFAT`
 and SMB on macOS refuse `F_FULLFSYNC`, ReFS and FAT refuse the data-only flush
-on Windows. With `Fallback.report`, the default, airlock falls back to the
-strongest call the filesystem accepts and says so; with `Fallback.refuse` it
-returns `error.LevelUnavailable` instead. A fallback happens only on the codes
-that mean the filesystem cannot be asked. Any other error means the bytes did
+on Windows. airlock falls back to the strongest call the filesystem accepts
+and says so in `Reached`; `reached.atLeast(level)` tells a caller whether the
+promise was kept. A publish that must not happen below its level calls
+`commitOrRefuse` (or `writeFileOrRefuse`, `Batch.commitOrRefuse`,
+`symLinkOrRefuse`), which decides before the rename on macOS and Windows and
+returns `error.LevelUnavailable` instead of publishing; only these four can
+return that error. A fallback happens only on the codes that mean the
+filesystem cannot be asked. Any other error means the bytes did
 not get down: it is returned, never retried and never answered with a weaker
 call, since the kernel may already have dropped the pages and cleared the
 error. Only `EINTR` is retried, after a cancel check, and never for `close`.
@@ -100,7 +104,7 @@ Linux and Windows, and one barrier and one flush on macOS, where the
 directory's `F_FULLFSYNC` persists everything handed to the device before it.
 A failed sync poisons the pending and removes the temp at once; its contents
 are unknown. A rename that fails and leaves the temp intact can be retried
-without a second sync, at the level of the first or below. A directory sync
+without a second sync, and the temp keeps what that first sync reached. A directory sync
 that fails after the rename is `error.PublishedNotDurable`, with the cause
 kept; `rename` and `remove` say the same for a failure after the name changed,
 with the cause in `Diagnostics`. On Windows the rename is made through the
@@ -141,9 +145,10 @@ the serial and the file ids, so a batch tells volumes apart by the NT device
 name as well.
 
 Every raw call goes through one file, `src/sys.zig`, behind a test seam: when
-the `Io` a call is given is a layer whose `fileSync` is `sys.hookedSync`, a
-hook decides the call first. Production pays one function-pointer compare per
-call. Nothing allocates.
+the `Io` a call is given carries a test's hook, the hook decides the call
+first. Production pays one function-pointer compare per call. The seam is a
+module of its own that only airlock and `airlock.testing` import, so neither
+exports it. Nothing allocates.
 
 ## Scope
 
@@ -178,7 +183,8 @@ pages and Microsoft's documentation, and on the crash model below.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the `FaultIo`,
-  clock and `everyFault` the tests run on, fetched only for them.
+  clock and `everyFault` the tests and `airlock.testing` run on, fetched only
+  by a build that asks for them.
 
 ## Testing
 
@@ -198,11 +204,36 @@ platform's documented persistence rules and enumerates every state a crash
 could leave; on macOS it runs with the barrier honoured and dropped, and shows
 the window `barrier = false` closes. A batch's descriptors are counted at every
 raw call, so the budget above is measured at its peak, and the Windows retry
-deadlines run on shakedown's clock. `zig build bench` runs the benchmarks by hand
-(`-- --dir <path>` puts the files on the disk to measure): each level's sync
-cost, replaces and batches per level and size, the raw calls and barriers of
-each operation counted through the seam, and the code airlock replaces beside
-it on the same work. CI compiles them and never times them.
+deadlines run on shakedown's clock. `zig build bench` times the benchmarks in
+ReleaseFast by hand: each level's sync cost, replaces and batches per level
+and size, the raw calls and barriers of each operation counted through the
+seam, and relic's durability code beside airlock on the same work. Run from
+`zig-out/bench`, `airlock-bench --dir <path>` puts the files on the disk to
+measure. `zig build test` runs each row once with `--smoke`; CI times nothing.
+
+### Testing code that calls airlock
+
+airlock's syncs and renames are raw calls that go past the `Io` they are
+given, so an `Io` double of your own never sees them. `airlock.testing` is the
+`Io` that does: a `Seam` over shakedown's `FaultIo`, where each of airlock's
+calls is a traced step, counted by `count` and `syncs`, failed by a `Plan` of
+airlock calls (`fail`, `always`), and reached by shakedown's `everyFault`.
+Your build gets it from airlock's build.zig, and only then fetches shakedown:
+
+```zig
+const airlock = b.dependency("airlock", .{ .target = target, .optimize = optimize });
+tests.root_module.addImport("airlock.testing", try @import("airlock").testing(airlock));
+```
+
+```zig
+const seam = @import("airlock.testing");
+
+const hooked = try seam.Seam.create(gpa, io, .{ .plan = &.{seam.fail(seam.data_sync, 2, seam.io_error)} });
+defer hooked.destroy();
+try log.write(hooked.io(), record); // the first sync succeeds
+try std.testing.expectError(error.SyncFailed, log.write(hooked.io(), record)); // the second fails
+try std.testing.expectEqual(2, hooked.syncs());
+```
 
 [CI](.github/workflows/ci.yml) runs the source checks and the Linux Debug suite
 on every push it is asked for, and before a merge the Debug suite on macOS and

@@ -27,12 +27,15 @@ pub const CreateOptions = Staged.CreateOptions;
 pub const CreateError = Staged.CreateError;
 /// Replace, create new, or keep an existing destination.
 pub const Publish = Staged.Publish;
-/// The level, fallback and publish mode of a `commit`.
+/// The level and publish mode of a `commit`.
 pub const CommitOptions = Staged.CommitOptions;
 /// What a `commit` reached, and whether it kept an existing file.
 pub const Committed = Staged.Committed;
 /// What `commit` can fail with.
 pub const CommitError = Staged.CommitError;
+/// What `commitOrRefuse` can fail with: `CommitError` and
+/// `error.LevelUnavailable`.
+pub const CommitOrRefuseError = Staged.CommitOrRefuseError;
 /// Where a pending is in its publish.
 pub const State = Staged.State;
 
@@ -40,7 +43,6 @@ pub const State = Staged.State;
 /// destination ("refs/heads/main") has its directory opened once here and
 /// held, so the create, the rename and the directory sync all work relative
 /// to one handle. `dest_sub_path` is borrowed until commit or discard.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOptions) CreateError!Pending {
     return .{ .staged = try .create(io, dir, dest_sub_path, options) };
 }
@@ -70,24 +72,33 @@ pub fn writer(p: *Pending, io: Io, buffer: []u8) *Io.Writer {
 }
 
 /// Syncs the temp at `options.level`, publishes it, and syncs the
-/// directory that received the name.
+/// directory that received the name. A filesystem that refuses a call the
+/// level needs gets the strongest call it accepts, and `reached` says what
+/// that was.
 ///
 /// A failed sync poisons the pending and removes the temp at once: its
 /// contents are unknown and must never be renamed into place. Write the
 /// bytes from your own copy into a new `Pending`. A rename that fails and
 /// leaves the temp intact (`AccessDenied`, a deadline) leaves the pending
-/// `synced`, and a second `commit` retries only the rename, at the level of
-/// the first or below: a stronger one is `error.LevelUnavailable`. A cancel
-/// before the rename returns `error.Canceled` with the state unchanged;
-/// after it, `error.PublishedNotDurable` with `cause` `Canceled`.
-///
-/// With `Fallback.refuse`, Darwin and Windows decide everything before the
-/// rename. Linux learns that a filesystem refuses `fsync` on a directory
-/// only after it, and then returns `PublishedNotDurable` with `cause`
-/// `LevelUnavailable` (ext4, xfs and btrfs accept it).
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
+/// `synced`, and a second `commit` retries only the rename: the temp keeps
+/// what its first sync reached, whatever level the second asks for. A
+/// cancel before the rename returns `error.Canceled` with the state
+/// unchanged; after it, `error.PublishedNotDurable` with `cause`
+/// `Canceled`.
 pub fn commit(p: *Pending, io: Io, options: CommitOptions) CommitError!Committed {
-    return p.staged.commit(io, options);
+    return p.staged.commit(.report, io, options);
+}
+
+/// `commit`, but a filesystem that cannot keep `options.level` is
+/// `error.LevelUnavailable` rather than a weaker `reached`. Darwin and
+/// Windows decide everything before the rename, so nothing is published
+/// and the pending stays as it was. Linux learns that a filesystem refuses
+/// `fsync` on a directory only after it, and then returns
+/// `PublishedNotDurable` with `cause` `LevelUnavailable` (ext4, xfs and
+/// btrfs accept it). A retry after a failed rename is refused when the
+/// first sync reached less than the level asked for now.
+pub fn commitOrRefuse(p: *Pending, io: Io, options: CommitOptions) CommitOrRefuseError!Committed {
+    return p.staged.commit(.refuse, io, options);
 }
 
 /// Idempotent; meant for `defer`. Before the publish it closes the temp and
@@ -104,11 +115,23 @@ pub const WriteFileOptions = struct {
 
 pub const WriteFileError = CreateError || CommitError || Io.File.WritePositionalError;
 
-/// Create, write and commit, for a whole buffer.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
+/// `WriteFileError` and `error.LevelUnavailable`.
+pub const WriteFileOrRefuseError = WriteFileError || CommitOrRefuseError;
+
+/// Create, write and `commit`, for a whole buffer.
 pub fn writeFile(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8, options: WriteFileOptions) WriteFileError!Committed {
     var p = try create(io, dir, sub_path, options.create);
     defer p.discard(io);
     try p.file().writePositionalAll(io, bytes, 0);
     return p.commit(io, options.commit);
+}
+
+/// Create, write and `commitOrRefuse`, for a whole buffer: a filesystem
+/// that cannot keep the level is `error.LevelUnavailable`, and on Darwin
+/// and Windows the destination is left as it was.
+pub fn writeFileOrRefuse(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8, options: WriteFileOptions) WriteFileOrRefuseError!Committed {
+    var p = try create(io, dir, sub_path, options.create);
+    defer p.discard(io);
+    try p.file().writePositionalAll(io, bytes, 0);
+    return p.commitOrRefuse(io, options.commit);
 }

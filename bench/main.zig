@@ -1,10 +1,12 @@
-//! airlock's own benchmarks. `zig build bench` runs them in ReleaseFast and
-//! writes one JSON line per row to stdout and to zig-out/bench/results.jsonl.
+//! airlock's own benchmarks. `zig build bench` runs every row in
+//! ReleaseFast in a fresh directory and prints one JSON line per row.
 //!
 //! Timings are taken by hand, on real disks, never in CI: CI disks are
-//! virtual and their flush cost means nothing. CI only compiles this.
+//! virtual and their flush cost means nothing. `zig build test` runs each
+//! row once with `--smoke`, over the smallest batch, and times nothing
+//! worth reading.
 //!
-//!     zig build bench -- [row prefix] [--dir <directory on the disk to measure>]
+//!     zig-out/bench/airlock-bench [row prefix] [--dir <directory on the disk to measure>]
 //!
 //! Rows:
 //! - `probe/...`: each level's sync of a 4 KiB write, and a directory sync,
@@ -17,19 +19,16 @@
 //!   `rename`, `remove`, `makePath` (three new directories), `symLink`,
 //!   `writeFile` as create-new and keep-existing, and `pruneTemps` over
 //!   `n` leftovers (per second counts the temps).
-//! - `ab/...`: the code airlock replaces (bench/baseline, copied from the
-//!   packages before they adopted it) beside airlock on the same work.
-//! - `counts/...`: the raw calls and barriers of one operation, from the
-//!   test seam: W (writeout), B (barrier), F (device flush).
+//! - `ab/...`: the code airlock replaces (bench/baseline, copied from relic,
+//!   which has not adopted it yet) beside airlock on the same work.
+//! - `counts/...`: the raw calls and barriers of one operation, from
+//!   `airlock.testing`'s seam: W (writeout), B (barrier), F (device flush).
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const airlock = @import("airlock");
-const shakedown = @import("shakedown");
-const strand = @import("baseline/strand.zig");
+const seam = @import("airlock.testing");
 const relic = @import("baseline/relic.zig");
-const lookout = @import("baseline/lookout.zig");
-const chronicle = @import("baseline/chronicle.zig");
 
 const is_linux = builtin.target.os.tag == .linux;
 
@@ -131,16 +130,12 @@ const op_rows = [_]Row{
 };
 
 const ab_rows = [_]Row{
-    .{ .name = "ab/file-data/strand", .ops = 500, .op = abStrandFile },
     .{ .name = "ab/file-data/relic", .ops = 500, .op = abRelicFile },
     .{ .name = "ab/file-data/airlock", .ops = 500, .op = probeSync, .level = .data },
     .{ .name = "ab/replace/relic-atomic-write", .ops = 200, .op = abRelicAtomic },
-    .{ .name = "ab/replace/lookout-durable-save", .ops = 200, .op = abLookout },
-    .{ .name = "ab/replace/chronicle-write-atomic", .ops = 200, .op = abChronicle },
     .{ .name = "ab/replace/airlock", .ops = 200, .op = replace, .overwrite = true },
     .{ .name = "ab/batch-100/relic", .ops = 5, .op = abRelicBatch, .n = 100 },
     .{ .name = "ab/batch-100/relic-durability", .ops = 5, .op = abRelicDurability, .n = 100 },
-    .{ .name = "ab/batch-100/chronicle-backup", .ops = 5, .op = abChronicleBackup, .n = 100 },
     .{ .name = "ab/batch-100/airlock", .ops = 5, .op = batch, .n = 100, .renames = false },
 };
 
@@ -149,21 +144,19 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var prefix: []const u8 = "";
-    var target: []const u8 = "zig-out/bench/scratch";
+    var target: []const u8 = "scratch";
+    var smoke = false;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--dir") and i + 1 < args.len) {
             i += 1;
             target = args[i];
+        } else if (std.mem.eql(u8, args[i], "--smoke")) {
+            smoke = true;
         } else prefix = args[i];
     }
 
     const cwd = Io.Dir.cwd();
-    try cwd.createDirPath(io, "zig-out/bench");
-    var out_file = try cwd.createFile(io, "zig-out/bench/results.jsonl", .{});
-    defer out_file.close(io);
-    var out_buffer: [4096]u8 = undefined;
-    var out = out_file.writer(io, &out_buffer);
     var stdout_buffer: [4096]u8 = undefined;
     var stdout = Io.File.stdout().writer(io, &stdout_buffer);
 
@@ -191,9 +184,15 @@ pub fn main(init: std.process.Init) !void {
     @memset(ctx.big, 0xa5);
     for (&ctx.names, 0..) |*name, n| _ = try std.mem.print(name, "f{d:0>6}", .{n});
 
-    for (rows) |row| {
-        if (!std.mem.startsWith(u8, row.name, prefix)) continue;
-        if (row.parallel > 1 and !is_linux and !std.mem.endsWith(u8, row.name, "p16")) continue;
+    for (rows) |full| {
+        if (!std.mem.startsWith(u8, full.name, prefix)) continue;
+        if (full.parallel > 1 and !is_linux and !std.mem.endsWith(u8, full.name, "p16")) continue;
+        // A smoke run makes each call once, over at most ten files.
+        var row = full;
+        if (smoke) {
+            row.ops = 1;
+            row.n = @min(row.n, 10);
+        }
         const samples = try gpa.alloc(u64, row.ops);
         defer gpa.free(samples);
         for (samples, 0..) |*sample, n| {
@@ -206,13 +205,10 @@ pub fn main(init: std.process.Init) !void {
         for (samples) |s| total += s;
         const per_second = @as(f64, @floatFromInt(row.ops * @max(row.n, 1))) * std.time.ns_per_s / @as(f64, @floatFromInt(@max(total, 1)));
         const fmt = "{{\"row\":\"{s}\",\"ops\":{d},\"p50_us\":{d:.1},\"p99_us\":{d:.1},\"per_second\":{d:.1}}}\n";
-        const values = .{ row.name, row.ops, micros(samples[samples.len / 2]), micros(samples[(samples.len * 99) / 100]), per_second };
-        try out.interface.print(fmt, values);
-        try stdout.interface.print(fmt, values);
+        try stdout.interface.print(fmt, .{ row.name, row.ops, micros(samples[samples.len / 2]), micros(samples[(samples.len * 99) / 100]), per_second });
         try stdout.interface.flush();
     }
-    if (std.mem.startsWith(u8, "counts", prefix[0..@min(prefix.len, 6)])) try counts(&ctx, &out.interface, &stdout.interface);
-    try out.interface.flush();
+    if (std.mem.startsWith(u8, "counts", prefix[0..@min(prefix.len, 6)])) try counts(&ctx, &stdout.interface);
 }
 
 fn micros(ns: u64) f64 {
@@ -335,12 +331,6 @@ fn pruneRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     std.debug.assert(removed == row.n);
 }
 
-fn abStrandFile(ctx: *Context, row: *const Row, i: u64) anyerror!void {
-    _ = row;
-    try ctx.file.writePositionalAll(ctx.io, &ctx.page, (i % 256) * 4096);
-    try strand.syncFile(ctx.io, ctx.file, .data);
-}
-
 fn abRelicFile(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     _ = row;
     try ctx.file.writePositionalAll(ctx.io, &ctx.page, (i % 256) * 4096);
@@ -351,21 +341,6 @@ fn abRelicAtomic(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     _ = row;
     _ = i;
     try relic.atomicWrite(ctx.io, ctx.dir, "replaced", &ctx.page);
-}
-
-fn abLookout(ctx: *Context, row: *const Row, i: u64) anyerror!void {
-    _ = row;
-    _ = i;
-    lookout.saveDurable(ctx.io, ctx.dir, "replaced", &ctx.page) catch |err| switch (err) {
-        error.UnsupportedBaselineDurability => {},
-        else => |e| return e,
-    };
-}
-
-fn abChronicle(ctx: *Context, row: *const Row, i: u64) anyerror!void {
-    _ = row;
-    _ = i;
-    try chronicle.writeAtomic(ctx.io, ctx.dir, "replaced", &ctx.page);
 }
 
 fn writeFiles(ctx: *Context, n: u32) !void {
@@ -390,29 +365,9 @@ fn abRelicDurability(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     try relic.syncDirectory(ctx.io, ctx.dir);
 }
 
-fn abChronicleBackup(ctx: *Context, row: *const Row, i: u64) anyerror!void {
-    _ = i;
-    var names: [100][]const u8 = undefined;
-    for (names[0..row.n], 0..) |*name, k| name.* = ctx.names[k][0..7];
-    try chronicle.backup(ctx.io, ctx.dir, names[0..row.n], &ctx.page);
-}
+// Counts: the raw calls of one operation, through `airlock.testing`.
 
-// Counts: the raw calls of one operation, through the test seam.
-
-const Counter = struct {
-    calls: [@typeInfo(airlock.sys.Call).@"enum".field_names.len]u32 = @splat(0),
-
-    fn call(ctx: *anyopaque, c: airlock.sys.Call, path: ?[]const u8) ?airlock.sys.Result {
-        _ = path;
-        const self: *Counter = @ptrCast(@alignCast(ctx)); // safe: the hook's ctx is its counter
-        self.calls[@backingInt(c)] += 1;
-        return null;
-    }
-};
-
-const Hooked = shakedown.Layer(airlock.sys.HookedState, .{ .fileSync = airlock.sys.hookedSync });
-
-fn counts(ctx: *Context, out: *Io.Writer, stdout: *Io.Writer) !void {
+fn counts(ctx: *Context, stdout: *Io.Writer) !void {
     const cases = [_]Row{
         .{ .name = "counts/replace-ordered", .ops = 1, .op = replace, .level = .ordered, .overwrite = true },
         .{ .name = "counts/replace-data", .ops = 1, .op = replace, .level = .data, .overwrite = true },
@@ -427,22 +382,17 @@ fn counts(ctx: *Context, out: *Io.Writer, stdout: *Io.Writer) !void {
         .{ .name = "counts/keep-existing", .ops = 1, .op = keepExistingRow },
     };
     for (cases) |row| {
-        var counter: Counter = .{};
-        const hook: airlock.sys.Hook = .{ .ctx = &counter, .call = Counter.call, .base = ctx.io };
-        var hooked: Hooked = .init(ctx.io, .{ .hook = &hook });
+        const counted_io = try seam.Seam.create(ctx.gpa, ctx.io, .{ .trace = .all });
+        defer counted_io.destroy();
         var counted = ctx.*;
-        counted.io = hooked.io();
+        counted.io = counted_io.io();
         try row.op(&counted, &row, 0);
-        const c = counter.calls;
-        const C = airlock.sys.Call;
-        const w = c[@backingInt(C.sync_writeout)] + c[@backingInt(C.sync_plain)];
-        const b = c[@backingInt(C.sync_barrier)];
-        const f = c[@backingInt(C.sync_full)] + c[@backingInt(C.sync_dir)] + c[@backingInt(C.sync_data)];
-        const fmt = "{{\"row\":\"{s}\",\"W\":{d},\"B\":{d},\"F\":{d},\"calls\":{d}}}\n";
+        const w = counted_io.count(.sync_writeout) + counted_io.count(.sync_plain);
+        const b = counted_io.count(.sync_barrier);
+        const f = counted_io.count(.sync_full) + counted_io.count(.sync_dir) + counted_io.count(.sync_data);
         var total: u32 = 0;
-        for (c) |n| total += n;
-        try out.print(fmt, .{ row.name, w, b, f, total });
-        try stdout.print(fmt, .{ row.name, w, b, f, total });
+        for (std.meta.tags(seam.Call)) |call| total += counted_io.count(call);
+        try stdout.print("{{\"row\":\"{s}\",\"W\":{d},\"B\":{d},\"F\":{d},\"calls\":{d}}}\n", .{ row.name, w, b, f, total });
         try stdout.flush();
     }
 }

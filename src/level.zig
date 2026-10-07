@@ -71,20 +71,25 @@ pub const Reached = enum(u3) {
     }
 };
 
-/// What a call does when the filesystem refuses the call a level needs.
+/// What a publish does when the filesystem refuses the call a level needs.
+/// Not a runtime option: each public call is one or the other by its name
+/// (`commit` reports, `commitOrRefuse` refuses), so `error.LevelUnavailable`
+/// is in the error set of exactly the calls that can return it.
 pub const Fallback = enum {
     /// Degrade to the strongest call the filesystem accepts and say so in
     /// the `Reached` returned.
     report,
-    /// Return `error.LevelUnavailable` instead. A publish decides this
-    /// before anything is published, except where a platform only learns
-    /// it from the directory sync (Linux; see `Pending.commit`).
+    /// Return `error.LevelUnavailable` instead, before anything is
+    /// published, except where a platform only learns it from the
+    /// directory sync (Linux; see `Pending.commitOrRefuse`).
     refuse,
 };
 
+/// The level of one sync, and the Darwin barrier choice. A sync never
+/// refuses: what it reached is its answer, and a caller that wants less
+/// to be an error compares it with `Reached.atLeast`.
 pub const SyncOptions = struct {
     level: Level = .data,
-    fallback: Fallback = .report,
     /// Darwin: order with `F_BARRIERFSYNC` where a barrier is enough
     /// (1 barrier and 1 flush per replace). False: a full flush instead
     /// (2 flushes), for drives whose barrier support is unknown. fcntl(2):

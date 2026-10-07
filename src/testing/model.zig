@@ -41,8 +41,7 @@
 //! by hand before a release.
 const std = @import("std");
 const builtin = @import("builtin");
-const harness = @import("harness.zig");
-const Call = harness.Call;
+const seam = @import("airlock.testing");
 const level = @import("../level.zig");
 const Reached = level.Reached;
 
@@ -186,7 +185,7 @@ pub const Model = struct {
 
     /// The effects a call makes, by platform. `subject` names the temp a
     /// file sync is on; a sync with no temp subject is on the directory.
-    pub fn call(m: *Model, c: Call, subject: ?[]const u8) void {
+    pub fn call(m: *Model, c: seam.Call, subject: ?[]const u8) void {
         const temp = m.tempIndex(subject);
         const file: Mask = if (temp) |t| m.dataOf(t) else 0;
         switch (c) {
@@ -288,13 +287,13 @@ pub const Model = struct {
 
     /// Replays airlock's calls from a trace, a crash point after each, and
     /// returns the level proved. Calls a fault failed are not made.
-    pub fn replay(m: *Model, h: *harness.Harness) Reached {
+    pub fn replay(m: *Model, h: *seam.Seam) Reached {
         _ = m.crash();
         var end_all_new = m.crash();
         for (h.fio.trace().records()) |r| {
             const f = r.event.foreign orelse continue;
             if (r.event.outcome == .err) continue;
-            const c: Call = @fromBackingInt(@as(u8, @intCast(f.call)));
+            const c: seam.Call = @fromBackingInt(@as(u8, @intCast(f.call)));
             if (c == .create_temp) m.create(r.event.subject.path.?);
             if (c == .symlink) m.createLink(r.event.subject.path.?);
             m.call(c, r.event.subject.path);

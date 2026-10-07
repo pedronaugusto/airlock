@@ -9,26 +9,22 @@
 const level = @import("level.zig");
 const platform = @import("platform.zig");
 const names = @import("names.zig");
-const sys_impl = @import("sys.zig");
 
 /// What a caller asks a call to make durable.
 pub const Level = level.Level;
 /// What a call reached, weakest first.
 pub const Reached = level.Reached;
-/// Degrade and report, or refuse, when a filesystem refuses a level.
-pub const Fallback = level.Fallback;
-/// The level, the fallback and the Darwin barrier choice of one sync.
+/// The level and the Darwin barrier choice of one sync.
 pub const SyncOptions = level.SyncOptions;
 
-/// `std.Io.File.SyncError` plus `error.LevelUnavailable`.
-pub const SyncError = platform.SyncError;
 /// Syncs an open file at a level and reports what was reached.
 pub const syncFile = platform.syncFile;
-/// `SyncError` plus the errors of reopening a directory for its sync.
+/// `std.Io.File.SyncError` plus the errors of reopening a directory for
+/// its sync.
 pub const DirSyncError = platform.DirSyncError;
 /// Syncs a directory's entries: the names created, renamed and removed in it.
 pub const syncDir = platform.syncDir;
-/// `SyncError` plus the errors of opening the file.
+/// `std.Io.File.SyncError` plus the errors of opening the file.
 pub const SyncPathError = platform.SyncPathError;
 /// Opens a file by path and syncs it; weaker than `syncFile` on the writing handle.
 pub const syncPath = platform.syncPath;
@@ -47,10 +43,14 @@ pub const CreateError = Pending.CreateError;
 pub const create = Pending.create;
 /// `create`, a write of a whole buffer and `commit`, as one call.
 pub const writeFile = Pending.writeFile;
+/// `writeFile` that refuses a level the filesystem cannot keep.
+pub const writeFileOrRefuse = Pending.writeFileOrRefuse;
 /// The create and commit options of `writeFile`.
 pub const WriteFileOptions = Pending.WriteFileOptions;
 /// What `writeFile` can fail with.
 pub const WriteFileError = Pending.WriteFileError;
+/// What `writeFileOrRefuse` can fail with.
+pub const WriteFileOrRefuseError = Pending.WriteFileOrRefuseError;
 
 /// Where a call puts the error behind `error.PublishedNotDurable`.
 pub const Diagnostics = names.Diagnostics;
@@ -78,8 +78,12 @@ pub const makePath = names.makePath;
 pub const SymLinkOptions = names.SymLinkOptions;
 /// What `symLink` can fail with.
 pub const SymLinkError = names.SymLinkError;
+/// What `symLinkOrRefuse` can fail with.
+pub const SymLinkOrRefuseError = names.SymLinkOrRefuseError;
 /// Points a name at a target atomically: a temp link renamed over it.
 pub const symLink = names.symLink;
+/// `symLink` that refuses a level the filesystem cannot keep.
+pub const symLinkOrRefuse = names.symLinkOrRefuse;
 /// How old a leftover temp must be for `pruneTemps`.
 pub const PruneOptions = names.PruneOptions;
 /// What `pruneTemps` can fail with.
@@ -92,24 +96,6 @@ pub const Batch = @import("Batch.zig");
 
 /// Which file a handle or path is, by volume and file number.
 pub const FileId = @import("FileId.zig");
-
-/// The test seam: every raw call airlock makes can be decided by a hook
-/// carried in the `Io`. A test builds that `Io` as a layer whose state is
-/// a `HookedState` and whose `fileSync` is `hookedSync`.
-pub const sys = struct {
-    /// Every raw call airlock makes.
-    pub const Call = sys_impl.Call;
-    /// An errno on POSIX, an NTSTATUS on Windows.
-    pub const Code = sys_impl.Code;
-    /// What a hook makes of a call instead.
-    pub const Result = sys_impl.Result;
-    /// The hook: a context, its decision function and the base `Io`.
-    pub const Hook = sys_impl.Hook;
-    /// The hooked layer's state.
-    pub const HookedState = sys_impl.HookedState;
-    /// The hooked layer's `fileSync`, by which a raw call finds the hook.
-    pub const hookedSync = sys_impl.hookedSync;
-};
 
 test {
     _ = level;

@@ -6,7 +6,12 @@
     "src/tests.zig"
   ],
   "test_support": [
+    "src/testing.zig",
     "src/testing/**"
+  ],
+  "test_dependencies": [
+    "shakedown",
+    "airlock.testing"
   ],
   "function_exceptions": {},
   "layout_exceptions": {},

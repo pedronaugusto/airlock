@@ -11,6 +11,7 @@ const Staged = @import("Staged.zig");
 const Level = level_mod.Level;
 const Reached = level_mod.Reached;
 const SyncOptions = level_mod.SyncOptions;
+const Fallback = level_mod.Fallback;
 
 const is_windows = builtin.target.os.tag == .windows;
 
@@ -34,8 +35,8 @@ pub const RenameOptions = struct {
 };
 
 pub const RenameError = Io.Dir.RenameError || error{
-    /// The rename happened; a directory sync after it failed, was refused
-    /// under `Fallback.refuse`, or was canceled. `diagnostics` says which.
+    /// The rename happened; a directory sync after it failed or was
+    /// canceled. `diagnostics` says which.
     PublishedNotDurable,
 };
 
@@ -45,8 +46,8 @@ pub const RenameError = Io.Dir.RenameError || error{
 /// filesystem that does not journal both entries together a crash must not
 /// leave both names or neither. Any error after the rename is
 /// `error.PublishedNotDurable`, so a caller can tell "not renamed" from
-/// "renamed, not yet durable".
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
+/// "renamed, not yet durable". A directory sync the filesystem refuses
+/// leaves the rename `.ordered`.
 pub fn rename(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new: []const u8, options: RenameOptions) RenameError!Reached {
     if (is_windows) {
         try renameWindows(io, old_dir, old, new_dir, new, options.busy_deadline);
@@ -62,9 +63,9 @@ fn syncRenamed(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new: [
     defer new_parent.close(io);
     var old_parent = try Parent.open(io, old_dir, old);
     defer old_parent.close(io);
-    var reached = try syncOne(io, new_parent.dir, options.sync, options.busy_deadline);
+    var reached = try syncOne(io, new_parent.dir, options.busy_deadline);
     if (!try sameDirectory(io, new_parent.dir, old_parent.dir)) {
-        reached = Reached.min(reached, try syncOne(io, old_parent.dir, options.sync, options.busy_deadline));
+        reached = Reached.min(reached, try syncOne(io, old_parent.dir, options.busy_deadline));
     }
     return reached;
 }
@@ -109,8 +110,8 @@ fn renameWindows(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new:
 }
 
 pub const RemoveError = Io.Dir.DeleteFileError || error{
-    /// The name is gone; the directory sync after it failed, was refused
-    /// under `Fallback.refuse`, or was canceled. `diagnostics` says which.
+    /// The name is gone; the directory sync after it failed or was
+    /// canceled. `diagnostics` says which.
     PublishedNotDurable,
 };
 
@@ -118,7 +119,6 @@ pub const RemoveError = Io.Dir.DeleteFileError || error{
 /// delete has POSIX semantics: the name goes at once, even while another
 /// process holds the file open. Any error after the removal is
 /// `error.PublishedNotDurable`.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn remove(io: Io, dir: Io.Dir, sub_path: []const u8, options: RenameOptions) RemoveError!Reached {
     try sys.unlink(io, dir.handle, sub_path);
     if (@backingInt(options.sync.level) < @backingInt(Level.data)) return .none;
@@ -128,7 +128,7 @@ pub fn remove(io: Io, dir: Io.Dir, sub_path: []const u8, options: RenameOptions)
 fn syncParentOf(io: Io, dir: Io.Dir, sub_path: []const u8, options: RenameOptions) SyncAfterError!Reached {
     var parent = try Parent.open(io, dir, sub_path);
     defer parent.close(io);
-    return syncOne(io, parent.dir, options.sync, options.busy_deadline);
+    return syncOne(io, parent.dir, options.busy_deadline);
 }
 
 // ---------------------------------------------------------------------
@@ -143,7 +143,7 @@ pub const MakePathOptions = struct {
 
 pub const MakePathError = Io.Dir.CreateDirError || Io.Dir.OpenError || platform.DirSyncError || error{
     /// A directory was created; the sync of the directory that received
-    /// it failed, was refused under `Fallback.refuse`, or was canceled.
+    /// it failed or was canceled.
     PublishedNotDurable,
 };
 
@@ -162,7 +162,6 @@ const max_vanished = 8;
 /// mkdir case of Pillai et al., OSDI '14). A directory another process
 /// creates first is taken as it is, and its parent is synced all the same.
 /// When a parent vanishes under it, it starts again, a few times.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn makePath(io: Io, dir: Io.Dir, sub_path: []const u8, options: MakePathOptions) MakePathError!Made {
     var made: Made = .{ .reached = .full, .created = 0 };
     var synced = false;
@@ -210,7 +209,7 @@ fn makeMissing(io: Io, dir: Io.Dir, sub_path: []const u8, options: MakePathOptio
         if (@backingInt(options.sync.level) >= @backingInt(Level.data)) {
             // Whoever created it, its entry is synced before anything goes
             // under it.
-            const reached = syncOne(io, parent.dir, options.sync, platform.default_busy_deadline) catch |err| {
+            const reached = syncOne(io, parent.dir, platform.default_busy_deadline) catch |err| {
                 if (made.created == 0) return err;
                 return notDurable(options.diagnostics, err);
             };
@@ -249,9 +248,16 @@ pub const SymLinkOptions = struct {
 };
 
 pub const SymLinkError = sys.SymLinkError || Io.Dir.RenameError || Io.Dir.OpenError || platform.DirSyncError || error{
-    /// The link is in place; the directory sync after the rename failed,
-    /// was refused under `Fallback.refuse`, or was canceled.
+    /// The link is in place; the directory sync after the rename failed or
+    /// was canceled.
     PublishedNotDurable,
+};
+
+/// `SymLinkError`, and a filesystem that cannot keep the level.
+pub const SymLinkOrRefuseError = SymLinkError || error{
+    /// The filesystem refused the directory sync that orders the new link
+    /// before its name, so the level cannot be kept. Nothing was renamed.
+    LevelUnavailable,
 };
 
 /// Points `sub_path`, relative to `dir`, at `target`, replacing whatever
@@ -260,9 +266,24 @@ pub const SymLinkError = sys.SymLinkError || Io.Dir.RenameError || Io.Dir.OpenEr
 /// link is made durable before the rename, so a crash cannot leave the name
 /// pointing at a link that never reached the disk; at `data` the directory
 /// is synced again after the rename. The usual "current -> release-N"
-/// swap. Windows returns `error.OperationUnsupported`.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
+/// swap. A filesystem that refuses the directory sync leaves the link
+/// `.written` at best. Windows returns `error.OperationUnsupported`.
 pub fn symLink(io: Io, dir: Io.Dir, target: []const u8, sub_path: []const u8, options: SymLinkOptions) SymLinkError!Reached {
+    return linkAs(.report, io, dir, target, sub_path, options);
+}
+
+/// `symLink`, but a filesystem that refuses the directory sync ordering
+/// the link before its name is `error.LevelUnavailable`, and nothing is
+/// renamed.
+pub fn symLinkOrRefuse(io: Io, dir: Io.Dir, target: []const u8, sub_path: []const u8, options: SymLinkOptions) SymLinkOrRefuseError!Reached {
+    return linkAs(.refuse, io, dir, target, sub_path, options);
+}
+
+fn LinkError(comptime fallback: Fallback) type {
+    return if (fallback == .refuse) SymLinkOrRefuseError else SymLinkError;
+}
+
+fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, sub_path: []const u8, options: SymLinkOptions) LinkError(fallback)!Reached {
     if (is_windows) return error.OperationUnsupported;
     const base_start = Staged.baseStart(sub_path);
     const base = sub_path[base_start..];
@@ -292,7 +313,7 @@ pub fn symLink(io: Io, dir: Io.Dir, target: []const u8, sub_path: []const u8, op
         // name over a link that never reached the disk. A filesystem that
         // refuses the sync leaves no such order, so it is refused, or
         // reported, before the rename.
-        reached = linkSync(io, parent.dir, options.sync) catch |err| {
+        reached = linkSync(fallback, io, parent.dir) catch |err| {
             // ziglint-ignore: Z026 cleanup after a failure the caller already gets
             sys.unlink(io, parent.dir.handle, temp) catch {};
             return err;
@@ -304,16 +325,16 @@ pub fn symLink(io: Io, dir: Io.Dir, target: []const u8, sub_path: []const u8, op
         return err;
     };
     if (@backingInt(level) < @backingInt(Level.data)) return reached;
-    const second = syncOne(io, parent.dir, options.sync, platform.default_busy_deadline) catch |err| return notDurable(options.diagnostics, err);
+    const second = syncOne(io, parent.dir, platform.default_busy_deadline) catch |err| return notDurable(options.diagnostics, err);
     return if (reached.atLeast(.ordered)) second else reached;
 }
 
 /// The sync that makes a new link durable before its rename: `.ordered`
 /// when it did, what it reached when the filesystem refused it.
-fn linkSync(io: Io, dir: Io.Dir, sync: SyncOptions) platform.DirSyncError!Reached {
+fn linkSync(comptime fallback: Fallback, io: Io, dir: Io.Dir) LinkError(fallback)!Reached {
     const outcome = try platform.dirSync(io, dir.handle, platform.default_busy_deadline, null);
     if (outcome.refused) {
-        if (sync.fallback == .refuse) return error.LevelUnavailable;
+        if (fallback == .refuse) return error.LevelUnavailable;
         return Reached.min(outcome.reached, .written);
     }
     return .ordered;
@@ -336,7 +357,6 @@ pub const PruneError = Io.Dir.Iterator.Error || Io.Dir.StatFileError || Io.Dir.D
 /// nothing else, last modified at least `older_than` ago. Returns how many
 /// went. `dir` must be open for iteration. The removals are not synced: a
 /// temp that comes back after a crash goes on the next prune.
-// ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn pruneTemps(io: Io, dir: Io.Dir, prefix: []const u8, options: PruneOptions) PruneError!u32 {
     if (prefix.len > Staged.max_prefix or Staged.baseStart(prefix) != 0) return error.BadPathName;
     const now = Io.Timestamp.now(io, .real);
@@ -378,13 +398,11 @@ const Parent = struct {
     }
 };
 
-fn syncOne(io: Io, dir: Io.Dir, sync: SyncOptions, busy: Io.Duration) platform.DirSyncError!Reached {
+/// One directory's sync after a name changed in it: a refusal leaves the
+/// change `.ordered`.
+fn syncOne(io: Io, dir: Io.Dir, busy: Io.Duration) platform.DirSyncError!Reached {
     const outcome = try platform.dirSync(io, dir.handle, busy, null);
-    if (outcome.refused) {
-        if (sync.fallback == .refuse) return error.LevelUnavailable;
-        return .ordered;
-    }
-    return platform.decide(outcome.reached, sync.level, sync.fallback);
+    return if (outcome.refused) .ordered else outcome.reached;
 }
 
 fn sameDirectory(io: Io, a: Io.Dir, b: Io.Dir) Io.File.StatError!bool {

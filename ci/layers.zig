@@ -2,6 +2,9 @@
 const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
+    .{ .name = "seam", .patterns = &.{
+        "src/seam.zig",
+    } },
     .{ .name = "primitives", .patterns = &.{
         "src/level.zig",
         "src/sys.zig",
@@ -27,7 +30,12 @@ pub const layers: []const gantry.rules.Layer = &.{
 
 pub const entries: []const []const u8 = &.{};
 
-pub const modules: []const gantry.NamedModule = &.{};
+/// The seam is a module of its own, so airlock and `airlock.testing` share
+/// it without either exporting it.
+pub const modules: []const gantry.NamedModule = &.{
+    .{ .name = "seam", .path = "src/seam.zig" },
+    .{ .name = "airlock.testing", .path = "src/testing.zig" },
+};
 
 pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{

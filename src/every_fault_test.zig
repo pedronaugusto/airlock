@@ -13,9 +13,10 @@ const Io = std.Io;
 const shakedown = @import("shakedown");
 const airlock = @import("airlock.zig");
 const harness = @import("testing/harness.zig");
+const seam = @import("airlock.testing");
 const model_mod = @import("testing/model.zig");
-const Harness = harness.Harness;
-const Call = harness.Call;
+const Seam = seam.Seam;
+const Call = seam.Call;
 
 const os = builtin.target.os.tag;
 const is_windows = os == .windows;
@@ -63,7 +64,7 @@ fn faultClasses(call: Call) []const shakedown.IoFault {
 const Operation = struct {
     kind: Kind,
     scratch: harness.Scratch = undefined,
-    h: *Harness = undefined,
+    h: *Seam = undefined,
     reached: airlock.Reached = .none,
     published: bool = false,
 
@@ -93,7 +94,7 @@ const Operation = struct {
             try s.scratch.write("new-target", "new");
             try s.scratch.dir().symLink(testing.io, "old-target", "a", .{});
         }
-        s.h = try Harness.over(testing.allocator, fio, .{});
+        s.h = try Seam.over(testing.allocator, fio, .{});
         s.reached = .none;
         s.published = false;
     }
@@ -346,7 +347,7 @@ test "the model proves what a real replace reports, and no more" {
     defer s.cleanup();
     try s.write("a", "old");
     inline for (.{ airlock.Level.ordered, airlock.Level.data }) |level| {
-        const h = try Harness.create(testing.allocator, testing.io, .{});
+        const h = try Seam.create(testing.allocator, testing.io, .{});
         defer h.destroy();
         const done = try airlock.writeFile(h.io(), s.dir(), "a", "new", .{ .commit = .{ .level = level } });
         var m: model_mod.Model = .init(model_mod.native());
@@ -363,7 +364,7 @@ test "on Darwin the model shows the window barrier = false closes" {
     var s: harness.Scratch = .init();
     defer s.cleanup();
     inline for (.{ true, false }) |barrier| {
-        const h = try Harness.create(testing.allocator, testing.io, .{});
+        const h = try Seam.create(testing.allocator, testing.io, .{});
         defer h.destroy();
         _ = try airlock.writeFile(h.io(), s.dir(), "a", "new", .{ .commit = .{ .barrier = barrier } });
         var honoured: model_mod.Model = .init(.darwin);
@@ -380,7 +381,7 @@ test "the model proves a batch with a fence" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
     var ps: [3]airlock.Pending = undefined;
@@ -405,7 +406,7 @@ test "the same batch without its fence breaks the fence's promise in the model" 
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try Harness.create(testing.allocator, testing.io, .{});
+    const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
     var ps: [3]airlock.Pending = undefined;
@@ -430,7 +431,7 @@ test "the model proves what a real symbolic link swap reports" {
     try s.write("release-1", "1");
     try s.dir().symLink(testing.io, "release-1", "current", .{});
     inline for (.{ airlock.Level.ordered, airlock.Level.data }) |level| {
-        const h = try Harness.create(testing.allocator, testing.io, .{});
+        const h = try Seam.create(testing.allocator, testing.io, .{});
         defer h.destroy();
         const reached = try airlock.symLink(h.io(), s.dir(), "release-2", "current", .{ .sync = .{ .level = level } });
         var m: model_mod.Model = .init(model_mod.native());
