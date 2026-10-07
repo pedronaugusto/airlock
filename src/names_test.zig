@@ -271,7 +271,8 @@ test "pruneTemps removes old random temps and nothing else" {
     // Fresh temps may be another process's work in progress.
     try testing.expectEqual(@as(u32, 0), try airlock.pruneTemps(h.io(), s.dir(), ".", .{}));
     try testing.expectEqual(@as(u32, 2), try airlock.pruneTemps(h.io(), s.dir(), ".", .{ .older_than = .fromNanoseconds(0) }));
-    try testing.expectEqual(@as(u32, 2), h.count(.unlink));
+    // Windows deletes by handle.
+    try testing.expectEqual(@as(u32, 2), h.count(if (is_windows) .dispose else .unlink));
     var buffer: [4]u8 = undefined;
     for (temps) |name| try testing.expectEqual(@as(?[]const u8, null), s.read(name, &buffer));
     for (kept) |name| try testing.expect(s.read(name, &buffer) != null);

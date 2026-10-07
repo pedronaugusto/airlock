@@ -213,7 +213,8 @@ test "keep_existing on a taken name syncs the existing file inside the batch" {
             if (f.call == @backingInt(Call.sync_writeout) and r.event.subject.path == null) dir_writeouts += 1;
         }
         try testing.expectEqual(@as(u32, 1), dir_writeouts);
-        try testing.expectEqual(@as(u32, 1), h.count(.sync_full));
+        // Windows has no barrier: a flush before the renames and one after.
+        try testing.expectEqual(@as(u32, if (is_windows) 2 else 1), h.count(.sync_full));
     }
 }
 
@@ -480,6 +481,7 @@ test "Windows: a batch syncs a read-only file it keeps, and leaves it read-only"
     // A loose object as git and relic leave it: read-only.
     const read_only: Io.File.Permissions = @fromBackingInt(1); // FILE_ATTRIBUTE_READONLY
     _ = try airlock.writeFile(testing.io, s.dir(), "obj", "theirs", .{ .create = .{ .mode = .{ .exact = read_only } } });
+    try expectReadOnly(s.dir(), "obj");
     const h = try Harness.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
@@ -491,7 +493,17 @@ test "Windows: a batch syncs a read-only file it keeps, and leaves it read-only"
     try batch.addPending(io, &p, .keep_existing);
     try testing.expect((try batch.commit(io, .{ .parallel = 1 })).atLeast(.data));
     try expectContents(&s, "obj", "theirs");
-    try testing.expect(@backingInt((try s.dir().statFile(testing.io, "obj", .{})).permissions) & 1 != 0);
+    try expectReadOnly(s.dir(), "obj");
     try testing.expect((try airlock.syncPath(io, s.dir(), "obj", .{})).atLeast(.data));
-    try testing.expect(@backingInt((try s.dir().statFile(testing.io, "obj", .{})).permissions) & 1 != 0);
+    try expectReadOnly(s.dir(), "obj");
+}
+
+/// Windows: the file refuses an open for writing.
+fn expectReadOnly(dir: Io.Dir, name: []const u8) !void {
+    const file = dir.openFile(testing.io, name, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return,
+        else => |e| return e,
+    };
+    file.close(testing.io);
+    return error.TestExpectedReadOnly;
 }
