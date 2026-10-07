@@ -167,13 +167,12 @@ pub fn reset(b: *Batch, io: Io) void {
         if (s.pending) |p| {
             if (p.state == .open or p.state == .synced or p.state == .poisoned) p.discard(io) else p.finishPublished(io);
         }
-        b.closeSlot(io, s);
+        closeSlot(io, s);
     }
     b.len = 0;
 }
 
-fn closeSlot(b: *Batch, io: Io, s: *Slot) void {
-    _ = b;
+fn closeSlot(io: Io, s: *Slot) void {
     if (s.owned and s.open) sys.release(io, s.handle);
     s.open = false;
     s.owned = false;
@@ -583,7 +582,7 @@ const Run = struct {
     /// Linux and the BSDs: one directory's sync; a refusal leaves the
     /// operation ordered.
     fn syncDirSlot(r: *Run, s: *Slot) Error!void {
-        const outcome = platform.dirSync(r.io, s.handle, true, r.options.busy_deadline, null) catch |err| return r.fail(s, err);
+        const outcome = platform.dirSync(r.io, s.handle, r.options.busy_deadline, null) catch |err| return r.fail(s, err);
         if (outcome.refused) {
             if (r.options.fallback == .refuse) return r.fail(s, error.LevelUnavailable);
             r.reached = Reached.min(r.reached, .ordered);
@@ -596,7 +595,7 @@ const Run = struct {
     /// reopened for it.
     fn writeoutDir(r: *Run, handle: sys.Handle) Error!Reached {
         if (!is_windows) return platform.writeout(r.io, handle, null);
-        const flush = try platform.openDirFlush(r.io, handle, r.options.busy_deadline, null);
+        const flush = try platform.openDirFlush(r.io, handle, r.options.busy_deadline);
         defer sys.release(r.io, flush);
         return platform.writeout(r.io, flush, null);
     }
@@ -605,7 +604,7 @@ const Run = struct {
     /// `NtFlushBuffersFile` on a handle reopened for it.
     fn flushDir(r: *Run, handle: sys.Handle, barrier_ok: bool) Error!Reached {
         if (is_windows) {
-            const flush = try platform.openDirFlush(r.io, handle, r.options.busy_deadline, null);
+            const flush = try platform.openDirFlush(r.io, handle, r.options.busy_deadline);
             defer sys.release(r.io, flush);
             return platform.flushFull(r.io, flush, .sync_full, null);
         }

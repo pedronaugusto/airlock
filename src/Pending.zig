@@ -490,7 +490,7 @@ fn publishSynced(p: *Pending, io: Io, options: CommitOptions) CommitError!Commit
     defer if (flush) |h| sys.release(io, h);
     var dir_refused = false;
     if (is_windows and @backingInt(options.level) >= @backingInt(Level.data)) {
-        flush = platform.openDirFlush(io, p.parent.handle, options.busy_deadline, null) catch |err| switch (err) {
+        flush = platform.openDirFlush(io, p.parent.handle, options.busy_deadline) catch |err| switch (err) {
             error.NoDevice => blk: {
                 if (options.fallback == .refuse) return error.LevelUnavailable;
                 dir_refused = true;
@@ -522,7 +522,7 @@ fn syncParent(p: *Pending, io: Io, options: CommitOptions, flush: ?sys.Handle, r
     const outcome: platform.DirOutcome = if (is_windows)
         (if (flush) |h| try platform.flushDir(io, h, p.baseName()) else .{ .reached = .none, .refused = refused_before })
     else
-        try platform.dirSync(io, p.parent.handle, options.barrier, options.busy_deadline, p.baseName());
+        try platform.dirSync(io, p.parent.handle, options.busy_deadline, p.baseName());
     if (outcome.refused) {
         if (options.fallback == .refuse) return error.LevelUnavailable;
         // The data was ordered before the name; the name may be lost.

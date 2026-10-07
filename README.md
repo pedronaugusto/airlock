@@ -107,7 +107,7 @@ instead of a hundred flushes. A `fence` makes the renames after it reach the
 disk after those before it. A publish that finds its name taken under
 `keep_existing` syncs the existing file inside the batch, so a batch that
 reports `.data` holds no file nobody synced. The slots are the caller's
-storage; the batch holds at most one descriptor per slot.
+storage; the batch holds at most one descriptor per slot, plus `parallel`.
 
 `FileId` is a volume and a 128-bit file number, from the handle or from a path
 without opening it. On Windows, two volumes cloned from one image keep both
@@ -156,8 +156,11 @@ another sync of that file, and that what was reported is no more than a crash
 model proves. The model replays a run's calls against each platform's
 documented persistence rules and enumerates every state a crash could leave;
 on macOS it runs with the barrier honoured and dropped, and shows the window
-`barrier = false` closes. `zig build bench` runs the benchmarks by hand; CI
-compiles them and never times them.
+`barrier = false` closes. `zig build bench` runs the benchmarks by hand
+(`-- --dir <path>` puts the files on the disk to measure): each level's sync
+cost, replaces and batches per level and size, the raw calls and barriers of
+each operation counted through the seam, and the code airlock replaces beside
+it on the same work. CI compiles them and never times them.
 
 [CI](.github/workflows/ci.yml) runs the source checks and the Linux Debug suite
 on every push it is asked for, and before a merge the Debug suite on macOS and

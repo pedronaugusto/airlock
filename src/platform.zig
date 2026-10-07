@@ -220,16 +220,15 @@ pub const default_busy_deadline: Io.Duration = .fromMilliseconds(2000);
 // ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
 pub fn syncDir(io: Io, dir: Io.Dir, options: SyncOptions) DirSyncError!Reached {
     if (@backingInt(options.level) <= @backingInt(Level.ordered)) return .none;
-    const outcome = try dirSync(io, dir.handle, options.barrier, default_busy_deadline, null);
+    const outcome = try dirSync(io, dir.handle, default_busy_deadline, null);
     return decide(outcome.reached, options.level, options.fallback);
 }
 
 /// The directory sync of `handle`, at `data` or `full` (they are one call).
 // ziglint-ignore: Z015 the set is a public merge; ziglint counts only error{} literals as types
-pub fn dirSync(io: Io, handle: sys.Handle, barrier: bool, busy: Io.Duration, subject: ?[]const u8) DirSyncError!DirOutcome {
-    _ = barrier;
+pub fn dirSync(io: Io, handle: sys.Handle, busy: Io.Duration, subject: ?[]const u8) DirSyncError!DirOutcome {
     if (is_windows) {
-        const flush = try openDirFlush(io, handle, busy, subject);
+        const flush = try openDirFlush(io, handle, busy);
         defer sys.release(io, flush);
         return flushDir(io, flush, subject);
     }
@@ -254,14 +253,13 @@ fn reopened(io: Io, handle: sys.Handle, subject: ?[]const u8) DirSyncError!DirOu
     const fresh = try sys.openDir(io, handle, ".");
     defer sys.release(io, fresh);
     if (fresh == sys.at_fdcwd) return error.Unexpected;
-    return dirSync(io, fresh, true, default_busy_deadline, subject);
+    return dirSync(io, fresh, default_busy_deadline, subject);
 }
 
 /// Windows: a handle on the directory `handle` with the rights a flush
 /// needs, retrying a sharing violation until `busy` runs out. Opened
 /// before a rename, so a refusal is known before anything is published.
-pub fn openDirFlush(io: Io, handle: sys.Handle, busy: Io.Duration, subject: ?[]const u8) Io.Dir.OpenError!sys.Handle {
-    _ = subject;
+pub fn openDirFlush(io: Io, handle: sys.Handle, busy: Io.Duration) Io.Dir.OpenError!sys.Handle {
     var backoff: Backoff = .start(io, busy);
     while (true) {
         return sys.openDirWindows(io, handle, "", true) catch |err| switch (err) {

@@ -288,20 +288,20 @@ fn syncFileRange(fd: posix.fd_t, offset: u64, len: u64) usize {
 /// file. EIO (an NFS deferred write) is a failed sync.
 pub fn close(io: Io, handle: Handle, path: ?[]const u8) Io.File.SyncError!void {
     if (is_windows) return closeWindows(io, handle, path);
-    const e: posix.E = (injected(io, .close, path) catch null) orelse if (is_linux)
+    const e: posix.E = if (injected(io, .close, path) catch null) |code| blk: {
+        // The hook decided what close says; the real descriptor still goes,
+        // exactly once.
+        closeQuietly(handle);
+        break :blk code;
+    } else if (is_linux)
         linux.errno(linux.close(handle))
     else
         std.c.errno(std.c.close(handle));
     return switch (e) {
-        .SUCCESS, .INTR => {},
-        .IO => blk: {
-            // The hook may say the close failed; the real descriptor must
-            // still go.
-            closeQuietly(handle);
-            break :blk error.InputOutput;
-        },
+        .IO => error.InputOutput,
         .NOSPC => error.NoSpaceLeft,
         .DQUOT => error.DiskQuota,
+        // EINTR: Linux released the descriptor anyway; it is closed.
         else => {},
     };
 }

@@ -114,7 +114,7 @@ const Parent = struct {
 };
 
 fn syncOne(io: Io, dir: Io.Dir, options: RenameOptions) platform.DirSyncError!Reached {
-    const outcome = try platform.dirSync(io, dir.handle, options.sync.barrier, options.busy_deadline, null);
+    const outcome = try platform.dirSync(io, dir.handle, options.busy_deadline, null);
     if (outcome.refused) {
         if (options.sync.fallback == .refuse) return error.LevelUnavailable;
         return .ordered;

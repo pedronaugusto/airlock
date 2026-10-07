@@ -411,3 +411,27 @@ test "discard is idempotent and never unlinks after the publish" {
     try expectCalls(h, &.{});
     try expectContents(&s, "b", "");
 }
+
+test "Windows: a pending delete on the lock name is Busy, a real denial is not" {
+    if (!is_windows) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(.create_temp, 1, .DELETE_PENDING)} });
+    defer h.destroy();
+    try testing.expectError(error.Busy, airlock.create(h.io(), s.dir(), "HEAD", .{ .temp = .{ .exact = "HEAD.lock" } }));
+    const denied = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.fail(.create_temp, 1, .ACCESS_DENIED)} });
+    defer denied.destroy();
+    try testing.expectError(error.AccessDenied, airlock.create(denied.io(), s.dir(), "HEAD", .{ .temp = .{ .exact = "HEAD.lock" } }));
+}
+
+test "Windows: a replace succeeds while a reader holds the target with delete sharing" {
+    if (!is_windows) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    try s.write("a", "old");
+    // std opens with read, write and delete sharing, as a polite scanner does.
+    const reader = try s.dir().openFile(testing.io, "a", .{});
+    defer reader.close(testing.io);
+    _ = try airlock.writeFile(testing.io, s.dir(), "a", "new", .{});
+    try expectContents(&s, "a", "new");
+}

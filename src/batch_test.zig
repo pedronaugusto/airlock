@@ -319,3 +319,46 @@ fn openDescriptors() !usize {
     }
     return n;
 }
+
+test "Windows: two directories that differ only in the device name are two volumes" {
+    if (!is_windows) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    // A cloned volume keeps the serial and the file ids; only the NT
+    // device name tells it apart. Give the second slot another one.
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{
+        .{ .at = .{ .nth = .{ .call = .volume_name, .n = 2 } }, .fault = .{ .value = 0xfeed } },
+    } });
+    defer h.destroy();
+    const io = h.io();
+    var slots: [2]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    try batch.addDir(s.dir());
+    try batch.addDir(s.dir());
+    _ = try batch.commit(io, .{});
+    try testing.expectEqual(@as(u32, 2), h.count(.sync_writeout));
+    try testing.expectEqual(@as(u32, 2), h.count(.sync_full));
+}
+
+test "Windows: NO_SYNC refused (ReFS) flushes each file instead" {
+    if (!is_windows) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    for ([_][]const u8{ "x", "y" }) |name| try s.write(name, name);
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.sync_writeout, .INVALID_PARAMETER)} });
+    defer h.destroy();
+    const io = h.io();
+    const x = try s.dir().openFile(testing.io, "x", .{ .mode = .read_write });
+    defer x.close(testing.io);
+    const y = try s.dir().openFile(testing.io, "y", .{ .mode = .read_write });
+    defer y.close(testing.io);
+    var slots: [2]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    try batch.addFile(x);
+    try batch.addFile(y);
+    try testing.expectEqual(airlock.Reached.full, try batch.commit(io, .{}));
+    // A flush per file, and no volume flush for what they covered.
+    try testing.expectEqual(@as(u32, 2), h.count(.sync_full));
+}
