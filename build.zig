@@ -99,8 +99,10 @@ pub fn build(b: *std.Build) !void {
 /// The test seam for a project's tests: the module `airlock.testing`, on
 /// shakedown, for `airlock`'s dependency in that project's build.
 ///
+///     const airlock_build = @import("airlock"); // at the top of the build.zig
+///
 ///     const airlock = b.dependency("airlock", .{ .target = target, .optimize = optimize });
-///     tests.root_module.addImport("airlock.testing", try @import("airlock").testing(airlock));
+///     tests.root_module.addImport("airlock.testing", try airlock_build.testing(airlock));
 ///
 /// Only a build that calls this fetches shakedown: while it is being
 /// fetched this returns `error.LazyDependencyNeeded`, as

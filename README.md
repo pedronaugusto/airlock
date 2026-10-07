@@ -221,8 +221,10 @@ airlock calls (`fail`, `always`), and reached by shakedown's `everyFault`.
 Your build gets it from airlock's build.zig, and only then fetches shakedown:
 
 ```zig
+const airlock_build = @import("airlock"); // airlock's build.zig, at the top of yours
+
 const airlock = b.dependency("airlock", .{ .target = target, .optimize = optimize });
-tests.root_module.addImport("airlock.testing", try @import("airlock").testing(airlock));
+tests.root_module.addImport("airlock.testing", try airlock_build.testing(airlock));
 ```
 
 ```zig
