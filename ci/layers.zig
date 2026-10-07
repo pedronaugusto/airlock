@@ -72,5 +72,5 @@ pub const owned: []const gantry.rules.TokenRule = &.{
         "renameatx_np",
         "linkat",
         "unlinkat",
-    }, .owners = &.{"src/sys.zig"} },
+    }, .owners = &.{ "src/sys.zig", "bench/baseline/**" } },
 };

@@ -80,6 +80,9 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "airlock", .module = module }},
         }),
     });
+    if (b.lazyDependency("shakedown", .{ .target = target, .optimize = .fast })) |shakedown| {
+        bench.root_module.addImport("shakedown", shakedown.module("shakedown"));
+    }
     const bench_run = b.addRunArtifact(bench);
     bench_run.setCwd(b.path("."));
     bench_run.addPassthruArgs();
