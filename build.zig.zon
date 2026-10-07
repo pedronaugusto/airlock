@@ -3,14 +3,13 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0xba8f3100e8eefbad,
+    // What a consumer fetches: the module and its documents. The tests,
+    // benchmarks, examples and CI stay in the repository, behind build.zig's
+    // own-tree guard.
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
-        "examples",
-        "bench",
-        "ci",
-        ".github",
         "CHANGELOG.md",
         "LICENSE",
         "README.md",

@@ -1,5 +1,6 @@
-//! Replace a file durably, stream a new object in and publish it only if it
-//! is new, then make many files durable under one barrier per volume.
+//! Replace a file durably, create directories durably, stream a new object
+//! in and publish it only if it is new, then make many files durable under
+//! one barrier per volume.
 //!
 //! `zig build examples` builds AND runs this; `zig build docs -- usage`
 //! extracts the region between the usage markers into README.md, so the
@@ -13,7 +14,6 @@ pub fn main(init: std.process.Init) !void {
     const cwd = Io.Dir.cwd();
     const dir = try cwd.createDirPathOpen(init.io, ".zig-cache/airlock-example", .{});
     defer dir.close(init.io);
-    try dir.createDirPath(init.io, "objects/ab");
 
     // --- README:usage ---
     const io = init.io;
@@ -22,6 +22,10 @@ pub fn main(init: std.process.Init) !void {
     // once this returns the new ones survive a power cut.
     const config = try airlock.writeFile(io, dir, "config.json", "{\"v\":2}\n", .{});
     std.debug.assert(config.reached.atLeast(.data));
+
+    // Create the directories an object goes into, each new one's entry
+    // synced in the directory that received it.
+    _ = try airlock.makePath(io, dir, "objects/ab", .{});
 
     // Stream into a temp next to the destination, and publish it only if
     // the name is free: an object that already exists is kept as it is.
