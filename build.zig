@@ -34,9 +34,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    if (b.lazyDependency("shakedown", .{ .target = target, .optimize = optimize })) |shakedown| {
+    if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |shakedown| {
         tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
-    }
+    } else |_| {}
 
     const test_step = b.step("test", "Run the tests and the example");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -80,9 +80,9 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "airlock", .module = module }},
         }),
     });
-    if (b.lazyDependency("shakedown", .{ .target = target, .optimize = .fast })) |shakedown| {
+    if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = .fast })) |shakedown| {
         bench.root_module.addImport("shakedown", shakedown.module("shakedown"));
-    }
+    } else |_| {}
     const bench_run = b.addRunArtifact(bench);
     bench_run.setCwd(b.path("."));
     bench_run.addPassthruArgs();

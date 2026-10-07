@@ -1,7 +1,7 @@
 //! Durability levels: what a caller asks for, and what a call reached.
 const builtin = @import("builtin");
 
-const native_os = builtin.os.tag;
+const native_os = builtin.target.os.tag;
 
 /// What a caller asks a call to make durable.
 pub const Level = enum {

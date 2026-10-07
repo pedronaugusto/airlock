@@ -7,7 +7,7 @@ const builtin = @import("builtin");
 pub const SyncLevel = enum { data, all };
 
 pub fn syncFile(io: std.Io, file: std.Io.File, level: SyncLevel) std.Io.File.SyncError!void {
-    if (comptime builtin.os.tag.isDarwin()) {
+    if (comptime builtin.target.os.tag.isDarwin()) {
         while (true) {
             switch (std.posix.errno(std.c.fcntl(file.handle, std.c.F.FULLFSYNC, @as(c_int, 0)))) {
                 .SUCCESS => return,
@@ -17,7 +17,7 @@ pub fn syncFile(io: std.Io, file: std.Io.File, level: SyncLevel) std.Io.File.Syn
             }
         }
     }
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .linux) {
         if (level == .data) while (true) {
             switch (std.os.linux.errno(std.os.linux.fdatasync(file.handle))) {
                 .SUCCESS => return,
@@ -31,6 +31,6 @@ pub fn syncFile(io: std.Io, file: std.Io.File, level: SyncLevel) std.Io.File.Syn
 }
 
 pub fn syncDir(io: std.Io, dir: std.Io.Dir) std.Io.File.SyncError!void {
-    if (comptime builtin.os.tag == .windows) return;
+    if (comptime builtin.target.os.tag == .windows) return;
     try syncFile(io, .{ .handle = dir.handle, .flags = .{ .nonblocking = false } }, .all);
 }

@@ -7,7 +7,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 
 pub fn saveDurable(io: Io, dir: Io.Dir, name: []const u8, bytes: []const u8) anyerror!void {
-    if (builtin.os.tag == .windows) return error.UnsupportedBaselineDurability;
+    if (builtin.target.os.tag == .windows) return error.UnsupportedBaselineDurability;
     const parent = try dir.openDir(io, ".", .{ .iterate = true });
     defer parent.close(io);
     var file = try parent.createFileAtomic(io, name, .{ .replace = true });

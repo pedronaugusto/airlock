@@ -62,7 +62,7 @@ const Level = level_mod.Level;
 const Reached = level_mod.Reached;
 const SyncOptions = level_mod.SyncOptions;
 
-const native_os = builtin.os.tag;
+const native_os = builtin.target.os.tag;
 const is_windows = native_os == .windows;
 const is_linux = native_os == .linux;
 const is_darwin = native_os.isDarwin();

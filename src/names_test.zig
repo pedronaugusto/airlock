@@ -7,7 +7,7 @@ const airlock = @import("airlock.zig");
 const harness = @import("testing/harness.zig");
 const Harness = harness.Harness;
 
-const os = builtin.os.tag;
+const os = builtin.target.os.tag;
 const is_windows = os == .windows;
 const is_linux = os == .linux;
 const is_darwin = os.isDarwin();

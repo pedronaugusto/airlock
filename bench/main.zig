@@ -27,7 +27,7 @@ const relic = @import("baseline/relic.zig");
 const lookout = @import("baseline/lookout.zig");
 const chronicle = @import("baseline/chronicle.zig");
 
-const is_linux = builtin.os.tag == .linux;
+const is_linux = builtin.target.os.tag == .linux;
 
 const Context = struct {
     io: Io,

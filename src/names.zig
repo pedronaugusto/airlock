@@ -9,7 +9,7 @@ const Level = level_mod.Level;
 const Reached = level_mod.Reached;
 const SyncOptions = level_mod.SyncOptions;
 
-const is_windows = builtin.os.tag == .windows;
+const is_windows = builtin.target.os.tag == .windows;
 
 pub const RenameOptions = struct {
     sync: SyncOptions = .{},

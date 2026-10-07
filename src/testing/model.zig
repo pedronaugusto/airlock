@@ -46,7 +46,7 @@ pub const Platform = enum { linux, darwin, darwin_barrier_dropped, windows };
 
 /// The platform this build runs on, barrier honoured.
 pub fn native() Platform {
-    const os = builtin.os.tag;
+    const os = builtin.target.os.tag;
     if (os == .linux) return .linux;
     if (os.isDarwin()) return .darwin;
     if (os == .windows) return .windows;

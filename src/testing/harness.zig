@@ -189,7 +189,7 @@ pub fn toResult(err: anyerror) Result {
     if (err == error.Canceled) return .canceled;
     @setEvalBranchQuota(100_000);
     if (std.meta.stringToEnum(Code, @errorName(err))) |code| return .{ .code = code };
-    return .{ .code = if (builtin.os.tag == .windows) .IO_DEVICE_ERROR else .IO };
+    return .{ .code = if (builtin.target.os.tag == .windows) .IO_DEVICE_ERROR else .IO };
 }
 
 /// A code as the error name `toResult` reads back.
