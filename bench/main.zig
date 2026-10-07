@@ -11,8 +11,12 @@
 //!   p50 and p99 over 1000 calls: what each level costs on this machine.
 //! - `replace/<level>/<size>/<new|overwrite>`: `writeFile`, ops/s and
 //!   latency.
-//! - `batch/<n>/<size>/<renames|files>/p<parallel>`: files/s through a
-//!   `Batch`.
+//! - `batch/<n>/<size>/<renames|files|paths>/p<parallel>`: files/s
+//!   through a `Batch`.
+//! - `ops/...`: every other public operation at `data`: `syncPath`,
+//!   `rename`, `remove`, `makePath` (three new directories), `symLink`,
+//!   `writeFile` as create-new and keep-existing, and `pruneTemps` over
+//!   `n` leftovers (per second counts the temps).
 //! - `ab/...`: the code airlock replaces (bench/baseline, copied from the
 //!   packages before they adopted it) beside airlock on the same work.
 //! - `counts/...`: the raw calls and barriers of one operation, from the
@@ -53,14 +57,16 @@ const Row = struct {
     level: airlock.Level = .data,
     size: usize = 4096,
     overwrite: bool = false,
-    /// Files per batch.
+    /// Files per batch, or temps per prune.
     n: u32 = 1,
     renames: bool = true,
+    /// A batch of `addPath` files rather than open ones.
+    paths: bool = false,
     parallel: u8 = 1,
     barrier: bool = true,
 };
 
-const rows = probe_rows ++ replace_rows ++ batch_rows ++ ab_rows;
+const rows = probe_rows ++ replace_rows ++ batch_rows ++ op_rows ++ ab_rows;
 
 const probe_rows = [_]Row{
     .{ .name = "probe/sync-ordered", .ops = 1000, .op = probeSync, .level = .ordered },
@@ -94,15 +100,16 @@ const batch_rows = blk: {
     var out: []const Row = &.{};
     for ([_]u32{ 1, 10, 100, 1000 }) |n| {
         for ([_]usize{ 4096, 65536 }) |size| {
-            for ([_]bool{ true, false }) |renames| {
+            for ([_][]const u8{ "renames", "files", "paths" }) |kind| {
                 for ([_]u8{ 1, 4, 16, 64 }) |parallel| {
                     out = out ++ [_]Row{.{
-                        .name = std.fmt.comptimePrint("batch/{d}/{s}/{s}/p{d}", .{ n, if (size == 4096) "4k" else "64k", if (renames) "renames" else "files", parallel }),
+                        .name = std.fmt.comptimePrint("batch/{d}/{s}/{s}/p{d}", .{ n, if (size == 4096) "4k" else "64k", kind, parallel }),
                         .ops = if (n >= 100) 3 else 20,
                         .op = batch,
                         .size = size,
                         .n = n,
-                        .renames = renames,
+                        .renames = std.mem.eql(u8, kind, "renames"),
+                        .paths = std.mem.eql(u8, kind, "paths"),
                         .parallel = parallel,
                     }};
                 }
@@ -110,6 +117,17 @@ const batch_rows = blk: {
         }
     }
     break :blk out[0..out.len].*;
+};
+
+const op_rows = [_]Row{
+    .{ .name = "ops/sync-path", .ops = 500, .op = syncPathRow },
+    .{ .name = "ops/rename", .ops = 200, .op = renameRow },
+    .{ .name = "ops/remove", .ops = 200, .op = removeRow },
+    .{ .name = "ops/make-path", .ops = 100, .op = makePathRow },
+    .{ .name = "ops/sym-link", .ops = 200, .op = symLinkRow },
+    .{ .name = "ops/create-new", .ops = 200, .op = createNewRow },
+    .{ .name = "ops/keep-existing", .ops = 200, .op = keepExistingRow },
+    .{ .name = "ops/prune/100", .ops = 10, .op = pruneRow, .n = 100 },
 };
 
 const ab_rows = [_]Row{
@@ -234,6 +252,11 @@ fn batch(ctx: *Context, row: *const Row, i: u64) anyerror!void {
             try p.file().writePositionalAll(io, bytes, 0);
             try b.addPending(io, p, .replace);
         }
+    } else if (row.paths) {
+        for (ctx.names[0..row.n]) |*name| {
+            try ctx.dir.writeFile(io, .{ .sub_path = name[0..7], .data = bytes });
+            try b.addPath(ctx.dir, name[0..7]);
+        }
     } else {
         for (ctx.files[0..row.n], 0..) |*f, n| {
             f.* = try ctx.dir.createFile(io, ctx.names[n][0..7], .{ .read = true });
@@ -241,8 +264,75 @@ fn batch(ctx: *Context, row: *const Row, i: u64) anyerror!void {
             try b.addFile(f.*);
         }
     }
-    defer if (!row.renames) for (ctx.files[0..row.n]) |f| f.close(io);
+    defer if (!row.renames and !row.paths) for (ctx.files[0..row.n]) |f| f.close(io);
     _ = try b.commit(io, .{ .level = .data, .parallel = row.parallel });
+}
+
+fn syncPathRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    _ = row;
+    try ctx.file.writePositionalAll(ctx.io, &ctx.page, (i % 256) * 4096);
+    _ = try airlock.syncPath(ctx.io, ctx.dir, "probe", .{});
+}
+
+/// One rename of a pair of names back and forth, at `data`.
+fn renameRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    _ = row;
+    if (i == 0) try ctx.dir.writeFile(ctx.io, .{ .sub_path = "ping", .data = &ctx.page });
+    const from, const to = if (i % 2 == 0) .{ "ping", "pong" } else .{ "pong", "ping" };
+    _ = try airlock.rename(ctx.io, ctx.dir, from, ctx.dir, to, .{});
+}
+
+/// A file made by std, then removed by airlock at `data`.
+fn removeRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    _ = row;
+    const name = ctx.names[i % ctx.names.len][0..7];
+    try ctx.dir.writeFile(ctx.io, .{ .sub_path = name, .data = "" });
+    _ = try airlock.remove(ctx.io, ctx.dir, name, .{});
+}
+
+/// Three new directories under a new top one.
+fn makePathRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    _ = row;
+    var buffer: [32]u8 = undefined;
+    const path = try std.mem.print(&buffer, "tree{d}/a/b", .{i});
+    _ = try airlock.makePath(ctx.io, ctx.dir, path, .{});
+}
+
+/// A link swapped between two targets (not on Windows, where airlock
+/// makes no links).
+fn symLinkRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    _ = row;
+    if (builtin.target.os.tag == .windows) return;
+    _ = try airlock.symLink(ctx.io, ctx.dir, if (i % 2 == 0) "release-a" else "release-b", "current", .{});
+}
+
+fn createNewRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    _ = row;
+    const name = ctx.names[i % ctx.names.len][0..7];
+    ctx.dir.deleteFile(ctx.io, name) catch {};
+    _ = try airlock.writeFile(ctx.io, ctx.dir, name, &ctx.page, .{ .commit = .{ .publish = .create_new } });
+}
+
+/// A name that is always taken: the temp is synced, then removed.
+fn keepExistingRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    _ = row;
+    if (i == 0) try ctx.dir.writeFile(ctx.io, .{ .sub_path = "kept", .data = &ctx.page });
+    _ = try airlock.writeFile(ctx.io, ctx.dir, "kept", &ctx.page, .{ .commit = .{ .publish = .keep_existing } });
+}
+
+/// `n` leftovers with a random temp's name, then one prune of them all.
+fn pruneRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    _ = i;
+    var dir = try ctx.dir.createDirPathOpen(ctx.io, "leftovers", .{ .open_options = .{ .iterate = true } });
+    defer dir.close(ctx.io);
+    for (0..row.n) |k| {
+        var name: [27]u8 = undefined;
+        name[0] = '.';
+        for (name[1..], 0..) |*c, j| c.* = "abcdefgh"[(k >> @intCast((j % 8) * 3)) & 7];
+        try dir.writeFile(ctx.io, .{ .sub_path = &name, .data = "" });
+    }
+    const removed = try airlock.pruneTemps(ctx.io, dir, ".", .{ .older_than = .fromNanoseconds(0) });
+    std.debug.assert(removed == row.n);
 }
 
 fn abStrandFile(ctx: *Context, row: *const Row, i: u64) anyerror!void {
@@ -329,6 +419,12 @@ fn counts(ctx: *Context, out: *Io.Writer, stdout: *Io.Writer) !void {
         .{ .name = "counts/replace-data-no-barrier", .ops = 1, .op = countReplaceNoBarrier, .overwrite = true },
         .{ .name = "counts/batch-100-renames", .ops = 1, .op = batch, .n = 100 },
         .{ .name = "counts/batch-100-files", .ops = 1, .op = batch, .n = 100, .renames = false },
+        .{ .name = "counts/batch-100-paths", .ops = 1, .op = batch, .n = 100, .renames = false, .paths = true },
+        .{ .name = "counts/rename", .ops = 1, .op = renameRow },
+        .{ .name = "counts/remove", .ops = 1, .op = removeRow },
+        .{ .name = "counts/make-path-3", .ops = 1, .op = makePathRow },
+        .{ .name = "counts/sym-link", .ops = 1, .op = symLinkRow },
+        .{ .name = "counts/keep-existing", .ops = 1, .op = keepExistingRow },
     };
     for (cases) |row| {
         var counter: Counter = .{};
