@@ -89,7 +89,7 @@ test "refuse returns LevelUnavailable where the fallback falls below the level" 
     const plan = if (is_darwin)
         &[_]harness.RawPlan.Entry{harness.always(.sync_full, refusal)}
     else
-        &[_]harness.RawPlan.Entry{ harness.always(if (is_linux) .sync_data else .sync_data, refusal), harness.always(.sync_full, refusal) };
+        &[_]harness.RawPlan.Entry{ harness.always(.sync_data, refusal), harness.always(.sync_full, if (is_windows) .NOT_SUPPORTED else refusal) };
     const h = try Harness.create(testing.allocator, testing.io, .{ .plan = plan });
     defer h.destroy();
     try testing.expectError(error.LevelUnavailable, airlock.syncFile(h.io(), file, .{ .level = .data, .fallback = .refuse }));

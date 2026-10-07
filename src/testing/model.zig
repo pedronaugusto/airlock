@@ -166,8 +166,9 @@ pub const Model = struct {
             .sync_data => m.persisted |= file,
             .sync_full => switch (m.platform) {
                 .linux => m.persisted |= file,
-                // A device flush: this file, and everything written before.
-                else => m.persisted |= file | m.written,
+                // A device flush: this file (or, with no temp named, the
+                // directory's entries), and everything written before.
+                else => m.persisted |= file | m.written | (if (temp == null) m.names() else 0),
             },
             .sync_plain, .sync_writeout => m.written |= if (temp != null) file else m.names(),
             .sync_barrier => {

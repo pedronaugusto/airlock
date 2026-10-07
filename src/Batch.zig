@@ -214,8 +214,10 @@ const Volume = struct {
     slot: u32,
     /// Something on the volume was only written out and needs the flush.
     needs_flush: bool = false,
-    /// A pending temp on the volume, for the barrier before the renames.
+    /// A pending temp on the volume, for the barrier before the renames,
+    /// and its name.
     temp: ?sys.Handle = null,
+    temp_name: ?[]const u8 = null,
 };
 
 const max_volumes = 16;
@@ -414,7 +416,10 @@ const Run = struct {
         const v = r.volume(id.volume, device, rep, s.kind == .pending, s.index) orelse
             return platform.volumeFlush(r.io, handle, subject);
         v.needs_flush = true;
-        if (s.kind == .pending and s.pending.?.state == .open and v.temp == null) v.temp = handle;
+        if (s.kind == .pending and s.pending.?.state == .open and v.temp == null) {
+            v.temp = handle;
+            v.temp_name = subject;
+        }
         return .full;
     }
 
@@ -445,9 +450,9 @@ const Run = struct {
             const temp = v.temp orelse continue;
             const slot = &r.batch.slots[v.slot];
             const reached = (if (is_windows)
-                platform.volumeFlush(r.io, temp, null)
+                platform.volumeFlush(r.io, temp, v.temp_name)
             else
-                platform.volumeBarrier(r.io, temp, r.options.barrier, null)) catch |err| return r.fail(slot, err);
+                platform.volumeBarrier(r.io, temp, r.options.barrier, v.temp_name)) catch |err| return r.fail(slot, err);
             // A barrier or a flush keeps the order; a refused one leaves
             // only what the fallback reached.
             if (!reached.atLeast(.ordered)) try r.part(slot, reached);
