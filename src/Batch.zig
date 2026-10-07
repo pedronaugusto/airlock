@@ -13,6 +13,8 @@
 //! | 5. each volume | none | `F_FULLFSYNC` (F) | `NtFlushBuffersFile` (F) |
 //!
 //! At `ordered` a batch stops after the renames; at `none` it only renames.
+//! A fence the filesystem cannot keep (it refuses a directory's sync)
+//! leaves the batch `.written` at best.
 //! Directories are told apart by their `FileId`, and volumes by their
 //! device (on Windows, the serial and the NT device name: a serial alone
 //! is not unique across cloned volumes). A false split costs one flush; a
@@ -580,7 +582,11 @@ const Run = struct {
 
     /// A fence: every directory renamed into since the last fence is synced
     /// (Darwin and Windows: written out, then one barrier or flush on the
-    /// last), so the renames after it reach the disk after these.
+    /// last), so the renames after it reach the disk after these. A fence
+    /// the filesystem cannot keep, because it refuses a directory's sync,
+    /// leaves the batch `.written` at best: each file still ends old or
+    /// new, but a crash may show a rename after the fence without those
+    /// before it.
     fn fenceDirs(r: *Run, segment: []Slot, at: *const Slot) Error!void {
         var last: ?*Slot = null;
         for (segment, 0..) |*s, i| {
@@ -589,16 +595,17 @@ const Run = struct {
             last = s;
             if (is_darwin or is_windows) {
                 const reached = r.writeoutDir(s.handle) catch |err| return r.fail(s, err);
-                if (reached == .none) try r.part(s, .ordered);
+                if (reached == .none) try r.part(s, .written);
             } else {
                 syncDirOne(r, s);
-                try r.foldDir(s);
+                if (s.err) |err| return r.fail(s, err);
+                try r.part(s, if (s.refused) .written else s.reached);
             }
         }
         const s = last orelse return;
         if (!is_darwin and !is_windows) return;
         const reached = r.flushDir(s.handle, true) catch |err| return r.fail(at, err);
-        if (!reached.atLeast(.ordered)) try r.part(s, reached);
+        if (!reached.atLeast(.ordered)) try r.part(s, Reached.min(reached, .written));
     }
 
     fn seenHandle(earlier: []const Slot, handle: sys.Handle) bool {

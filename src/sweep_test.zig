@@ -3,8 +3,9 @@
 //! shakedown's `sweep`. After each run the check asserts what the operation
 //! promises whatever failed: the destination is old or new and never torn,
 //! no temp is left, a failed sync is never followed by another sync of that
-//! file, an interrupted call is made again, and what a run reported is no
-//! more than the crash model proves for the calls it made.
+//! file, an interrupted call is made again, what a run reported is no more
+//! than the crash model proves for the calls it made, and a batch's fence
+//! holds at every crash point.
 const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
@@ -22,7 +23,7 @@ const is_linux = os == .linux;
 const is_darwin = os.isDarwin();
 const is_tested_os = is_linux or is_darwin or is_windows;
 
-const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs };
+const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs, sym_link, make_path };
 
 /// The error classes tried at each of airlock's calls: a refusal where the
 /// call has one, a failure, a full disk, an interruption, a cancel, and on
@@ -35,6 +36,7 @@ fn faultClasses(call: Call) []const shakedown.IoFault {
             .sync_data, .sync_writeout => &(common ++ [_]F{.{ .fail = error.INVALID_PARAMETER }}),
             .sync_full, .sync_dir => &(common ++ [_]F{.{ .fail = error.NOT_SUPPORTED }}),
             .win_rename_ex, .rename, .open_dir => &(common ++ [_]F{ .{ .fail = error.SHARING_VIOLATION }, .{ .fail = error.DELETE_PENDING } }),
+            .make_dir => &(common ++ [_]F{ .{ .fail = error.OBJECT_PATH_NOT_FOUND }, .{ .fail = error.OBJECT_NAME_COLLISION } }),
             .create_temp => &(common ++ [_]F{.{ .fail = error.DELETE_PENDING }}),
             .close, .volume_name, .stat_id => &.{},
             else => &common,
@@ -47,6 +49,9 @@ fn faultClasses(call: Call) []const shakedown.IoFault {
         .sync_full, .sync_barrier, .sync_dir => if (is_darwin) &(common ++ darwin_refusal) else &(common ++ refusal),
         .sync_data, .sync_plain, .sync_writeout, .rename_noreplace => &(common ++ refusal),
         .link => &(common ++ [_]F{.{ .fail = error.PERM }}),
+        // A parent that vanished: makePath starts again.
+        .make_dir => &(common ++ [_]F{ .{ .fail = error.NOENT }, .{ .fail = error.EXIST } }),
+        .symlink => &(common ++ [_]F{.{ .fail = error.EXIST }}),
         .create_temp => &.{ .{ .fail = error.ACCES }, .{ .fail = error.NOSPC }, .{ .fail = error.INTR }, .{ .fail = error.Canceled } },
         .open_dir, .open_file, .unlink => &.{ .{ .fail = error.ACCES }, .{ .fail = error.INTR }, .{ .fail = error.Canceled } },
         .stat_id, .getfl => &.{ .{ .fail = error.ACCES }, .{ .fail = error.INTR } },
@@ -86,6 +91,14 @@ const Sweep = struct {
             for (s.dests()) |d| try s.scratch.write(d, "old");
         }
         if (s.kind == .rename) try s.scratch.write("src", "new");
+        if (s.kind == .sym_link) {
+            // "a" is a link to "old-target"; the run points it at
+            // "new-target". Reading through it says which.
+            try s.scratch.dir().deleteFile(testing.io, "a");
+            try s.scratch.write("old-target", "old");
+            try s.scratch.write("new-target", "new");
+            try s.scratch.dir().symLink(testing.io, "old-target", "a", .{});
+        }
         s.h = try Harness.over(testing.allocator, fio, .{});
         s.live = true;
         s.pending_count = 0;
@@ -129,6 +142,8 @@ const Sweep = struct {
             },
             .rename => s.reached = try airlock.rename(io, dir, "src", dir, "b", .{}),
             .remove => s.reached = try airlock.remove(io, dir, "a", .{}),
+            .sym_link => s.reached = try airlock.symLink(io, dir, "new-target", "a", .{}),
+            .make_path => s.reached = (try airlock.makePath(io, dir, "sub/x/y", .{})).reached,
             .batch, .batch_two_dirs => try s.runBatch(io),
         }
         s.published = true;
@@ -164,7 +179,7 @@ const Sweep = struct {
         try s.checkFiles(err);
         try s.checkNoTemps(err);
         if (injected) |inj| try s.checkInjected(inj, err);
-        if (err == null) try s.checkModel();
+        try s.checkModel(err);
     }
 
     /// Old or new, never torn; new once the operation succeeded; untouched
@@ -178,14 +193,18 @@ const Sweep = struct {
             switch (s.kind) {
                 // An in-place write is the caller's; only the sync is airlock's.
                 .sync_file => if (err == null) try testing.expectEqualStrings("new", got.?),
+                // Directories: all of them once it succeeded; any prefix of
+                // them if it failed.
+                .make_path => if (err == null) (try s.scratch.dir().openDir(testing.io, "sub/x/y", .{})).close(testing.io),
                 .remove => if (err == null) try testing.expectEqual(@as(?[]const u8, null), got),
                 else => {
                     if (got) |bytes| {
                         if (!std.mem.eql(u8, bytes, "old") and !std.mem.eql(u8, bytes, "new")) return error.TornDestination;
                     }
-                    // A batch or a rename that failed after its rename may
-                    // leave the new name; it is then never torn.
-                    const batch = s.kind == .batch or s.kind == .batch_two_dirs or s.kind == .rename;
+                    // A batch, a rename or a link swap that failed after
+                    // its rename may leave the new name; it is then never
+                    // torn.
+                    const batch = s.kind == .batch or s.kind == .batch_two_dirs or s.kind == .rename or s.kind == .sym_link;
                     if (err == null or (published and !batch)) {
                         try testing.expectEqualStrings("new", got orelse return error.MissingDestination);
                     } else if (!published and !batch) {
@@ -241,10 +260,17 @@ const Sweep = struct {
         }
     }
 
-    fn checkModel(s: *Sweep) !void {
-        if (s.kind == .batch_two_dirs or s.kind == .rename or s.kind == .remove or s.kind == .sync_file) return;
+    fn checkModel(s: *Sweep, err: ?anyerror) !void {
+        if (s.kind == .batch_two_dirs or s.kind == .rename or s.kind == .remove or s.kind == .sync_file or s.kind == .make_path) return;
         var m: model_mod.Model = .init(model_mod.native());
+        // The batch's fence comes after its first two renames.
+        if (s.kind == .batch) m.fenceAt(2);
         const proved = m.replay(s.h);
+        // No crash shows a rename after the fence without those before
+        // it, unless the filesystem refused the fence's sync and the batch
+        // said so.
+        if (!m.fencesHeld() and (err != null or s.reached.atLeast(.ordered))) return error.FenceBroken;
+        if (err != null) return;
         if (s.reached.atLeast(.ordered) and !proved.atLeast(.ordered)) return error.ReportedAboveModel;
         if (s.reached.atLeast(.data) and !proved.atLeast(.data)) return error.ReportedAboveModel;
     }
@@ -317,6 +343,15 @@ test "sweep: a batch over two directories" {
     try sweepOne(.batch_two_dirs);
 }
 
+test "sweep: a symbolic link swap" {
+    if (is_windows) return error.SkipZigTest;
+    try sweepOne(.sym_link);
+}
+
+test "sweep: makePath" {
+    try sweepOne(.make_path);
+}
+
 test "the model proves what a real replace reports, and no more" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
@@ -372,6 +407,47 @@ test "the model proves a batch with a fence" {
     try batch.addPending(io, &ps[2], .replace);
     _ = try batch.commit(io, .{ .parallel = 1 });
     var m: model_mod.Model = .init(model_mod.native());
+    m.fenceAt(2);
     try testing.expectEqual(airlock.Reached.data, m.replay(h));
     try testing.expectEqual(@as(u8, 3), m.dest_count);
+    try testing.expect(m.fencesHeld());
+}
+
+test "the same batch without its fence breaks the fence's promise in the model" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const h = try Harness.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    const io = h.io();
+    var ps: [3]airlock.Pending = undefined;
+    for (&ps, [_][]const u8{ "a", "b", "c" }) |*p, name| p.* = try airlock.create(io, s.dir(), name, .{});
+    defer for (&ps) |*p| p.discard(io);
+    var slots: [3]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    for (&ps) |*p| try batch.addPending(io, p, .replace);
+    _ = try batch.commit(io, .{ .parallel = 1 });
+    var m: model_mod.Model = .init(model_mod.native());
+    m.fenceAt(2);
+    // Durable at the end all the same; only the order in between is lost.
+    try testing.expectEqual(airlock.Reached.data, m.replay(h));
+    try testing.expect(!m.fencesHeld());
+}
+
+test "the model proves what a real symbolic link swap reports" {
+    if (is_windows or !is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    try s.write("release-1", "1");
+    try s.dir().symLink(testing.io, "release-1", "current", .{});
+    inline for (.{ airlock.Level.ordered, airlock.Level.data }) |level| {
+        const h = try Harness.create(testing.allocator, testing.io, .{});
+        defer h.destroy();
+        const reached = try airlock.symLink(h.io(), s.dir(), "release-2", "current", .{ .sync = .{ .level = level } });
+        var m: model_mod.Model = .init(model_mod.native());
+        const proved = m.replay(h);
+        try testing.expectEqual(if (level == .data) airlock.Reached.data else airlock.Reached.ordered, proved);
+        try testing.expect(reached.atLeast(level));
+    }
 }

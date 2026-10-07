@@ -375,7 +375,8 @@ fn openDirFailure(e: posix.E) OpenDirError {
 pub const OpenFileError = Io.File.OpenError;
 
 /// An existing file opened to be synced: read-only on POSIX, for write on
-/// Windows (a flush needs write access).
+/// Windows (a flush needs write access; a read-only file has its attribute
+/// cleared for the open and put back).
 pub fn openFile(io: Io, dir: Handle, sub_path: []const u8) OpenFileError!Handle {
     if (is_windows) return openFileWindows(io, dir, sub_path, .sync);
     const path = try posix.toPosixPath(sub_path);
@@ -923,8 +924,94 @@ fn makeDirWindows(io: Io, root: windows.HANDLE, name: []const u8) MakeDirError!v
 pub const OpenFor = enum { sync, delete, rename };
 
 /// A file opened by name relative to `root`: for a flush (write access),
-/// or for a delete or a rename by handle (delete access).
+/// or for a delete or a rename by handle (delete access). A read-only file
+/// opened for a flush is opened as `openReadOnlyForSync` says.
 pub fn openFileWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, purpose: OpenFor) OpenFileError!windows.HANDLE {
+    return openByName(io, root, sub_path, purpose) catch |err| switch (err) {
+        error.AccessDenied => if (purpose == .sync) openReadOnlyForSync(io, root, sub_path) else err,
+        else => err,
+    };
+}
+
+/// A read-only file opened for a flush, which needs write access (git's
+/// and relic's loose objects are read-only): the attribute is cleared, the
+/// file opened, and the attribute put back at once. Access is checked when
+/// a handle is opened, so the handle keeps its write access. A file that
+/// is not read-only was denied for a real reason, and stays denied.
+fn openReadOnlyForSync(io: Io, root: windows.HANDLE, sub_path: []const u8) OpenFileError!windows.HANDLE {
+    const attributes = try openAttributes(io, root, sub_path);
+    defer release(io, attributes);
+    const info = basicInformation(attributes) orelse return error.AccessDenied;
+    if (!info.FileAttributes.READONLY) return error.AccessDenied;
+    var writable = info.FileAttributes;
+    writable.READONLY = false;
+    if (try setAttributes(io, attributes, writable) != .SUCCESS) return error.AccessDenied;
+    const opened = openByName(io, root, sub_path, .sync);
+    const restored = setAttributes(io, attributes, info.FileAttributes) catch .CANCELLED;
+    const handle = try opened;
+    if (restored != .SUCCESS) {
+        release(io, handle);
+        return error.AccessDenied;
+    }
+    return handle;
+}
+
+/// Clears the read-only attribute of `name` in `root`, and says whether it
+/// was set.
+fn clearReadOnly(io: Io, root: windows.HANDLE, name: []const u8) bool {
+    const attributes = openAttributes(io, root, name) catch return false;
+    defer release(io, attributes);
+    const info = basicInformation(attributes) orelse return false;
+    if (!info.FileAttributes.READONLY) return false;
+    var writable = info.FileAttributes;
+    writable.READONLY = false;
+    const status = setAttributes(io, attributes, writable) catch return false;
+    return status == .SUCCESS;
+}
+
+/// A handle on `name` in `root` for its attributes alone, the link itself
+/// if it is one.
+fn openAttributes(io: Io, root: windows.HANDLE, name: []const u8) OpenFileError!windows.HANDLE {
+    const space = try ntName(root, name);
+    var nt = space.string();
+    const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
+    const attr: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = if (absolute) null else root, .ObjectName = &nt };
+    const access: windows.ACCESS_MASK = .{
+        .STANDARD = .{ .SYNCHRONIZE = true },
+        .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true, .WRITE_ATTRIBUTES = true } },
+    };
+    var handle: windows.HANDLE = undefined;
+    const status = try retryingNt(io, .open_file, name, ntCreate, .{
+        &handle,                                                                                                  access,
+        &attr,                                                                                                    windows.FILE.ATTRIBUTE{ .NORMAL = true },
+        windows.FILE.SHARE.VALID_FLAGS,                                                                           windows.FILE.CREATE_DISPOSITION.OPEN,
+        windows.FILE.MODE{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true },
+    });
+    if (status != .SUCCESS) return openFailureNt(status);
+    return handle;
+}
+
+fn basicInformation(handle: windows.HANDLE) ?windows.FILE.BASIC_INFORMATION {
+    var info: windows.FILE.BASIC_INFORMATION = undefined;
+    if (ntQueryInfo(handle, std.mem.asBytes(&info), .Basic) != .SUCCESS) return null;
+    return info;
+}
+
+/// Sets `attributes` on `handle`; the times stay as they are.
+fn setAttributes(io: Io, handle: windows.HANDLE, attributes: windows.FILE.ATTRIBUTE) Io.Cancelable!windows.NTSTATUS {
+    var info: windows.FILE.BASIC_INFORMATION = .{
+        .CreationTime = 0,
+        .LastAccessTime = 0,
+        .LastWriteTime = 0,
+        .ChangeTime = 0,
+        .FileAttributes = attributes,
+    };
+    // No attributes at all is spelled NORMAL.
+    if (@as(u32, @bitCast(attributes)) == 0) info.FileAttributes = .{ .NORMAL = true };
+    return retryingNt(io, .set_mode, null, ntSetInfo, .{ handle, std.mem.asBytes(&info), .Basic });
+}
+
+fn openByName(io: Io, root: windows.HANDLE, sub_path: []const u8, purpose: OpenFor) OpenFileError!windows.HANDLE {
     const space = try ntName(root, sub_path);
     var name = space.string();
     const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
@@ -1031,6 +1118,11 @@ pub fn renameByHandle(io: Io, handle: windows.HANDLE, root: windows.HANDLE, name
     if (status == .INVALID_PARAMETER or status == .INVALID_INFO_CLASS or status == .NOT_SUPPORTED) {
         info.Flags = .{ .REPLACE_IF_EXISTS = replace };
         status = try retryingNt(io, .rename, name, ntSetInfo, .{ handle, info.toBuffer(), .Rename });
+        // The legacy rename will not replace a read-only target: clear the
+        // attribute once and rename again.
+        if (status == .ACCESS_DENIED and replace and clearReadOnly(io, root, name)) {
+            status = try retryingNt(io, .rename, name, ntSetInfo, .{ handle, info.toBuffer(), .Rename });
+        }
     }
     return switch (status) {
         .SUCCESS => .renamed,

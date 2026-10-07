@@ -289,13 +289,14 @@ pub fn symLink(io: Io, dir: Io.Dir, target: []const u8, sub_path: []const u8, op
     var reached: Reached = .none;
     if (level != .none) {
         // The link before its name: once renamed, a crash must not find the
-        // name over a link that never reached the disk.
-        const first = syncOne(io, parent.dir, options.sync, platform.default_busy_deadline) catch |err| {
+        // name over a link that never reached the disk. A filesystem that
+        // refuses the sync leaves no such order, so it is refused, or
+        // reported, before the rename.
+        reached = linkSync(io, parent.dir, options.sync) catch |err| {
             // ziglint-ignore: Z026 cleanup after a failure the caller already gets
             sys.unlink(io, parent.dir.handle, temp) catch {};
             return err;
         };
-        reached = Reached.min(first, .ordered);
     }
     sys.rename(io, parent.dir.handle, temp, parent.dir.handle, base) catch |err| {
         // ziglint-ignore: Z026 cleanup after a failure the caller already gets
@@ -304,7 +305,18 @@ pub fn symLink(io: Io, dir: Io.Dir, target: []const u8, sub_path: []const u8, op
     };
     if (@backingInt(level) < @backingInt(Level.data)) return reached;
     const second = syncOne(io, parent.dir, options.sync, platform.default_busy_deadline) catch |err| return notDurable(options.diagnostics, err);
-    return Reached.min(second, .full);
+    return if (reached.atLeast(.ordered)) second else reached;
+}
+
+/// The sync that makes a new link durable before its rename: `.ordered`
+/// when it did, what it reached when the filesystem refused it.
+fn linkSync(io: Io, dir: Io.Dir, sync: SyncOptions) platform.DirSyncError!Reached {
+    const outcome = try platform.dirSync(io, dir.handle, platform.default_busy_deadline, null);
+    if (outcome.refused) {
+        if (sync.fallback == .refuse) return error.LevelUnavailable;
+        return Reached.min(outcome.reached, .written);
+    }
+    return .ordered;
 }
 
 // ---------------------------------------------------------------------

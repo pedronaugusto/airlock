@@ -522,3 +522,17 @@ test "the writer writes a long run of one byte in a few calls" {
     const stat = try s.dir().statFile(testing.io, "pad", .{});
     try testing.expectEqual(@as(u64, 4 + (1 << 16)), stat.size);
 }
+
+test "Windows: the legacy rename replaces a read-only file without waiting out the deadline" {
+    if (!is_windows) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const read_only: Io.File.Permissions = @fromBackingInt(1); // FILE_ATTRIBUTE_READONLY
+    _ = try airlock.writeFile(testing.io, s.dir(), "a", "old", .{ .create = .{ .mode = .{ .exact = read_only } } });
+    // FAT and systems before RS5 have no POSIX rename by handle.
+    const h = try Harness.create(testing.allocator, testing.io, .{ .plan = &.{harness.always(.win_rename_ex, .NOT_SUPPORTED)} });
+    defer h.destroy();
+    _ = try airlock.writeFile(h.io(), s.dir(), "a", "new", .{ .commit = .{ .busy_deadline = .fromNanoseconds(0) } });
+    try expectContents(&s, "a", "new");
+    try testing.expectEqual(@as(u32, 2), h.count(.rename));
+}

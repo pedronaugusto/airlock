@@ -472,3 +472,26 @@ test "a synced pending below the batch's level is LevelUnavailable" {
     try testing.expectError(error.LevelUnavailable, batch.commit(io, .{ .level = .data, .parallel = 1 }));
     try expectContents(&s, "a", null);
 }
+
+test "Windows: a batch syncs a read-only file it keeps, and leaves it read-only" {
+    if (!is_windows) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    // A loose object as git and relic leave it: read-only.
+    const read_only: Io.File.Permissions = @fromBackingInt(1); // FILE_ATTRIBUTE_READONLY
+    _ = try airlock.writeFile(testing.io, s.dir(), "obj", "theirs", .{ .create = .{ .mode = .{ .exact = read_only } } });
+    const h = try Harness.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    const io = h.io();
+    var p = try pending(io, s.dir(), "obj", "ours");
+    defer p.discard(io);
+    var slots: [2]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    try batch.addPending(io, &p, .keep_existing);
+    try testing.expect((try batch.commit(io, .{ .parallel = 1 })).atLeast(.data));
+    try expectContents(&s, "obj", "theirs");
+    try testing.expect(@backingInt((try s.dir().statFile(testing.io, "obj", .{})).permissions) & 1 != 0);
+    try testing.expect((try airlock.syncPath(io, s.dir(), "obj", .{})).atLeast(.data));
+    try testing.expect(@backingInt((try s.dir().statFile(testing.io, "obj", .{})).permissions) & 1 != 0);
+}

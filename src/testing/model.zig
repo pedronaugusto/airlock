@@ -8,7 +8,9 @@
 //! one, or a torn one (the new name over contents that did not persist).
 //! From that it proves a level: `ordered` if no crash point can tear a
 //! destination, `data` if, in addition, the end of the run leaves every
-//! destination new in every crash state.
+//! destination new in every crash state. For a batch it also checks each
+//! fence: no crash point shows a rename after it without every rename
+//! before it.
 //!
 //! The model covers one directory: the temps and the destinations of a
 //! publish or a batch side by side. Each rule cites its source:
@@ -26,6 +28,8 @@
 //!   everything handed to the device before it reaches the disk before
 //!   anything issued after it. The model runs with the barrier honoured, and
 //!   with it dropped, as a drive without barrier support might.
+//! - A symbolic link is a directory entry holding its target: it persists
+//!   with the directory's entries, by the directory's sync.
 //! - Windows, NtFlushBuffersFileEx and NtFlushBuffersFile: `DATA_SYNC_ONLY`
 //!   persists the file's data and "metadata that is necessary for data
 //!   retrieval"; `NO_SYNC` writes out without flushing the device cache; a
@@ -57,9 +61,11 @@ const max_effects = 24;
 const Mask = u32;
 
 const Effect = struct {
-    kind: enum { data, name },
+    /// A temp's contents; a rename onto a destination; a symbolic link's
+    /// creation, which is a directory entry and its target together.
+    kind: enum { data, name, link },
     /// The temp an effect belongs to: its data, or the rename that points a
-    /// destination at it.
+    /// destination at it. For a name, also its place in rename order.
     temp: u8,
     /// For a name: the destination it renames onto.
     dest: u8,
@@ -89,6 +95,12 @@ pub const Model = struct {
     ever_torn: bool = false,
     /// What a barrier ordered before everything issued after it.
     pending_barrier: Mask = 0,
+    /// A batch's fences, as the number of renames before each.
+    fences: [4]u8 = undefined,
+    fence_count: u8 = 0,
+    /// Whether any crash point could show a rename after a fence without
+    /// one before it.
+    fence_broken: bool = false,
 
     pub fn init(platform: Platform) Model {
         return .{ .platform = platform };
@@ -100,6 +112,27 @@ pub const Model = struct {
         m.temps[t] = temp;
         m.temp_count += 1;
         m.add(.{ .kind = .data, .temp = t, .dest = 0 });
+    }
+
+    /// A symbolic link created under a temp name: its entry and its
+    /// target reach the disk together, with the directory's entries.
+    pub fn createLink(m: *Model, temp: []const u8) void {
+        const t = m.temp_count;
+        m.temps[t] = temp;
+        m.temp_count += 1;
+        m.add(.{ .kind = .link, .temp = t, .dest = 0 });
+    }
+
+    /// A batch's fence after its first `renames` renames: no crash may
+    /// show a later rename without every earlier one.
+    pub fn fenceAt(m: *Model, renames: u8) void {
+        m.fences[m.fence_count] = renames;
+        m.fence_count += 1;
+    }
+
+    /// Whether every fence held at every crash point so far.
+    pub fn fencesHeld(m: *const Model) bool {
+        return !m.fence_broken;
     }
 
     /// A destination that existed before the run, holding the old file.
@@ -125,15 +158,16 @@ pub const Model = struct {
     fn dataOf(m: *const Model, temp: u8) Mask {
         var mask: Mask = 0;
         for (m.effects[0..m.count], 0..) |e, i| {
-            if (e.kind == .data and e.temp == temp) mask |= @as(Mask, 1) << @intCast(i);
+            if (e.kind != .name and e.temp == temp) mask |= @as(Mask, 1) << @intCast(i);
         }
         return mask;
     }
 
-    fn names(m: *const Model) Mask {
+    /// The directory's entries: renames, and the links created in it.
+    fn entries(m: *const Model) Mask {
         var mask: Mask = 0;
         for (m.effects[0..m.count], 0..) |e, i| {
-            if (e.kind == .name) mask |= @as(Mask, 1) << @intCast(i);
+            if (e.kind != .data) mask |= @as(Mask, 1) << @intCast(i);
         }
         return mask;
     }
@@ -168,16 +202,16 @@ pub const Model = struct {
                 .linux => m.persisted |= file,
                 // A device flush: this file (or, with no temp named, the
                 // directory's entries), and everything written before.
-                else => m.persisted |= file | m.written | (if (temp == null) m.names() else 0),
+                else => m.persisted |= file | m.written | (if (temp == null) m.entries() else 0),
             },
-            .sync_plain, .sync_writeout => m.written |= if (temp != null) file else m.names(),
+            .sync_plain, .sync_writeout => m.written |= if (temp != null) file else m.entries(),
             .sync_barrier => {
                 m.written |= file;
                 if (m.platform == .darwin) m.barrier();
             },
             .sync_dir => switch (m.platform) {
-                .linux => m.persisted |= m.names(),
-                else => m.persisted |= m.names() | m.written,
+                .linux => m.persisted |= m.entries(),
+                else => m.persisted |= m.entries() | m.written,
             },
             else => {},
         }
@@ -193,6 +227,23 @@ pub const Model = struct {
         }
         const e = latest orelse return .old;
         return if (on_disk & m.dataOf(e.temp) == m.dataOf(e.temp)) .new else .torn;
+    }
+
+    /// Whether `on_disk` shows a rename after a fence without every rename
+    /// before it.
+    fn breaksFence(m: *const Model, on_disk: Mask) bool {
+        for (m.fences[0..m.fence_count]) |boundary| {
+            var before_all = true;
+            var after_any = false;
+            for (m.effects[0..m.count], 0..) |e, i| {
+                if (e.kind != .name) continue;
+                const present = on_disk & (@as(Mask, 1) << @intCast(i)) != 0;
+                if (e.temp < boundary and !present) before_all = false;
+                if (e.temp >= boundary and present) after_any = true;
+            }
+            if (after_any and !before_all) return true;
+        }
+        return false;
     }
 
     fn consistent(m: *const Model, on_disk: Mask) bool {
@@ -213,6 +264,7 @@ pub const Model = struct {
         while (true) {
             const on_disk = m.persisted | subset;
             if (m.consistent(on_disk)) {
+                if (m.breaksFence(on_disk)) m.fence_broken = true;
                 for (0..m.dest_count) |d| switch (m.stateOf(on_disk, @intCast(d))) {
                     .torn => {
                         m.ever_torn = true;
@@ -244,6 +296,7 @@ pub const Model = struct {
             if (r.event.outcome == .err) continue;
             const c: Call = @fromBackingInt(@as(u8, @intCast(f.call)));
             if (c == .create_temp) m.create(r.event.subject.path.?);
+            if (c == .symlink) m.createLink(r.event.subject.path.?);
             m.call(c, r.event.subject.path);
             end_all_new = m.crash();
         }
@@ -305,4 +358,37 @@ test "Darwin: a writeout alone persists nothing" {
     m.call(.rename, "d");
     m.call(.sync_writeout, null);
     try std.testing.expectEqual(Reached.none, m.proves(m.crash()));
+}
+
+test "Linux: a fence holds with a directory sync between the renames, and breaks without" {
+    for ([_]bool{ true, false }) |synced| {
+        var m: Model = .init(.linux);
+        for ([_][]const u8{ "t0", "t1" }) |t| m.create(t);
+        m.fenceAt(1);
+        m.call(.sync_data, "t0");
+        m.call(.sync_data, "t1");
+        m.call(.rename, "a");
+        _ = m.crash();
+        if (synced) m.call(.sync_dir, null);
+        _ = m.crash();
+        m.call(.rename, "b");
+        _ = m.crash();
+        m.call(.sync_dir, null);
+        _ = m.crash();
+        try std.testing.expectEqual(synced, m.fencesHeld());
+    }
+}
+
+test "a symbolic link renamed before its directory sync can tear; synced first, it cannot" {
+    for ([_]bool{ true, false }) |synced| {
+        var m: Model = .init(.linux);
+        _ = m.destination("current");
+        m.createLink("t");
+        if (synced) m.call(.sync_dir, null);
+        _ = m.crash();
+        m.call(.rename, "current");
+        _ = m.crash();
+        m.call(.sync_dir, null);
+        try std.testing.expectEqual(if (synced) Reached.data else Reached.none, m.proves(m.crash()));
+    }
 }
