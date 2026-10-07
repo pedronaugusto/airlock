@@ -1,0 +1,30 @@
+.{
+    .name = .airlock,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0xba8f3100e8eefbad,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "bench",
+        "ci",
+        ".github",
+        "CHANGELOG.md",
+        "LICENSE",
+        "README.md",
+    },
+    .dependencies = .{
+        .preflight = .{
+            .url = "git+https://github.com/pedronaugusto/preflight#260ed79cf626e7ab8fb05039db476bb680b4a653",
+            .hash = "preflight-0.1.0-LX1ZwjvuBADAj7ukyFSK8YT0EXBlwN8CZkprUGIpFE2u",
+            .lazy = true,
+        },
+        .shakedown = .{
+            .url = "git+https://github.com/pedronaugusto/shakedown#dfe5e9561434c4267128724e9311e8c6d535781e",
+            .hash = "shakedown-0.1.0-BR8U4xVfAwCgOh69pTiRyShNvi2Z82XF2OrNqIiyj4tr",
+            .lazy = true,
+        },
+    },
+}
