@@ -1,4 +1,25 @@
-# Durability measurements
+# airlock design
+
+## Batch ownership and durability
+
+Every writing handle gets its own writeout and error check. A full sync of a
+different file alone does not replace that check. Reopened paths cannot recover
+writeback errors already reported to a previous descriptor; they are a separate
+benchmark contract from retained writing handles.
+
+On Darwin, bounded `Io.Group`s overlap per-file writeouts. Each worker owns one
+slot; the caller joins the group, registers volumes and folds failures in add
+order. No worker mutates the volume table. Paths are folded and closed before
+another group opens, bounding handles by `parallel` plus retained volume
+representatives. If concurrency is unavailable, the work runs inline.
+
+The durability sequence is per-file writeouts, a pre-publish barrier per volume,
+renames and fences in add order, distinct-directory writeouts, and a full flush
+per volume. Per-file errors, refusal, cancellation, synced retries, close errors
+and volume identity remain part of the contract. Raw sync-call counts describe
+calls, not physical cache drains or filesystem transaction boundaries.
+
+## Benchmark workloads
 
 `zig build bench` builds and runs the rows in ReleaseFast. The installed
 `zig-out/bench/airlock-bench` accepts a row prefix and `--dir <parent>` to
@@ -39,14 +60,6 @@ and identity calls for a batch. Linux instead retains N data syncs and
 expects concurrent filesystem journal commits to share flushes. Device,
 filesystem and dirty-handle behavior determine whether those estimates hold.
 
-[results/2026-10-08.md](results/2026-10-08.md) records the native macOS and
-local Lima Linux results, acceptance verdicts and the hook A/B against main
-before this change. JSONL files beside it retain the complete rows and
-repetitions. The XFS results are from an isolated loop image inside the VM;
-neither that image nor the ext4 virtual disk represents a physical NVMe XFS
-release measurement. No external non-Apple SSD was available for the
-barrier-support probe.
-
 ## macOS batch strategies
 
 `airlock-macos-batch` isolates write-all-then-sync strategies and emits the
@@ -69,10 +82,8 @@ It can use the internal APFS disk and a mounted APFS image together.
 through shakedown; those instrumented timings are separate from timed rows. The image
 is still backed by the internal disk, so it is a second filesystem, not an
 independent external-device test. `--smoke` takes no measurements on any OS.
-See [the macOS follow-up](results/2026-10-08-macos-batch.md) for the transaction
-hypothesis, strategy comparison, A/B evidence and revised acceptance wording.
 
-## Hosted Windows evidence
+## Manual hosted Windows benchmarks
 
 Dispatch the existing workflow with
 `gh workflow run ci.yml --ref <branch-or-main> -f windows-bench=true`.
@@ -88,6 +99,3 @@ symlink timing/count rows explicitly report `skipped`: the public operation
 returns `OperationUnsupported`. The macOS strategy program emits no rows on
 Windows because its strategies require Darwin primitives. Raw primitive
 refusals remain refusal records, without fabricated latencies.
-
-[2026-10-08 hosted Windows results](results/2026-10-08-windows.md) retain all
-emitted rows and the runner's provenance and limitations.
