@@ -1,0 +1,4 @@
+info: fetching lazy dependency shakedown-0.1.0-BR8U4177DQAXS79Rcl1reGMylJ-qq3g0WNSWNyjjfw19
+info: fetching lazy dependency preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r
+info: fetching lazy dependency gantry-0.1.0-1iNrkR_GCwAwsj_mmeREG94GeqDhI6AZjQwn-cMnXszn
+info: fetching lazy dependency ziglint-0.5.3-t0bwL9gkBgDJkTIUhKe70dqGDYevrZK1XGTdjnHfwURT

@@ -88,3 +88,6 @@ symlink timing/count rows explicitly report `skipped`: the public operation
 returns `OperationUnsupported`. The macOS strategy program emits no rows on
 Windows because its strategies require Darwin primitives. Raw primitive
 refusals remain refusal records, without fabricated latencies.
+
+[2026-10-08 hosted Windows results](results/2026-10-08-windows.md) retain all
+emitted rows and the runner's provenance and limitations.
