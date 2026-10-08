@@ -88,7 +88,7 @@ jobs:
             image_version = $env:ImageVersion
             zig = (zig version)
             build_mode = 'ReleaseFast'
-            command = 'zig build bench -Doptimize=ReleaseFast -Dci-lint=false'
+            command = 'zig build bench -Doptimize=ReleaseFast'
             io = 'std.Io.Threaded; hosted virtual storage'
             checkout_directory = '${{ github.workspace }}'
             scratch = 'preflight b.tmpPath(), then the benchmark owns a random child of scratch'
@@ -101,7 +101,7 @@ jobs:
       - name: Run the own benchmark suite in ReleaseFast
         shell: pwsh
         run: |
-          & zig build bench -Doptimize=ReleaseFast -Dci-lint=false 1> benchmark-evidence/rows.jsonl 2> benchmark-evidence/stderr.txt
+          & zig build bench -Doptimize=ReleaseFast 1> benchmark-evidence/rows.jsonl 2> benchmark-evidence/stderr.txt
           $benchExit = $LASTEXITCODE
           Set-Content benchmark-evidence/exit-code.txt $benchExit
           Get-Content benchmark-evidence/rows.jsonl
