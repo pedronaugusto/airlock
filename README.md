@@ -122,11 +122,15 @@ else: only names a random temp can have, last modified long enough ago that no
 other process is still writing them.
 
 `Batch` takes files, pending publishes, directories and fences. It syncs each
-file cheaply (Linux runs its `fdatasync`s concurrently; macOS and Windows write
-each one out), puts one barrier per volume before the renames, renames in the
+file through its writing handle (Linux data syncs and macOS writeouts run
+concurrently, bounded by `parallel`; Windows writes each one out), puts one
+barrier per volume before the renames, renames in the
 order the entries were added, syncs each distinct directory once, then flushes
 each volume once. A hundred files on macOS cost one barrier and one flush
-instead of a hundred flushes. A `fence` makes the renames after it reach the
+instead of a hundred flush calls. That does not promise a hundredfold speedup:
+APFS can coalesce write-all-then-sync workloads. `parallel = 1` runs sequentially;
+when the `Io` cannot provide concurrency, the writeouts run inline. A `fence`
+makes the renames after it reach the
 disk after those before it; a fence the filesystem cannot keep, because it
 refuses a directory's sync, leaves the batch `.written` at best. A publish that
 finds its name taken under `keep_existing` syncs the existing file and its

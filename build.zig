@@ -83,7 +83,10 @@ pub fn build(b: *std.Build) !void {
             .tests = test_step,
             .portable_tests = true,
             .bench = .{
-                .programs = &.{.{ .name = "airlock-bench", .source = "bench/main.zig" }},
+                .programs = &.{
+                    .{ .name = "airlock-bench", .source = "bench/main.zig" },
+                    .{ .name = "airlock-macos-batch", .source = "bench/macos_batch.zig" },
+                },
                 .imports = benchImports,
                 .target = target,
                 .optimize = optimize,

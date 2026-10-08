@@ -1,11 +1,12 @@
 //! Many files, publishes and directories made durable under the fewest
-//! barriers: a cheap writeout per file, one barrier per volume, the renames
+//! barriers: a writeout per file (concurrent on Linux and Darwin), one
+//! barrier per volume, the renames
 //! in the order they were added, then each distinct directory once and one
 //! device flush per volume.
 //!
 //! | Step | Linux | Darwin | Windows |
 //! |---|---|---|---|
-//! | 1. each file | `fdatasync` (`fsync` at `full`), `parallel` at once | `fsync` (W) | `NO_SYNC` (W) |
+//! | 1. each file | `fdatasync` (`fsync` at `full`), `parallel` at once | `fsync` (W), `parallel` at once | `NO_SYNC` (W) |
 //! | 2. each volume, if there are renames | none | `F_BARRIERFSYNC` (B) | `NtFlushBuffersFile` (F) |
 //! | 3. renames, in add order | `fence`: `fsync` of every directory touched since the last fence | `fence`: W of those, then one B | `fence`: W of those, then one F |
 //! | 3b. `keep_existing` found the name taken | the existing file is synced, and its directory in step 4 | W, and its directory in step 4 | W, and its directory in step 4 |
@@ -164,7 +165,7 @@ pub fn fence(b: *Batch) AddError!void {
 
 pub const Options = struct {
     level: Level = .data,
-    /// Linux: how many syncs run at once; 1 = one after another.
+    /// Linux and Darwin: how many file syncs run at once; 1 = sequential.
     parallel: u8 = 16,
     /// Windows: how long to retry a rename a scanner is blocking.
     busy_deadline: Io.Duration = .fromMilliseconds(2000),
@@ -385,12 +386,82 @@ fn Run(comptime fallback: Fallback) type {
         }
 
         fn syncFiles(r: *Self) E!void {
+            if (is_darwin and r.options.parallel > 1) return r.syncDarwinFiles();
             if (is_linux and r.options.parallel > 1) return r.syncFilesConcurrently();
             for (r.slots()) |*s| if (isFileSlot(s)) {
                 syncOne(r, s);
                 if (s.err) |err| return r.fail(s, err);
                 try r.part(s, s.reached);
             };
+        }
+
+        /// Darwin: overlap per-file writeouts, then register volumes in add
+        /// order. No worker mutates the volume table. Fold each bounded group
+        /// before opening the next, so path descriptors stay within the budget.
+        fn syncDarwinFiles(r: *Self) E!void {
+            const all = r.slots();
+            var start: usize = 0;
+            while (start < all.len) {
+                var group: Io.Group = .init;
+                var started: usize = 0;
+                var end = start;
+                while (end < all.len and started < r.options.parallel) : (end += 1) {
+                    const s = &all[end];
+                    if (!isFileSlot(s)) continue;
+                    group.concurrent(r.io, writeoutDarwin, .{ r, s }) catch writeoutDarwin(r, s);
+                    started += 1;
+                }
+                group.await(r.io) catch |err| {
+                    group.cancel(r.io);
+                    return err;
+                };
+                for (all[start..end]) |*s| if (isFileSlot(s)) {
+                    if (s.err) |err| return r.fail(s, err);
+                    if (s.reached == .written and (s.pending == null or s.pending.?.state == .open)) {
+                        s.reached = r.registerWriteout(s, if (s.pending) |p| p.file.handle else s.handle, s.id, 0, if (s.pending) |p| p.tempName() else s.path) catch |err| return r.fail(s, err);
+                    }
+                    r.closePath(s);
+                    try r.part(s, s.reached);
+                };
+                start = end;
+            }
+        }
+
+        /// Worker-owned slot only. The writing handle is synced even if a
+        /// different file's sync committed the filesystem transaction already.
+        fn writeoutDarwin(r: *Self, s: *Slot) void {
+            s.err = null;
+            if (s.pending) |p| {
+                if (p.state == .synced) {
+                    syncedPending(r, s, p);
+                    return;
+                }
+                p.flushWriter(r.io) catch |err| {
+                    s.err = err;
+                    return;
+                };
+            }
+            const handle = r.fileHandle(s) catch |err| {
+                s.err = err;
+                return;
+            };
+            const subject = if (s.pending) |p| p.tempName() else s.path;
+            s.reached = platform.writeout(r.io, r.options.blocking, handle, subject) catch |err| {
+                s.err = err;
+                return;
+            };
+            if (s.reached == .written) s.id = sys.statId(r.io, handle) catch |err| {
+                s.err = err;
+                return;
+            };
+        }
+
+        fn closePath(r: *Self, s: *Slot) void {
+            if (s.kind == .path and s.open and !r.standsForVolume(s.handle)) {
+                sys.release(r.io, s.handle);
+                s.open = false;
+                s.owned = false;
+            }
         }
 
         /// Linux: `parallel` syncs at once; the journal merges concurrent
@@ -494,6 +565,11 @@ fn Run(comptime fallback: Fallback) type {
             if (reached != .written) return reached;
             const id = try sys.statId(r.io, handle);
             const device = if (is_windows) try sys.volumeName(r.io, handle) else 0;
+            return r.registerWriteout(s, handle, id, device, subject);
+        }
+
+        /// Serial owner of the volume table, after a successful writeout.
+        inline fn registerWriteout(r: *Self, s: *Slot, handle: sys.Handle, id: sys.Id, device: u64, subject: ?[]const u8) Error!Reached {
             const parent_open = s.kind == .pending and s.open;
             const rep: ?sys.Handle = if (s.kind != .pending) handle else if (parent_open) s.handle else null;
             const v = r.volume(id.volume, device, rep, parent_open, s.index) orelse

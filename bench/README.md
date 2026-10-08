@@ -11,8 +11,8 @@ Rows cover raw primitives; syncs at each level; new and overwrite publishes
 at 4 KiB and 1 MiB; batches of 1, 10, 100 and 1000 files at 4 and 64 KiB,
 with renames, writing handles and paths; Linux parallelism 1, 4, 16 and 64;
 name operations; append and migration baselines; and inline versus an
-application-supplied Threaded executor. macOS uses p1 and p16 (parallelism
-only changes Linux's sync scheduling).
+application-supplied Threaded executor. macOS uses p1 and p16; both Linux data syncs and macOS writeouts now honor
+`parallel`.
 
 Primitive probes dirty 4 KiB before starting the timer, then time only the
 sync; directory probes similarly create an entry before timing its sync.
@@ -46,3 +46,28 @@ repetitions. The XFS results are from an isolated loop image inside the VM;
 neither that image nor the ext4 virtual disk represents a physical NVMe XFS
 release measurement. No external non-Apple SSD was available for the
 barrier-support probe.
+
+## macOS batch strategies
+
+`airlock-macos-batch` isolates write-all-then-sync strategies and emits the
+write, sync and close times separately, plus every raw file-sync duration.
+It accepts `--dir`, `--rounds` (default 9), `--n` (100), `--size` (4096),
+`--parallel` (16) and `--filter <strategy>`. A fresh directory is created for
+every sample; its setup flush is outside the timer. Strategies rotate between
+rounds. All contract baselines identify each writing handle's volume, sync
+that handle and fully sync its parent. `writes` has no durability; reopened
+rows are references with the documented fresh-descriptor error limitation.
+`writeout_full_each` writes every file out before its full-sync series;
+`writeout_parallel` overlaps writeouts in bounded groups then fully syncs the
+directory. `batch`, `pending` and `paths` exercise the public API. None of the
+raw strategies hides primitive refusal behind a fallback.
+
+`--other-dir <parent on a different volume>` splits the public batch, pending
+or path rows between two verified distinct volume IDs, including both parents.
+It can use the internal APFS disk and a mounted APFS image together.
+`--audit` on the two-volume `batch` row checks 102 W + 2 F for N=100
+through shakedown; those instrumented timings are separate from timed rows. The image
+is still backed by the internal disk, so it is a second filesystem, not an
+independent external-device test. `--smoke` takes no measurements on any OS.
+See [the macOS follow-up](results/2026-10-08-macos-batch.md) for the transaction
+hypothesis, strategy comparison, A/B evidence and revised acceptance wording.

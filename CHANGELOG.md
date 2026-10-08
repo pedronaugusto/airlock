@@ -31,6 +31,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.none`, not `.full`: the directory's `F_FULLFSYNC` persists only what was
   handed to the device.
 
+### Changed
+
+- Darwin batches overlap per-file writeouts within `parallel`, retaining writing-handle error checks and the same per-volume barriers and flushes.
+
 ### Added
 
 - Optional `Blocking` executor in sync, publish and batch options: raw syncs

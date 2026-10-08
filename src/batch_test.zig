@@ -274,8 +274,8 @@ test "a full batch says so; the caller commits and starts the next one" {
     try testing.expectError(error.BatchFull, batch.fence());
 }
 
-test "Linux syncs concurrently and the calls are the same multiset" {
-    if (!is_linux) return error.SkipZigTest;
+test "Linux and Darwin sync concurrently and the calls are the same multiset" {
+    if (!is_linux and !is_darwin) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
     var names: [16][8]u8 = undefined;
