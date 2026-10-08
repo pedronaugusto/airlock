@@ -6,6 +6,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/seam.zig",
     } },
     .{ .name = "primitives", .patterns = &.{
+        "src/Blocking.zig",
         "src/level.zig",
         "src/sys.zig",
     } },
@@ -85,5 +86,5 @@ pub const owned: []const gantry.rules.TokenRule = &.{
         "unlinkat",
         "mkdirat",
         "symlinkat",
-    }, .owners = &.{ "src/sys.zig", "bench/baseline/**" } },
+    }, .owners = &.{ "src/sys.zig", "bench/primitives.zig", "bench/baseline/**" } },
 };

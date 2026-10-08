@@ -51,12 +51,12 @@
 //! crash replay, so their rows rest on the man pages and Microsoft's
 //! documentation. What APFS does with `F_BARRIERFSYNC` on a third-party
 //! drive without barrier support is not documented; `barrier = false`
-//! closes that window. airlock's raw calls block the calling thread, as
-//! `Io.Threaded` does; under an evented `Io` run them through
-//! `io.concurrent`.
+//! closes that window. Raw syncs run inline unless the caller supplies
+//! `options.blocking`, an executor hook for its runtime's sync lane.
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
+const Blocking = @import("Blocking.zig");
 const sys = @import("sys.zig");
 const level_mod = @import("level.zig");
 const Level = level_mod.Level;
@@ -75,24 +75,24 @@ pub const os: Os = if (is_linux) .linux else if (is_darwin) .darwin else if (is_
 
 /// The file sync `level` asks for, through its fallback chain, without the
 /// refuse check. `subject` names the file for the test seam.
-pub fn syncChain(io: Io, handle: sys.Handle, level: Level, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
+pub fn syncChain(io: Io, blocking: ?Blocking, handle: sys.Handle, level: Level, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (level == .none) return .none;
     return switch (os) {
-        .linux => linuxChain(io, handle, level, subject),
-        .darwin => darwinChain(io, handle, level, barrier, subject),
-        .windows => windowsChain(io, handle, level, subject),
-        .bsd => plain(io, handle, .sync_plain, subject, .full),
+        .linux => linuxChain(io, blocking, handle, level, subject),
+        .darwin => darwinChain(io, blocking, handle, level, barrier, subject),
+        .windows => windowsChain(io, blocking, handle, level, subject),
+        .bsd => plain(io, blocking, handle, .sync_plain, subject, .full),
     };
 }
 
-fn linuxChain(io: Io, fd: sys.Handle, level: Level, subject: ?[]const u8) Io.File.SyncError!Reached {
+fn linuxChain(io: Io, blocking: ?Blocking, fd: sys.Handle, level: Level, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (level != .full) {
-        if (sys.dataFsync(io, fd, subject)) |_| return .data else |err| switch (err) {
+        if (sys.dataFsync(io, blocking, fd, subject)) |_| return .data else |err| switch (err) {
             error.Refused => {},
             else => |e| return e,
         }
     }
-    sys.linuxFsync(io, fd, .sync_full, subject) catch |err| return switch (err) {
+    sys.linuxFsync(io, blocking, fd, .sync_full, subject) catch |err| return switch (err) {
         error.Refused => .none,
         error.BadHandle => error.Unexpected,
         else => |e| e,
@@ -100,47 +100,47 @@ fn linuxChain(io: Io, fd: sys.Handle, level: Level, subject: ?[]const u8) Io.Fil
     return .full;
 }
 
-fn darwinChain(io: Io, fd: sys.Handle, level: Level, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
+fn darwinChain(io: Io, blocking: ?Blocking, fd: sys.Handle, level: Level, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (level == .ordered and barrier) {
-        if (sys.barrierFsync(io, fd, subject)) |_| return .ordered else |err| switch (err) {
+        if (sys.barrierFsync(io, blocking, fd, subject)) |_| return .ordered else |err| switch (err) {
             error.Refused => {},
             else => |e| return e,
         }
     }
-    return full(io, fd, .sync_full, subject);
+    return full(io, blocking, fd, .sync_full, subject);
 }
 
 /// Darwin `F_FULLFSYNC` as `call`, then `fsync` on a refusal.
-fn full(io: Io, fd: sys.Handle, call: sys.Call, subject: ?[]const u8) Io.File.SyncError!Reached {
-    if (sys.fullFsync(io, fd, call, subject)) |_| return .full else |err| switch (err) {
+fn full(io: Io, blocking: ?Blocking, fd: sys.Handle, call: sys.Call, subject: ?[]const u8) Io.File.SyncError!Reached {
+    if (sys.fullFsync(io, blocking, fd, call, subject)) |_| return .full else |err| switch (err) {
         error.Refused => {},
         else => |e| return e,
     }
-    return plain(io, fd, .sync_plain, subject, .written);
+    return plain(io, blocking, fd, .sync_plain, subject, .written);
 }
 
 /// Plain `fsync` as `call`, reaching `reached`; `.none` on a refusal.
-fn plain(io: Io, fd: sys.Handle, call: sys.Call, subject: ?[]const u8, reached: Reached) Io.File.SyncError!Reached {
-    sys.plainFsync(io, fd, call, subject) catch |err| return switch (err) {
+fn plain(io: Io, blocking: ?Blocking, fd: sys.Handle, call: sys.Call, subject: ?[]const u8, reached: Reached) Io.File.SyncError!Reached {
+    sys.plainFsync(io, blocking, fd, call, subject) catch |err| return switch (err) {
         error.Refused => .none,
         else => |e| e,
     };
     return reached;
 }
 
-fn windowsChain(io: Io, handle: sys.Handle, level: Level, subject: ?[]const u8) Io.File.SyncError!Reached {
+fn windowsChain(io: Io, blocking: ?Blocking, handle: sys.Handle, level: Level, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (level != .full) {
-        if (sys.flushExWindows(io, handle, .data_sync_only, subject)) |_| return .data else |err| switch (err) {
+        if (sys.flushExWindows(io, blocking, handle, .data_sync_only, subject)) |_| return .data else |err| switch (err) {
             error.Refused => {},
             else => |e| return e,
         }
     }
-    return flushFull(io, handle, .sync_full, subject);
+    return flushFull(io, blocking, handle, .sync_full, subject);
 }
 
 /// Windows `NtFlushBuffersFile` as `call`; `.none` on a refusal.
-pub fn flushFull(io: Io, handle: sys.Handle, call: sys.Call, subject: ?[]const u8) Io.File.SyncError!Reached {
-    sys.flushWindows(io, handle, call, subject) catch |err| return switch (err) {
+pub fn flushFull(io: Io, blocking: ?Blocking, handle: sys.Handle, call: sys.Call, subject: ?[]const u8) Io.File.SyncError!Reached {
+    sys.flushWindows(io, blocking, handle, call, subject) catch |err| return switch (err) {
         error.Refused => .none,
         else => |e| e,
     };
@@ -150,35 +150,35 @@ pub fn flushFull(io: Io, handle: sys.Handle, call: sys.Call, subject: ?[]const u
 /// A writeout without a device flush, for a batch: Darwin `fsync`, Windows
 /// `NO_SYNC`. `.written`, or `.full` where Windows refused `NO_SYNC` and a
 /// full flush stood in; `.none` if that was refused too.
-pub fn writeout(io: Io, handle: sys.Handle, subject: ?[]const u8) Io.File.SyncError!Reached {
+pub fn writeout(io: Io, blocking: ?Blocking, handle: sys.Handle, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (is_windows) {
-        if (sys.flushExWindows(io, handle, .no_sync, subject)) |_| return .written else |err| switch (err) {
+        if (sys.flushExWindows(io, blocking, handle, .no_sync, subject)) |_| return .written else |err| switch (err) {
             error.Refused => {},
             else => |e| return e,
         }
-        return flushFull(io, handle, .sync_full, subject);
+        return flushFull(io, blocking, handle, .sync_full, subject);
     }
-    return plain(io, handle, .sync_writeout, subject, .written);
+    return plain(io, blocking, handle, .sync_writeout, subject, .written);
 }
 
 /// One device flush on the volume `handle` is on: Darwin `F_FULLFSYNC`,
 /// Windows `NtFlushBuffersFile`.
-pub fn volumeFlush(io: Io, handle: sys.Handle, subject: ?[]const u8) Io.File.SyncError!Reached {
-    if (is_windows) return flushFull(io, handle, .sync_full, subject);
-    return full(io, handle, .sync_full, subject);
+pub fn volumeFlush(io: Io, blocking: ?Blocking, handle: sys.Handle, subject: ?[]const u8) Io.File.SyncError!Reached {
+    if (is_windows) return flushFull(io, blocking, handle, .sync_full, subject);
+    return full(io, blocking, handle, .sync_full, subject);
 }
 
 /// One barrier on the volume `handle` is on: Darwin `F_BARRIERFSYNC`, or a
 /// full flush where there is no barrier or it is refused. Returns
 /// `.ordered`, `.full`, `.written` or `.none`.
-pub fn volumeBarrier(io: Io, handle: sys.Handle, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
+pub fn volumeBarrier(io: Io, blocking: ?Blocking, handle: sys.Handle, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (is_darwin and barrier) {
-        if (sys.barrierFsync(io, handle, subject)) |_| return .ordered else |err| switch (err) {
+        if (sys.barrierFsync(io, blocking, handle, subject)) |_| return .ordered else |err| switch (err) {
             error.Refused => {},
             else => |e| return e,
         }
     }
-    return volumeFlush(io, handle, subject);
+    return volumeFlush(io, blocking, handle, subject);
 }
 
 /// Syncs an open file at `options.level`, through the fallback chain, and
@@ -189,7 +189,7 @@ pub fn volumeBarrier(io: Io, handle: sys.Handle, barrier: bool, subject: ?[]cons
 /// sync is never retried or answered with a weaker call, since the kernel
 /// may already have dropped the pages and cleared the error.
 pub fn syncFile(io: Io, file: Io.File, options: SyncOptions) Io.File.SyncError!Reached {
-    return syncChain(io, file.handle, options.level, options.barrier, null);
+    return syncChain(io, options.blocking, file.handle, options.level, options.barrier, null);
 }
 
 pub const DirSyncError = Io.File.SyncError || Io.Dir.OpenError;
@@ -207,39 +207,39 @@ pub const default_busy_deadline: Io.Duration = .fromMilliseconds(2000);
 /// call and the answer is `.none`.
 pub fn syncDir(io: Io, dir: Io.Dir, options: SyncOptions) DirSyncError!Reached {
     if (@backingInt(options.level) <= @backingInt(Level.ordered)) return .none;
-    const outcome = try dirSync(io, dir.handle, default_busy_deadline, null);
+    const outcome = try dirSync(io, options.blocking, dir.handle, default_busy_deadline, null);
     return outcome.reached;
 }
 
 /// The directory sync of `handle`, at `data` or `full` (they are one call).
-pub fn dirSync(io: Io, handle: sys.Handle, busy: Io.Duration, subject: ?[]const u8) DirSyncError!DirOutcome {
+pub fn dirSync(io: Io, blocking: ?Blocking, handle: sys.Handle, busy: Io.Duration, subject: ?[]const u8) DirSyncError!DirOutcome {
     if (is_windows) {
         const flush = try openDirFlush(io, handle, busy);
         defer sys.release(io, flush);
-        return flushDir(io, flush, subject);
+        return flushDir(io, blocking, flush, subject);
     }
-    if (handle == sys.at_fdcwd) return reopened(io, handle, subject);
+    if (handle == sys.at_fdcwd) return reopened(io, blocking, handle, subject);
     if (is_linux) {
-        sys.linuxFsync(io, handle, .sync_dir, subject) catch |err| switch (err) {
+        sys.linuxFsync(io, blocking, handle, .sync_dir, subject) catch |err| switch (err) {
             error.Refused => return .{ .reached = .none, .refused = true },
             error.BadHandle => {
-                if (try sys.isPathOnly(io, handle)) return reopened(io, handle, subject);
+                if (try sys.isPathOnly(io, handle)) return reopened(io, blocking, handle, subject);
                 return error.Unexpected;
             },
             else => |e| return e,
         };
         return .{ .reached = .full, .refused = false };
     }
-    const reached = if (is_darwin) try full(io, handle, .sync_dir, subject) else try plain(io, handle, .sync_dir, subject, .full);
+    const reached = if (is_darwin) try full(io, blocking, handle, .sync_dir, subject) else try plain(io, blocking, handle, .sync_dir, subject, .full);
     return .{ .reached = reached, .refused = reached != .full };
 }
 
 /// `dirSync` of `"."` reopened relative to `handle`, once.
-fn reopened(io: Io, handle: sys.Handle, subject: ?[]const u8) DirSyncError!DirOutcome {
+fn reopened(io: Io, blocking: ?Blocking, handle: sys.Handle, subject: ?[]const u8) DirSyncError!DirOutcome {
     const fresh = try sys.openDir(io, handle, ".");
     defer sys.release(io, fresh);
     if (fresh == sys.at_fdcwd) return error.Unexpected;
-    return dirSync(io, fresh, default_busy_deadline, subject);
+    return dirSync(io, blocking, fresh, default_busy_deadline, subject);
 }
 
 /// Windows: a handle on the directory `handle` with the rights a flush
@@ -256,8 +256,8 @@ pub fn openDirFlush(io: Io, handle: sys.Handle, busy: Io.Duration) Io.Dir.OpenEr
 }
 
 /// Windows: flush a handle `openDirFlush` returned.
-pub fn flushDir(io: Io, flush: sys.Handle, subject: ?[]const u8) Io.File.SyncError!DirOutcome {
-    const reached = try flushFull(io, flush, .sync_dir, subject);
+pub fn flushDir(io: Io, blocking: ?Blocking, flush: sys.Handle, subject: ?[]const u8) Io.File.SyncError!DirOutcome {
+    const reached = try flushFull(io, blocking, flush, .sync_dir, subject);
     return .{ .reached = reached, .refused = reached == .none };
 }
 
@@ -300,5 +300,5 @@ pub const SyncPathError = Io.File.SyncError || Io.File.OpenError;
 pub fn syncPath(io: Io, dir: Io.Dir, sub_path: []const u8, options: SyncOptions) SyncPathError!Reached {
     const handle = try sys.openFile(io, dir.handle, sub_path);
     defer sys.release(io, handle);
-    return syncChain(io, handle, options.level, options.barrier, sub_path);
+    return syncChain(io, options.blocking, handle, options.level, options.barrier, sub_path);
 }

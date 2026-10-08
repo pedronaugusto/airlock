@@ -4,6 +4,7 @@
 //! airlock's root does not export this type, so the steps a batch takes
 //! one by one (a sync recorded, a parent swapped, a rename alone) are not
 //! a caller's to take.
+const Blocking = @import("Blocking.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -361,6 +362,8 @@ pub const CommitOptions = struct {
     /// As `SyncOptions.barrier`: Darwin orders the temp with a barrier and
     /// flushes the device once, at the directory.
     barrier: bool = true,
+    /// Optional executor for raw syncs; null runs inline. Borrowed for this call.
+    blocking: ?Blocking = null,
 };
 
 /// `kept`: the name already existed and was left alone. `reached` is then
@@ -441,7 +444,7 @@ fn fileMeets(reached: Reached, options: CommitOptions) bool {
 }
 
 fn syncTemp(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOptions) CommitErrorOf(fallback)!void {
-    const reached = platform.syncChain(io, p.file.handle, fileLevel(options), options.barrier, p.tempName()) catch |err| switch (err) {
+    const reached = platform.syncChain(io, options.blocking, p.file.handle, fileLevel(options), options.barrier, p.tempName()) catch |err| switch (err) {
         // EINTR and a cancel are not a failed sync: the kernel kept its state.
         error.Canceled => return error.Canceled,
         else => |e| return p.poison(io, e),
@@ -543,9 +546,9 @@ fn syncParent(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOp
     if (@backingInt(options.level) < @backingInt(Level.data)) return cut;
     try io.checkCancel();
     const outcome: platform.DirOutcome = if (is_windows)
-        (if (flush) |h| try platform.flushDir(io, h, p.baseName()) else .{ .reached = .none, .refused = refused_before })
+        (if (flush) |h| try platform.flushDir(io, options.blocking, h, p.baseName()) else .{ .reached = .none, .refused = refused_before })
     else
-        try platform.dirSync(io, p.parent.handle, options.busy_deadline, p.baseName());
+        try platform.dirSync(io, options.blocking, p.parent.handle, options.busy_deadline, p.baseName());
     if (outcome.refused) {
         if (fallback == .refuse) return error.LevelUnavailable;
         // The data was ordered before the name; the name may be lost.

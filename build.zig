@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) !void {
         tests.root_module.addImport("shakedown", seam.import_table.get("shakedown").?);
     } else |err| needed = err;
 
-    const test_step = b.step("test", "Run the tests, the example and each benchmark once");
+    const test_step = b.step("test", "Run the tests, the example and benchmark startup");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
     const check_step = b.step("check", "Compile the tests and the example without running them");
@@ -75,7 +75,7 @@ pub fn build(b: *std.Build) !void {
     //=====================================================================
     // CI wiring and the benchmarks. preflight is lazy and only this tree
     // asks for it. `zig build bench` times bench/main.zig in ReleaseFast
-    // by hand; CI only runs it once, untimed, with `--smoke`.
+    // by hand; CI invokes `--smoke`, which returns without measuring rows.
     //=====================================================================
 
     if (b.lazyImport(@This(), "preflight")) |preflight| {
@@ -89,6 +89,15 @@ pub fn build(b: *std.Build) !void {
                 .optimize = optimize,
             },
         });
+        // Forward to preflight's own planner, whose CLI owns CI matrices.
+        const preflight_dep = try b.dependencyLazy("preflight", .{});
+        const plan = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--build-file" });
+        plan.addFileArg(preflight_dep.path("build.zig"));
+        plan.addDirectoryArg2(b.path("."), .{ .prefix = "-Drepo-root=" });
+        plan.addArg("plan");
+        plan.addArg("--");
+        plan.addPassthruArgs();
+        b.step("plan", "Generate the CI matrix with preflight").dependOn(&plan.step);
         // A project that depends on airlock by path, with no packages to
         // fetch: the build a consumer gets.
         preflight.addConsumerCheck(b, .{ .package = "airlock", .program = b.path("ci/consumer.zig") });

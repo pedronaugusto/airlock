@@ -33,6 +33,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Optional `Blocking` executor in sync, publish and batch options: raw syncs
+  can run on an application's executor while airlock stays a std-only leaf.
+  Null runs inline; adapters drain started jobs before returning.
+- Raw primitive probes, isolated new/overwrite rows, append comparisons and
+  per-row barrier counts in `bench/`; macOS and Linux measurements with the
+  design's acceptance targets. CI compiles benchmark rows without timing them.
+
 - `Level` and `Reached`: a durability level per call, and what the call
   reached.
 - `syncFile`, `syncDir` and `syncPath`, through the platform's fallback chain:

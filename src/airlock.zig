@@ -10,6 +10,9 @@ const level = @import("level.zig");
 const platform = @import("platform.zig");
 const names = @import("names.zig");
 
+/// An application-supplied executor for raw blocking syncs.
+pub const Blocking = @import("Blocking.zig");
+
 /// What a caller asks a call to make durable.
 pub const Level = level.Level;
 /// What a call reached, weakest first.

@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
+const Blocking = @import("Blocking.zig");
 const sys = @import("sys.zig");
 const platform = @import("platform.zig");
 const level_mod = @import("level.zig");
@@ -63,9 +64,9 @@ fn syncRenamed(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new: [
     defer new_parent.close(io);
     var old_parent = try Parent.open(io, old_dir, old);
     defer old_parent.close(io);
-    var reached = try syncOne(io, new_parent.dir, options.busy_deadline);
+    var reached = try syncOne(io, options.sync.blocking, new_parent.dir, options.busy_deadline);
     if (!try sameDirectory(io, new_parent.dir, old_parent.dir)) {
-        reached = Reached.min(reached, try syncOne(io, old_parent.dir, options.busy_deadline));
+        reached = Reached.min(reached, try syncOne(io, options.sync.blocking, old_parent.dir, options.busy_deadline));
     }
     return reached;
 }
@@ -128,7 +129,7 @@ pub fn remove(io: Io, dir: Io.Dir, sub_path: []const u8, options: RenameOptions)
 fn syncParentOf(io: Io, dir: Io.Dir, sub_path: []const u8, options: RenameOptions) SyncAfterError!Reached {
     var parent = try Parent.open(io, dir, sub_path);
     defer parent.close(io);
-    return syncOne(io, parent.dir, options.busy_deadline);
+    return syncOne(io, options.sync.blocking, parent.dir, options.busy_deadline);
 }
 
 // ---------------------------------------------------------------------
@@ -209,7 +210,7 @@ fn makeMissing(io: Io, dir: Io.Dir, sub_path: []const u8, options: MakePathOptio
         if (@backingInt(options.sync.level) >= @backingInt(Level.data)) {
             // Whoever created it, its entry is synced before anything goes
             // under it.
-            const reached = syncOne(io, parent.dir, platform.default_busy_deadline) catch |err| {
+            const reached = syncOne(io, options.sync.blocking, parent.dir, platform.default_busy_deadline) catch |err| {
                 if (made.created == 0) return err;
                 return notDurable(options.diagnostics, err);
             };
@@ -313,7 +314,7 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
         // name over a link that never reached the disk. A filesystem that
         // refuses the sync leaves no such order, so it is refused, or
         // reported, before the rename.
-        reached = linkSync(fallback, io, parent.dir) catch |err| {
+        reached = linkSync(fallback, io, options.sync.blocking, parent.dir) catch |err| {
             // ziglint-ignore: Z026 cleanup after a failure the caller already gets
             sys.unlink(io, parent.dir.handle, temp) catch {};
             return err;
@@ -325,14 +326,14 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
         return err;
     };
     if (@backingInt(level) < @backingInt(Level.data)) return reached;
-    const second = syncOne(io, parent.dir, platform.default_busy_deadline) catch |err| return notDurable(options.diagnostics, err);
+    const second = syncOne(io, options.sync.blocking, parent.dir, platform.default_busy_deadline) catch |err| return notDurable(options.diagnostics, err);
     return if (reached.atLeast(.ordered)) second else reached;
 }
 
 /// The sync that makes a new link durable before its rename: `.ordered`
 /// when it did, what it reached when the filesystem refused it.
-fn linkSync(comptime fallback: Fallback, io: Io, dir: Io.Dir) LinkError(fallback)!Reached {
-    const outcome = try platform.dirSync(io, dir.handle, platform.default_busy_deadline, null);
+fn linkSync(comptime fallback: Fallback, io: Io, blocking: ?Blocking, dir: Io.Dir) LinkError(fallback)!Reached {
+    const outcome = try platform.dirSync(io, blocking, dir.handle, platform.default_busy_deadline, null);
     if (outcome.refused) {
         if (fallback == .refuse) return error.LevelUnavailable;
         return Reached.min(outcome.reached, .written);
@@ -400,8 +401,8 @@ const Parent = struct {
 
 /// One directory's sync after a name changed in it: a refusal leaves the
 /// change `.ordered`.
-fn syncOne(io: Io, dir: Io.Dir, busy: Io.Duration) platform.DirSyncError!Reached {
-    const outcome = try platform.dirSync(io, dir.handle, busy, null);
+fn syncOne(io: Io, blocking: ?Blocking, dir: Io.Dir, busy: Io.Duration) platform.DirSyncError!Reached {
+    const outcome = try platform.dirSync(io, blocking, dir.handle, busy, null);
     return if (outcome.refused) .ordered else outcome.reached;
 }
 

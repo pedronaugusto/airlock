@@ -150,6 +150,32 @@ first. Production pays one function-pointer compare per call. The seam is a
 module of its own that only airlock and `airlock.testing` import, so neither
 exports it. Nothing allocates.
 
+An evented application supplies an optional `Blocking` executor. Set
+`SyncOptions.blocking` for file and directory syncs (including the nested
+`sync` options of name operations), `Pending.CommitOptions.blocking` for a
+publish, or `Batch.Options.blocking` for a batch. `writeFile` takes it under
+`commit.blocking`. A null hook runs inline and creates no executor, queue,
+thread or allocation; constant default options compile directly to the raw
+call. No hook is stored in a pending or batch.
+
+`Blocking` holds a borrowed `context` and
+`run(io, context, function, argument)`. The adapter schedules
+`function(argument)` on its sync executor and waits for completion. It may
+return `Canceled` only if the job never started. Once started, it must finish
+and return success even if cancellation arrives, so a completed sync's error
+is preserved. Function and argument are borrowed stack storage and cannot be
+retained. Concurrent batches may call the adapter concurrently. Cancellation
+checks, fault interception, retries and fallback decisions stay on the
+calling task; only the raw sync runs elsewhere, and errno is read on that
+thread. Renames, opens, closes and identity calls stay on their existing path.
+Linux's optional early writeback initiates I/O without waiting and stays inline.
+
+The runtime owns the adapter. reactor's `blocking` facility will provide the
+sync-lane adapter for applications to wire into these options; airlock imports
+only std and has no dependency on reactor. For another executor, implement
+this small callback contract; every selected raw sync, including directory
+flushes, batch writeouts, barriers, fallbacks and fences, goes through it.
+
 ## Scope
 
 - No locks or lock protocols. `Temp.exact` is the exclusive create a lock file
@@ -162,8 +188,8 @@ exports it. Nothing allocates.
 - A replace or a link swap replaces the name, a symbolic link included; it
   does not write through it.
 - No identity that survives a remount.
-- Its raw calls block the calling thread, as `Io.Threaded` does. Under an
-  evented `Io`, run them through `io.concurrent`.
+- Scheduling is the application's choice: raw syncs run inline unless an
+  executor is supplied through the durability options.
 
 ## Platforms
 
@@ -209,7 +235,9 @@ ReleaseFast by hand: each level's sync cost, replaces and batches per level
 and size, the raw calls and barriers of each operation counted through the
 seam, and relic's durability code beside airlock on the same work. Run from
 `zig-out/bench`, `airlock-bench --dir <path>` puts the files on the disk to
-measure. `zig build test` runs each row once with `--smoke`; CI times nothing.
+measure. `--smoke` exits after argument parsing: CI compiles all benchmark rows and
+records no timings, including on Windows. [bench/README.md](bench/README.md)
+describes the rows, measurement method and dated native/VM results.
 
 ### Testing code that calls airlock
 
@@ -239,7 +267,7 @@ try std.testing.expectEqual(2, hooked.syncs());
 
 [CI](.github/workflows/ci.yml) runs the source checks and the Linux Debug suite
 on every push it is asked for, and before a merge the Debug suite on macOS and
-Windows as well. `zig build check` cross-compiles for `x86_64-linux-gnu`,
+Windows as well. `zig build check` compiles the local tests and example; CI cross-compiles for `x86_64-linux-gnu`,
 `aarch64-linux-gnu`, `x86_64-linux-musl`, `x86_64-windows-gnu`,
 `aarch64-windows-gnu`, `x86_64-macos` and `aarch64-macos`.
 

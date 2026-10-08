@@ -1,4 +1,5 @@
 //! Durability levels: what a caller asks for, and what a call reached.
+const Blocking = @import("Blocking.zig");
 const builtin = @import("builtin");
 
 const native_os = builtin.target.os.tag;
@@ -96,6 +97,8 @@ pub const SyncOptions = struct {
     /// barriers need hardware support "which Apple SSDs are guaranteed to
     /// provide".
     barrier: bool = true,
+    /// Optional executor for raw syncs; null runs inline. Borrowed for this call.
+    blocking: ?Blocking = null,
 };
 
 test "levels compare by their promise" {

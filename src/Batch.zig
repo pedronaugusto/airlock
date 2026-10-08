@@ -37,6 +37,7 @@
 //! its error, and `reset` is the only valid next call. A cancel before the
 //! first rename publishes nothing; after it, it is `PublishedNotDurable`
 //! with `cause` `Canceled`.
+const Blocking = @import("Blocking.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -169,6 +170,8 @@ pub const Options = struct {
     busy_deadline: Io.Duration = .fromMilliseconds(2000),
     /// As `SyncOptions.barrier`.
     barrier: bool = true,
+    /// Optional executor for raw syncs; null runs inline. Borrowed for this call.
+    blocking: ?Blocking = null,
 };
 
 pub const Error = Pending.CommitError || platform.SyncPathError || platform.DirSyncError || Io.File.StatError || error{BatchFull};
@@ -486,15 +489,15 @@ fn Run(comptime fallback: Fallback) type {
         /// it, or a file's own.
         fn syncHandle(r: *Self, s: *Slot, handle: sys.Handle) Error!Reached {
             const subject = if (s.pending) |p| p.tempName() else s.path;
-            if (!is_darwin and !is_windows) return platform.syncChain(r.io, handle, r.options.level, true, subject);
-            const reached = try platform.writeout(r.io, handle, subject);
+            if (!is_darwin and !is_windows) return platform.syncChain(r.io, r.options.blocking, handle, r.options.level, true, subject);
+            const reached = try platform.writeout(r.io, r.options.blocking, handle, subject);
             if (reached != .written) return reached;
             const id = try sys.statId(r.io, handle);
             const device = if (is_windows) try sys.volumeName(r.io, handle) else 0;
             const parent_open = s.kind == .pending and s.open;
             const rep: ?sys.Handle = if (s.kind != .pending) handle else if (parent_open) s.handle else null;
             const v = r.volume(id.volume, device, rep, parent_open, s.index) orelse
-                return platform.volumeFlush(r.io, handle, subject);
+                return platform.volumeFlush(r.io, r.options.blocking, handle, subject);
             v.needs_flush = true;
             if (s.kind == .pending and !parent_open) {
                 s.id.volume = id.volume;
@@ -543,9 +546,9 @@ fn Run(comptime fallback: Fallback) type {
                 const temp = v.temp orelse continue;
                 const slot = &r.batch.slots[v.slot];
                 const reached = (if (is_windows)
-                    platform.volumeFlush(r.io, temp, v.temp_name)
+                    platform.volumeFlush(r.io, r.options.blocking, temp, v.temp_name)
                 else
-                    platform.volumeBarrier(r.io, temp, r.options.barrier, v.temp_name)) catch |err| return r.fail(slot, err);
+                    platform.volumeBarrier(r.io, r.options.blocking, temp, r.options.barrier, v.temp_name)) catch |err| return r.fail(slot, err);
                 // A barrier or a flush keeps the order; a refused one leaves
                 // only what the fallback reached.
                 if (!reached.atLeast(.ordered)) try r.part(slot, reached);
@@ -710,7 +713,7 @@ fn Run(comptime fallback: Fallback) type {
         /// slot.
         fn syncDirOne(r: *Self, s: *Slot) void {
             s.err = null;
-            const outcome = platform.dirSync(r.io, s.handle, r.options.busy_deadline, null) catch |err| {
+            const outcome = platform.dirSync(r.io, r.options.blocking, s.handle, r.options.busy_deadline, null) catch |err| {
                 s.err = err;
                 return;
             };
@@ -733,10 +736,10 @@ fn Run(comptime fallback: Fallback) type {
         /// Darwin `fsync` (W) of a directory; Windows `NO_SYNC` on a handle
         /// reopened for it.
         fn writeoutDir(r: *Self, handle: sys.Handle) Error!Reached {
-            if (!is_windows) return platform.writeout(r.io, handle, null);
+            if (!is_windows) return platform.writeout(r.io, r.options.blocking, handle, null);
             const flush = try platform.openDirFlush(r.io, handle, r.options.busy_deadline);
             defer sys.release(r.io, flush);
-            return platform.writeout(r.io, flush, null);
+            return platform.writeout(r.io, r.options.blocking, flush, null);
         }
 
         /// One device flush through a directory: Darwin `F_FULLFSYNC`, Windows
@@ -745,10 +748,10 @@ fn Run(comptime fallback: Fallback) type {
             if (is_windows) {
                 const flush = try platform.openDirFlush(r.io, handle, r.options.busy_deadline);
                 defer sys.release(r.io, flush);
-                return platform.flushFull(r.io, flush, .sync_full, null);
+                return platform.flushFull(r.io, r.options.blocking, flush, .sync_full, null);
             }
-            if (barrier_ok) return platform.volumeBarrier(r.io, handle, r.options.barrier, null);
-            return platform.volumeFlush(r.io, handle, null);
+            if (barrier_ok) return platform.volumeBarrier(r.io, r.options.blocking, handle, r.options.barrier, null);
+            return platform.volumeFlush(r.io, r.options.blocking, handle, null);
         }
 
         fn flushVolumes(r: *Self) E!void {
@@ -762,7 +765,7 @@ fn Run(comptime fallback: Fallback) type {
                 const reached = (if (v.is_dir)
                     r.flushDir(handle, false)
                 else
-                    platform.volumeFlush(r.io, handle, null)) catch |err| return r.fail(slot, err);
+                    platform.volumeFlush(r.io, r.options.blocking, handle, null)) catch |err| return r.fail(slot, err);
                 try r.part(slot, reached);
             }
         }

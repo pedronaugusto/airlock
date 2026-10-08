@@ -21,6 +21,8 @@ const is_windows = native_os == .windows;
 const is_linux = native_os == .linux;
 const is_darwin = native_os.isDarwin();
 
+const Blocking = @import("Blocking.zig");
+
 const seam = @import("seam");
 
 pub const Call = seam.Call;
@@ -67,6 +69,40 @@ fn retrying(io: Io, call: Call, path: ?[]const u8, comptime f: anytype, args: an
     }
 }
 
+/// Execute only the raw call elsewhere; never read thread-local errno on
+/// the calling task after returning from an executor.
+fn syncCall(io: Io, blocking: ?Blocking, comptime f: anytype, args: anytype) Io.Cancelable!Code {
+    const hook = blocking orelse return rawSync(f, args);
+    const Job = struct {
+        const Self = @This();
+        arguments: @TypeOf(args),
+        result: Code = undefined,
+
+        fn run(argument: *anyopaque) void {
+            const job: *Self = @ptrCast(@alignCast(argument)); // safe: argument points to the live Job below
+            job.result = rawSync(f, job.arguments);
+        }
+    };
+    var job: Job = .{ .arguments = args };
+    try hook.run(io, hook.context, Job.run, &job);
+    return job.result;
+}
+
+fn rawSync(comptime f: anytype, args: anytype) Code {
+    const rc = @call(.auto, f, args);
+    return if (is_windows) rc else errnoOf(rc);
+}
+
+/// Cancellation and seam interception remain on the calling task. Each
+/// actual syscall attempt, including retries and fallbacks, uses the hook.
+fn retryingSync(io: Io, blocking: ?Blocking, call: Call, path: ?[]const u8, comptime f: anytype, args: anytype) Io.Cancelable!Code {
+    while (true) {
+        try io.checkCancel();
+        const code = (try injected(io, call, path)) orelse try syncCall(io, blocking, f, args);
+        if (code != (if (is_windows) Code.CANCELLED else Code.INTR)) return code;
+    }
+}
+
 fn isNotSupported(e: posix.E) bool {
     // Darwin's EOPNOTSUPP (102) is not in std's table; ENOTSUP (45) is
     // spelled OPNOTSUPP there.
@@ -95,8 +131,8 @@ fn cFsync(fd: posix.fd_t) c_int {
 }
 
 /// Darwin `F_FULLFSYNC`: the device writes its cache down.
-pub fn fullFsync(io: Io, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncError!void {
-    const e = try retrying(io, call, path, darwinFcntl, .{ fd, darwin_full_fsync });
+pub fn fullFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncError!void {
+    const e = try retryingSync(io, blocking, call, path, darwinFcntl, .{ fd, darwin_full_fsync });
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .NOTTY, .PERM => error.Refused,
@@ -106,8 +142,8 @@ pub fn fullFsync(io: Io, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncErro
 
 /// Darwin `F_BARRIERFSYNC`: everything handed to the device before it is
 /// written before anything after it.
-pub fn barrierFsync(io: Io, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
-    const e = try retrying(io, .sync_barrier, path, darwinFcntl, .{ fd, darwin_barrier_fsync });
+pub fn barrierFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
+    const e = try retryingSync(io, blocking, .sync_barrier, path, darwinFcntl, .{ fd, darwin_barrier_fsync });
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .NOTTY, .PERM => error.Refused,
@@ -116,11 +152,11 @@ pub fn barrierFsync(io: Io, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
 }
 
 /// Plain `fsync` on Darwin and the BSDs: a writeout, or the end of a chain.
-pub fn plainFsync(io: Io, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncError!void {
+pub fn plainFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncError!void {
     const e = if (is_linux)
-        try retrying(io, call, path, linux.fsync, .{fd})
+        try retryingSync(io, blocking, call, path, linux.fsync, .{fd})
     else
-        try retrying(io, call, path, cFsync, .{fd});
+        try retryingSync(io, blocking, call, path, cFsync, .{fd});
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .ROFS => error.Refused,
@@ -129,8 +165,8 @@ pub fn plainFsync(io: Io, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncErr
 }
 
 /// Linux `fdatasync`.
-pub fn dataFsync(io: Io, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
-    const e = try retrying(io, .sync_data, path, linux.fdatasync, .{fd});
+pub fn dataFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
+    const e = try retryingSync(io, blocking, .sync_data, path, linux.fdatasync, .{fd});
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .ROFS, .NOSYS => error.Refused,
@@ -139,8 +175,8 @@ pub fn dataFsync(io: Io, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
 }
 
 /// Linux `fsync` on a file, as the full sync.
-pub fn linuxFsync(io: Io, fd: posix.fd_t, call: Call, path: ?[]const u8) (SyncError || error{BadHandle})!void {
-    const e = try retrying(io, call, path, linux.fsync, .{fd});
+pub fn linuxFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, call: Call, path: ?[]const u8) (SyncError || error{BadHandle})!void {
+    const e = try retryingSync(io, blocking, call, path, linux.fsync, .{fd});
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .ROFS => error.Refused,
@@ -705,8 +741,8 @@ fn ntFlushEx(handle: windows.HANDLE, flags: u32) windows.NTSTATUS {
 }
 
 /// `NtFlushBuffersFile`: contents, metadata and the device cache.
-pub fn flushWindows(io: Io, handle: windows.HANDLE, call: Call, path: ?[]const u8) SyncError!void {
-    const status = try retryingNt(io, call, path, ntFlush, .{handle});
+pub fn flushWindows(io: Io, blocking: ?Blocking, handle: windows.HANDLE, call: Call, path: ?[]const u8) SyncError!void {
+    const status = try retryingSync(io, blocking, call, path, ntFlush, .{handle});
     if (status == .SUCCESS) return;
     if (status == .NOT_SUPPORTED or status == .INVALID_DEVICE_REQUEST) return error.Refused;
     return ntSyncFailure(status);
@@ -714,12 +750,12 @@ pub fn flushWindows(io: Io, handle: windows.HANDLE, call: Call, path: ?[]const u
 
 /// `NtFlushBuffersFileEx` with one flag. Refused outside NTFS (and for
 /// `no_sync`, FAT and exFAT): ReFS, redirectors.
-pub fn flushExWindows(io: Io, handle: windows.HANDLE, flag: FlushEx, path: ?[]const u8) SyncError!void {
+pub fn flushExWindows(io: Io, blocking: ?Blocking, handle: windows.HANDLE, flag: FlushEx, path: ?[]const u8) SyncError!void {
     const call: Call = switch (flag) {
         .data_sync_only => .sync_data,
         .no_sync => .sync_writeout,
     };
-    const status = try retryingNt(io, call, path, ntFlushEx, .{ handle, @backingInt(flag) });
+    const status = try retryingSync(io, blocking, call, path, ntFlushEx, .{ handle, @backingInt(flag) });
     if (status == .SUCCESS) return;
     if (isRefusalNt(status)) return error.Refused;
     return ntSyncFailure(status);
@@ -1179,4 +1215,29 @@ pub fn volumeName(io: Io, handle: windows.HANDLE) StatIdError!u64 {
     }
     const chars = @min(buf.len / 2, buf.name.len);
     return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(buf.name[0..chars]));
+}
+
+test "blocking hook captures Darwin errno before leaving its worker" {
+    if (!is_darwin) return error.SkipZigTest;
+    const testing = std.testing;
+    const test_seam = @import("airlock.testing");
+    const Adapter = struct {
+        fn work(function: *const fn (*anyopaque) void, argument: *anyopaque) void {
+            function(argument);
+        }
+
+        fn run(io: Io, context: ?*anyopaque, function: *const fn (*anyopaque) void, argument: *anyopaque) Io.Cancelable!void {
+            _ = context;
+            try io.checkCancel();
+            const worker = std.Thread.spawn(.{}, work, .{ function, argument }) catch @panic("test worker unavailable");
+            worker.join();
+            // Deliberately leave a different errno on the calling thread.
+            std.c._errno().* = @backingInt(posix.E.NOSPC);
+        }
+    };
+    const h = try test_seam.Seam.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    const code = try retryingSync(h.io(), .{ .run = Adapter.run }, .sync_full, null, darwinFcntl, .{ @as(posix.fd_t, -1), darwin_full_fsync });
+    try testing.expectEqual(posix.E.BADF, code);
+    try testing.expectEqual(1, h.syncs());
 }
