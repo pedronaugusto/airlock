@@ -228,6 +228,11 @@ pub fn main(init: std.process.Init) !void {
     for (rows) |full| {
         if (!std.mem.startsWith(u8, full.name, prefix)) continue;
         if (std.mem.startsWith(u8, full.name, "batch/") and full.parallel > 1 and !is_linux and !std.mem.endsWith(u8, full.name, "p16")) continue;
+        if (builtin.os.tag == .windows and full.op == symLinkRow) {
+            try stdout.interface.print("{{\"row\":\"{s}\",\"skipped\":true,\"reason\":\"airlock.symLink returns OperationUnsupported on Windows\"}}\n", .{full.name});
+            try stdout.interface.flush();
+            continue;
+        }
         const row = full;
         try root.createDir(io, "row", .default_dir);
         ctx.dir = try root.openDir(io, "row", .{ .iterate = true });
@@ -507,6 +512,11 @@ fn counts(ctx: *Context, stdout: *Io.Writer) !void {
         .{ .name = "counts/keep-existing", .ops = 1, .op = keepExistingRow },
     };
     for (cases) |row| {
+        if (builtin.os.tag == .windows and row.op == symLinkRow) {
+            try stdout.print("{{\"row\":\"{s}\",\"skipped\":true,\"reason\":\"airlock.symLink returns OperationUnsupported on Windows\"}}\n", .{row.name});
+            try stdout.flush();
+            continue;
+        }
         const counted_io = try seam.Seam.create(ctx.gpa, ctx.io, .{ .trace = .all });
         defer counted_io.destroy();
         var counted = ctx.*;

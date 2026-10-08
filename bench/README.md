@@ -5,7 +5,7 @@
 select a disk. It creates and removes only its own random child of that parent.
 Each row gets an empty directory; overwrite rows first create their target.
 `--smoke` returns after parsing: hosted CI compiles every row without taking
-measurements. Windows timings are deliberately absent.
+measurements. The manual Windows interface below runs separately from those checks.
 
 Rows cover raw primitives; syncs at each level; new and overwrite publishes
 at 4 KiB and 1 MiB; batches of 1, 10, 100 and 1000 files at 4 and 64 KiB,
@@ -71,3 +71,20 @@ is still backed by the internal disk, so it is a second filesystem, not an
 independent external-device test. `--smoke` takes no measurements on any OS.
 See [the macOS follow-up](results/2026-10-08-macos-batch.md) for the transaction
 hypothesis, strategy comparison, A/B evidence and revised acceptance wording.
+
+## Hosted Windows evidence
+
+Dispatch the existing workflow with
+`gh workflow run ci.yml --ref <branch-or-main> -f windows-bench=true`.
+It runs the own suite with Zig 0.17.0 and explicit ReleaseFast on
+`windows-latest`, retaining all emitted JSONL, stderr, exit status and runner
+metadata as an Actions artifact. It changes neither the preflight planner nor
+its fast/merge/release matrices. Ordinary CI still compiles and smoke-runs only.
+
+These are **indicative hosted-runner numbers, not a target check**. Shared CPU,
+virtual storage and load vary; this manual job has no timing thresholds and
+cannot establish an idle-hardware durability or throughput target. The Windows
+symlink timing/count rows explicitly report `skipped`: the public operation
+returns `OperationUnsupported`. The macOS strategy program emits no rows on
+Windows because its strategies require Darwin primitives. Raw primitive
+refusals remain refusal records, without fabricated latencies.

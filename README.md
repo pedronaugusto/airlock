@@ -240,7 +240,8 @@ and size, the raw calls and barriers of each operation counted through the
 seam, and relic's durability code beside airlock on the same work. Run from
 `zig-out/bench`, `airlock-bench --dir <path>` puts the files on the disk to
 measure. `--smoke` exits after argument parsing: CI compiles all benchmark rows and
-records no timings, including on Windows. [bench/README.md](bench/README.md)
+records no timings. A separate manual Windows dispatch records indicative
+hosted-runner numbers, not a target check. [bench/README.md](bench/README.md)
 describes the rows, measurement method and dated native/VM results.
 
 ### Testing code that calls airlock
