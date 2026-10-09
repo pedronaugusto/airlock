@@ -24,6 +24,7 @@ const is_darwin = native_os.isDarwin();
 const Blocking = @import("Blocking.zig");
 
 const seam = @import("seam");
+const aegis_id = @import("aegis.id");
 
 pub const Call = seam.Call;
 const Code = seam.Code;
@@ -583,8 +584,20 @@ pub fn symLink(io: Io, target: []const u8, dir: Handle, name: []const u8) SymLin
     };
 }
 
-/// A file's identity as the filesystem numbers it.
-pub const Id = struct { volume: u64, file: u128 };
+/// The number the OS gives a volume: the device on POSIX, the serial number on
+/// Windows. Not interchangeable with `DeviceId`, which is a hash of a name.
+pub const VolumeId = aegis_id.Id(VolumeTag, u64);
+const VolumeTag = struct {};
+
+/// Windows: a 64-bit hash of a volume's NT device name; 0 where there is no
+/// name to hash. A volume is told apart by both ids, never by one standing for
+/// the other.
+pub const DeviceId = aegis_id.Id(DeviceTag, u64);
+const DeviceTag = struct {};
+
+/// A file's identity as the filesystem numbers it. The file number is 128 bits
+/// wide, so it cannot stand for a volume id even by mistake.
+pub const Id = struct { volume: VolumeId, file: u128 };
 
 pub const StatIdError = Io.File.StatError;
 pub const StatPathError = Io.Dir.StatFileError;
@@ -598,8 +611,8 @@ fn unsigned(x: anytype) u64 {
 
 /// A Linux device as one number: the major and the minor both, since two
 /// volumes can share either.
-pub fn linuxVolume(major: u32, minor: u32) u64 {
-    return (@as(u64, major) << 32) | minor;
+pub fn linuxVolume(major: u32, minor: u32) VolumeId {
+    return .fromRaw((@as(u64, major) << 32) | minor);
 }
 
 fn statxRaw(dir: posix.fd_t, path: [*:0]const u8, flags: u32, buf: *linux.Statx) usize {
@@ -627,7 +640,7 @@ pub fn statId(io: Io, handle: Handle) StatIdError!Id {
     var buf = std.mem.zeroes(posix.Stat);
     const e = try retrying(io, .stat_id, null, fstatRaw, .{ handle, &buf });
     if (e != .SUCCESS) return statFailure(e);
-    return .{ .volume = unsigned(buf.dev), .file = unsigned(buf.ino) };
+    return .{ .volume = .fromRaw(unsigned(buf.dev)), .file = unsigned(buf.ino) };
 }
 
 fn statFailure(e: posix.E) StatIdError {
@@ -656,7 +669,7 @@ pub fn statIdPath(io: Io, dir: Handle, sub_path: []const u8, follow: bool) StatP
     const flags: u32 = if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW;
     const e = try retrying(io, .stat_id, sub_path, fstatatRaw, .{ dir, &path, &buf, flags });
     if (e != .SUCCESS) return statPathFailure(e);
-    return .{ .volume = unsigned(buf.dev), .file = unsigned(buf.ino) };
+    return .{ .volume = .fromRaw(unsigned(buf.dev)), .file = unsigned(buf.ino) };
 }
 
 fn statPathFailure(e: posix.E) StatPathError {
@@ -1143,7 +1156,7 @@ fn statIdWindows(io: Io, handle: windows.HANDLE) StatIdError!Id {
     const status = try retryingNt(io, .stat_id, null, ntQueryInfo, .{ handle, std.mem.asBytes(&id), .Id });
     switch (status) {
         .SUCCESS => return .{
-            .volume = id.VolumeSerialNumber,
+            .volume = .fromRaw(id.VolumeSerialNumber),
             .file = std.mem.readInt(u128, &id.FileId, .little),
         },
         .ACCESS_DENIED => return error.AccessDenied,
@@ -1168,7 +1181,7 @@ fn statIdWindows(io: Io, handle: windows.HANDLE) StatIdError!Id {
         else => |s| return windows.unexpectedStatus(s),
     }
     return .{
-        .volume = volume.info.VolumeSerialNumber,
+        .volume = .fromRaw(volume.info.VolumeSerialNumber),
         .file = @as(u64, @bitCast(internal.IndexNumber)), // safe: the index is an unsigned 64-bit number stored as LARGE_INTEGER
     };
 }
@@ -1197,9 +1210,9 @@ fn statIdPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow:
 /// Windows: a 64-bit hash of the volume's NT device name
 /// (`\Device\HarddiskVolumeN`), which tells apart two volumes that share a
 /// serial (cloned VHDs and VM images keep it).
-pub fn volumeName(io: Io, handle: windows.HANDLE) StatIdError!u64 {
+pub fn volumeName(io: Io, handle: windows.HANDLE) StatIdError!DeviceId {
     if (intercept(io, .volume_name, null)) |r| switch (r) {
-        .value => |v| return v,
+        .value => |v| return .fromRaw(v),
         .canceled => return error.Canceled,
         .code => |c| if (c != success) return windows.unexpectedStatus(c),
     };
@@ -1210,11 +1223,11 @@ pub fn volumeName(io: Io, handle: windows.HANDLE) StatIdError!u64 {
         .ACCESS_DENIED => return error.AccessDenied,
         // A filesystem that will not say: one name for all of them, so the
         // serial alone decides, as before the name was asked.
-        .INVALID_PARAMETER, .INVALID_INFO_CLASS, .NOT_IMPLEMENTED, .NOT_SUPPORTED => return 0,
+        .INVALID_PARAMETER, .INVALID_INFO_CLASS, .NOT_IMPLEMENTED, .NOT_SUPPORTED => return .fromRaw(0),
         else => return windows.unexpectedStatus(status),
     }
     const chars = @min(buf.len / 2, buf.name.len);
-    return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(buf.name[0..chars]));
+    return .fromRaw(std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(buf.name[0..chars])));
 }
 
 test "blocking hook captures Darwin errno before leaving its worker" {

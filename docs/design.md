@@ -19,6 +19,65 @@ per volume. Per-file errors, refusal, cancellation, synced retries, close errors
 and volume identity remain part of the contract. Raw sync-call counts describe
 calls, not physical cache drains or filesystem transaction boundaries.
 
+## aegis types, contracts and the sites kept raw
+
+airlock imports three aegis namespaces, each its own module: `aegis.id`,
+`aegis.handle` and `aegis.assert`. Each is used where it catches a mistake.
+
+- **Volume and device ids** (`sys.VolumeId`, `sys.DeviceId`, aegis `id.Id`).
+  A batch tells volumes apart by two 64-bit numbers that mean different
+  things: the volume number the OS gives (a device on POSIX, the serial on
+  Windows) and, on Windows, a hash of the NT device name that separates cloned
+  volumes sharing a serial. They travelled as two `u64` through a volume key
+  and a five-parameter lookup, where swapping them compiled and was wrong only
+  on Windows, only with cloned volumes. They are now distinct types; a file
+  number is 128 bits and already differs by width.
+- **Batch slot index** (`Batch.SlotIndex`, aegis `handle.Index`). A commit
+  sorts the slots in place to find each distinct directory, so a position in
+  the storage and the place a slot was added at stop being the same number.
+  `Failure.slot`, a volume's representative slot and every lookup after the
+  sort use the add-order index, and a position into the storage cannot be
+  passed for one. Adding a slot is the one place an index is made, and a full
+  batch is exactly when the index does not name a slot.
+- **Contracts** (`assert.pre` for a caller's misuse, `assert.invariant` for
+  airlock's own state), fail-stop in every build. `file()` and `writer()` only
+  on an `open` pending, since after a sync the temp is closed on POSIX and its
+  descriptor number may belong to another file; `commit` only until the
+  pending ended, where it was `unreachable`, undefined behaviour in
+  `ReleaseFast`; `Batch.addPending`, `Batch.init`, `drawName`, `Seam.setPlan`.
+  Every move of a staged file goes through one table (`Staged.State.moves`).
+  Each is one comparison next to a system call.
+
+Kept raw, each with one of the five reasons:
+
+- `FileId.volume` and `FileId.file` stay `u64` and `u128`: an OS boundary
+  (strand writes these field names and widths into checkpoints), not a pool
+  key, and not persistent across remounts either.
+- `sys.linuxVolume(major, minor)` and the `sync_file_range` offset and length:
+  C and OS boundaries, with a test for the major and the minor.
+- The byte counts of the writer (`since`, `offset`, `writeback_bytes`): one
+  kind of number, only ever compared with each other. No danger.
+- Windows retry delays and the prune age use `std.Io.Duration` and
+  `Timestamp`, which are already distinct types; aegis `Duration` cannot hold
+  their 96-bit nanoseconds. The arithmetic is capped by constants.
+- Counts (`Made.created`, the `pruneTemps` result, draw and retry counters,
+  `Batch.len`): bounded by a path, a directory or a constant. No danger.
+- `Reached` is not wrapped in `own.MustUse`. Zig rejects a dropped result, so
+  ignoring one takes an explicit `_ =`; `MustUse` discharges in Debug only and
+  an omitted `deinit` escapes. Calls that can refuse are named
+  (`commitOrRefuse`), so ignoring them is a design that removes the class.
+- Staged files, pendings and batches are not `own.Owned`. Everything they own
+  is an OS handle whose release is `Io` work (`close`, `unlink`, cancel
+  points, the test seam), and `Owned` cleans up with a static `fn (*T) void`
+  that has no `Io`. `discard(io)` and `reset(io)` stay explicit.
+- Three `unreachable` in `Batch` over closed local state, each with its reason.
+
+`ci/preflight.json` declares glint's A004 at `gate` for the sources under
+`src`, tests included. Benchmarks, the example and `ci` are not listed in the
+package's `.paths`, so they are outside that declaration. It takes effect once
+glint accepts the setting; published glint admits its aegis rules in report
+mode only.
+
 ## Benchmark workloads
 
 `zig build bench` builds and runs the rows in ReleaseFast. The installed

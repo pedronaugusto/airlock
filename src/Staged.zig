@@ -6,6 +6,7 @@
 //! a caller's to take.
 const Blocking = @import("Blocking.zig");
 const std = @import("std");
+const assert = @import("aegis.assert");
 const builtin = @import("builtin");
 const Io = std.Io;
 const sys = @import("sys.zig");
@@ -69,7 +70,26 @@ pub const State = enum {
     poisoned,
     /// Nothing is left: discarded, or a create that found the name taken.
     discarded,
+
+    /// Whether a staged file may go from `from` to `to`. A pending never goes
+    /// back, only a synced temp is renamed, and `discard` follows any state.
+    fn moves(from: State, to: State) bool {
+        return switch (to) {
+            .open => false,
+            .synced => from == .open,
+            .published, .kept => from == .synced,
+            .poisoned => from == .open or from == .synced,
+            .discarded => true,
+        };
+    }
 };
+
+/// Moves the staged file to `to`. A move `State.moves` does not allow is a
+/// bug in airlock, not in a caller, so it stops in every build.
+fn moveTo(p: *Staged, to: State) void {
+    assert.invariant(p.state.moves(to), "Staged: illegal state move");
+    p.state = to;
+}
 
 /// The name of the temp file in the destination's directory.
 pub const Temp = union(enum) {
@@ -200,11 +220,12 @@ pub const random_len = 26;
 /// Writes the prefix, then 26 lowercase base32 characters of 128 random
 /// bits, into `out`, and returns the name's length.
 pub fn drawName(io: Io, prefix: []const u8, out: *[64]u8) u8 {
+    assert.pre(prefix.len <= max_prefix, "drawName: the prefix is longer than max_prefix");
     var random: [16]u8 = undefined;
     io.random(&random);
     @memcpy(out[0..prefix.len], prefix);
     encodeBase32(&random, out[prefix.len..][0..random_len]);
-    return @intCast(prefix.len + random_len);
+    return @intCast(prefix.len + random_len); // safe: the contract above bounds the prefix, so the name is at most 58 bytes
 }
 
 const base32 = "abcdefghijklmnopqrstuvwxyz234567";
@@ -334,6 +355,7 @@ pub const Writer = struct {
 
 /// A buffered writer onto the temp, as `Pending.writer` documents.
 pub fn writer(p: *Staged, io: Io, buffer: []u8) *Io.Writer {
+    assert.pre(p.state == .open, "Pending.writer: the temp is no longer open for writing");
     p.writer_state.io = io;
     p.writer_state.interface = .{ .vtable = &Writer.vtable, .buffer = buffer };
     p.writer_active = true;
@@ -402,9 +424,10 @@ fn CommitErrorOf(comptime fallback: Fallback) type {
 /// Syncs the temp, publishes it and syncs its directory, as
 /// `Pending.commit` and `Pending.commitOrRefuse` document.
 pub fn commit(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOptions) CommitErrorOf(fallback)!Committed {
+    assert.pre(p.state != .published and p.state != .kept and p.state != .discarded, "Pending.commit: the pending already ended");
     switch (p.state) {
         .poisoned => return error.Poisoned,
-        .published, .kept, .discarded => unreachable, // unreachable: commit after the pending ended is a caller bug
+        .published, .kept, .discarded => unreachable, // unreachable: the contract above stops a pending that ended
         .synced => {
             // The temp was synced once; on POSIX it is closed, so nothing
             // can make it stronger now: what it reached is what it has.
@@ -457,7 +480,7 @@ fn syncTemp(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOpti
 /// `close` once: an NFS deferred write fails there.
 pub fn markSynced(p: *Staged, io: Io, reached: Reached) CommitError!void {
     p.file_reached = reached;
-    p.state = .synced;
+    p.moveTo(.synced);
     if (!is_windows) {
         p.file_open = false;
         sys.close(io, p.file.handle, p.tempName()) catch |err| return p.poison(io, err);
@@ -475,7 +498,7 @@ pub fn markFailed(p: *Staged, io: Io, cause: anyerror) void {
     p.cause = cause;
     p.removeTemp(io);
     p.releaseParent(io);
-    p.state = .poisoned;
+    p.moveTo(.poisoned);
 }
 
 /// Closes the temp if it is open and removes its name. On Windows by
@@ -530,7 +553,7 @@ fn publishSynced(p: *Staged, comptime fallback: Fallback, io: Io, options: Commi
         .renamed => {},
         .taken => return p.taken(io, options.publish),
     }
-    p.state = .published;
+    p.moveTo(.published);
     const reached = p.syncParent(fallback, io, options, flush, dir_refused) catch |err| {
         p.cause = err;
         p.finish(io);
@@ -632,11 +655,11 @@ fn taken(p: *Staged, io: Io, publish: Publish) CommitError!Committed {
     const failure = p.removeTakenTemp(io);
     p.finish(io);
     if (publish == .create_new) {
-        p.state = .discarded;
+        p.moveTo(.discarded);
         try failure;
         return error.PathAlreadyExists;
     }
-    p.state = .kept;
+    p.moveTo(.kept);
     try failure;
     return .{ .reached = .none, .kept = true };
 }
@@ -667,7 +690,7 @@ pub fn discard(p: *Staged, io: Io) void {
         .poisoned, .published, .kept, .discarded => {},
     }
     p.finish(io);
-    p.state = .discarded;
+    p.moveTo(.discarded);
 }
 
 // ---------------------------------------------------------------------
@@ -696,7 +719,7 @@ pub fn renameSynced(p: *Staged, io: Io, publish: Publish, busy: Io.Duration) Com
     const options: CommitOptions = .{ .publish = publish, .busy_deadline = busy };
     switch (try p.rename(io, options)) {
         .renamed => {
-            p.state = .published;
+            p.moveTo(.published);
             return true;
         },
         .taken => {
@@ -706,6 +729,26 @@ pub fn renameSynced(p: *Staged, io: Io, publish: Publish, busy: Io.Duration) Com
             };
             return false;
         },
+    }
+}
+
+test "a staged file moves forward only: a synced temp publishes or is kept, and discard follows anything" {
+    const tags = std.meta.tags(State);
+    for (tags) |from| {
+        try std.testing.expect(!from.moves(.open));
+        try std.testing.expect(from.moves(.discarded));
+    }
+    try std.testing.expect(State.open.moves(.synced));
+    try std.testing.expect(State.open.moves(.poisoned));
+    try std.testing.expect(State.synced.moves(.poisoned));
+    try std.testing.expect(State.synced.moves(.published));
+    try std.testing.expect(State.synced.moves(.kept));
+    // Nothing is published or kept without a sync, and nothing leaves an end.
+    try std.testing.expect(!State.open.moves(.published));
+    try std.testing.expect(!State.open.moves(.kept));
+    try std.testing.expect(!State.synced.moves(.synced));
+    for ([_]State{ .published, .kept, .poisoned, .discarded }) |from| {
+        for ([_]State{ .synced, .published, .kept, .poisoned }) |to| try std.testing.expect(!from.moves(to));
     }
 }
 

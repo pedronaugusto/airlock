@@ -10,6 +10,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Staged = @import("Staged.zig");
+const assert = @import("aegis.assert");
 
 const Pending = @This();
 
@@ -47,8 +48,13 @@ pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOpt
     return .{ .staged = try .create(io, dir, dest_sub_path, options) };
 }
 
-/// The temp file, to write to directly. Valid until `commit` or `discard`.
+/// The temp file, to write to directly, while the pending is `open`. Once a
+/// sync has been made (`synced`, as after a commit that failed at the rename)
+/// the temp is closed on POSIX and its descriptor number may belong to another
+/// file; asking for it then, or after the pending ended, stops the program
+/// in every build rather than write to the wrong file.
 pub fn file(p: *const Pending) Io.File {
+    assert.pre(p.staged.state == .open, "Pending.file: the temp is no longer open for writing");
     return p.staged.file;
 }
 
@@ -84,7 +90,8 @@ pub fn writer(p: *Pending, io: Io, buffer: []u8) *Io.Writer {
 /// what its first sync reached, whatever level the second asks for. A
 /// cancel before the rename returns `error.Canceled` with the state
 /// unchanged; after it, `error.PublishedNotDurable` with `cause`
-/// `Canceled`.
+/// `Canceled`. A pending that has ended (`published`, `kept` or `discarded`)
+/// cannot be committed again: that stops the program in every build.
 pub fn commit(p: *Pending, io: Io, options: CommitOptions) CommitError!Committed {
     return p.staged.commit(.report, io, options);
 }

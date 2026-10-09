@@ -62,7 +62,7 @@ test "Darwin concurrent writeout failures belong to the first slot and publish n
             try batch.addPending(io, p, .replace);
         }
         if (cancel) try testing.expectError(error.Canceled, batch.commit(io, .{ .parallel = 4 })) else try testing.expectError(error.InputOutput, batch.commit(io, .{ .parallel = 4 }));
-        try testing.expectEqual(@as(u32, 1), batch.failure().?.slot);
+        try testing.expectEqual(try airlock.Batch.SlotIndex.from(1, slots.len), batch.failure().?.slot);
         try testing.expectEqual(@as(u32, 3), h.count(.sync_writeout));
         try testing.expectEqual(@as(u32, 0), h.count(.rename));
         try testing.expectEqual(@as(u32, 0), h.count(.sync_full));

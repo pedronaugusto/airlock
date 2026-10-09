@@ -238,13 +238,47 @@ test "a failed sync poisons the batch: nothing renamed, temps gone, the slot nam
     try batch.addPending(io, &b, .replace);
     try testing.expectError(error.InputOutput, batch.commit(io, .{ .parallel = 1 }));
     const failure = batch.failure().?;
-    try testing.expectEqual(@as(u32, 1), failure.slot);
+    try testing.expectEqual(try airlock.Batch.SlotIndex.from(1, slots.len), failure.slot);
     try testing.expectEqual(@as(anyerror, error.InputOutput), failure.cause);
     try testing.expectEqual(airlock.Pending.State.poisoned, b.state());
     try testing.expectEqual(airlock.Pending.State.discarded, a.state());
     try expectContents(&s, "a", null);
     try expectContents(&s, "b", null);
     try testing.expectEqual(@as(usize, 0), (try s.entries(".")).count);
+}
+
+test "a failure after the directories were sorted names the slot by when it was added" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const names = [_][]const u8{ "d0", "d1", "d2" };
+    var dirs: [3]Io.Dir = undefined;
+    var ids: [3]airlock.FileId = undefined;
+    for (names, &dirs, &ids) |name, *dir, *id| {
+        try s.dir().createDir(testing.io, name, .default_dir);
+        dir.* = try s.dir().openDir(testing.io, name, .{});
+        id.* = try airlock.FileId.ofPath(testing.io, s.dir(), name, .{});
+    }
+    defer for (dirs) |dir| dir.close(testing.io);
+    // Added from the largest identity to the smallest: a commit syncs the
+    // directories smallest first, so the first sync is the last slot added.
+    var added = [_]usize{ 0, 1, 2 };
+    std.mem.sort(usize, &added, &ids, struct {
+        fn larger(by: *const [3]airlock.FileId, a: usize, b: usize) bool {
+            return by[a].order(by[b]) == .gt;
+        }
+    }.larger);
+    const first: Call = if (is_linux) .sync_dir else .sync_writeout;
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.fail(first, 1, io_error)} });
+    defer h.destroy();
+    const io = h.io();
+    var slots: [3]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    for (added) |i| try batch.addDir(dirs[i]);
+    try testing.expectError(error.InputOutput, batch.commit(io, .{ .parallel = 1 }));
+    const failure = batch.failure().?;
+    try testing.expectEqual(try airlock.Batch.SlotIndex.from(2, slots.len), failure.slot);
 }
 
 test "a failure after a rename is PublishedNotDurable" {

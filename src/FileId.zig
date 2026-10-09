@@ -30,7 +30,7 @@ pub const Error = Io.File.StatError;
 /// The identity of what `file` is open on.
 pub fn of(io: Io, file: Io.File) Error!FileId {
     const id = try sys.statId(io, file.handle);
-    return .{ .volume = id.volume, .file = id.file };
+    return .{ .volume = id.volume.raw(), .file = id.file };
 }
 
 pub const PathOptions = struct {
@@ -46,7 +46,7 @@ pub const PathError = Io.Dir.StatFileError;
 /// its attributes only.
 pub fn ofPath(io: Io, dir: Io.Dir, sub_path: []const u8, options: PathOptions) PathError!FileId {
     const id = try sys.statIdPath(io, dir.handle, sub_path, options.follow_symlinks);
-    return .{ .volume = id.volume, .file = id.file };
+    return .{ .volume = id.volume.raw(), .file = id.file };
 }
 
 pub fn eql(a: FileId, b: FileId) bool {
@@ -76,6 +76,12 @@ test "order is by volume, then by file, and agrees with eql" {
     try std.testing.expectEqual(std.math.Order.eq, order(c, c));
     try std.testing.expect(eql(c, c) and !eql(b, c));
     try std.testing.expectEqual(hash(c), hash(.{ .volume = 2, .file = 3 }));
+}
+
+test "a volume number and a device hash are different types, and a file id is read from either" {
+    comptime std.debug.assert(sys.VolumeId != sys.DeviceId);
+    const id: sys.Id = .{ .volume = .fromRaw(7), .file = 9 };
+    try std.testing.expectEqual(@as(u64, 7), id.volume.raw());
 }
 
 test "a Linux device number keeps its major and its minor apart" {

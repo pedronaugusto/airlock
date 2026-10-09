@@ -5,10 +5,11 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     //=====================================================================
-    // The module. Pure Zig, `std` only: nothing to link and no build
-    // options, so nothing a consumer has to match. The seam in front of its
-    // raw calls is a module of its own that only airlock and
-    // `airlock.testing` import, so neither exports it.
+    // The module. Pure Zig over `std` and three of aegis's namespaces
+    // (`aegis.id`, `aegis.handle`, `aegis.assert`, std-only themselves):
+    // nothing to link and no build options, so nothing a consumer has to
+    // match. The seam in front of its raw calls is a module of its own that
+    // only airlock and `airlock.testing` import, so neither exports it.
     //=====================================================================
 
     const module = airlockModule(b, target, optimize);
@@ -36,6 +37,7 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{.{ .name = "seam", .module = module.import_table.get("seam").? }},
         }),
     });
+    for (aegisImports(b, target, optimize)) |import| tests.root_module.addImport(import.name, import.module);
     var needed: error{LazyDependencyNeeded}!void = {};
     if (testingModule(b, module)) |seam| {
         tests.root_module.addImport("airlock.testing", seam);
@@ -92,18 +94,13 @@ pub fn build(b: *std.Build) !void {
                 .optimize = optimize,
             },
         });
-        // Forward to preflight's own planner, whose CLI owns CI matrices.
-        const preflight_dep = try b.dependencyLazy("preflight", .{});
-        const plan = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--build-file" });
-        plan.addFileArg(preflight_dep.path("build.zig"));
-        plan.addDirectoryArg2(b.path("."), .{ .prefix = "-Drepo-root=" });
-        plan.addArg("plan");
-        plan.addArg("--");
-        plan.addPassthruArgs();
-        b.step("plan", "Generate the CI matrix with preflight").dependOn(&plan.step);
         // A project that depends on airlock by path, with no packages to
         // fetch: the build a consumer gets.
-        preflight.addConsumerCheck(b, .{ .package = "airlock", .program = b.path("ci/consumer.zig") });
+        preflight.addConsumerCheck(b, .{
+            .package = "airlock",
+            .program = b.path("ci/consumer.zig"),
+            .packages = &.{b.dependency("aegis", .{ .target = target, .optimize = optimize })},
+        });
     }
     return needed;
 }
@@ -131,12 +128,26 @@ fn airlockModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .target = target,
         .optimize = optimize,
     });
-    return b.createModule(.{
+    const module = b.createModule(.{
         .root_source_file = b.path("src/airlock.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "seam", .module = seam }},
     });
+    for (aegisImports(b, target, optimize)) |import| module.addImport(import.name, import.module);
+    return module;
+}
+
+/// The aegis namespaces airlock imports, each as its own module: ids for the
+/// volume and device numbers, typed indices for a batch's slots, and the
+/// always-on contracts.
+fn aegisImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) [3]std.Build.Module.Import {
+    const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize });
+    return .{
+        .{ .name = "aegis.id", .module = aegis.module("aegis.id") },
+        .{ .name = "aegis.handle", .module = aegis.module("aegis.handle") },
+        .{ .name = "aegis.assert", .module = aegis.module("aegis.assert") },
+    };
 }
 
 /// `airlock.testing` over `airlock`'s own seam: the hook it builds is the
@@ -148,6 +159,7 @@ fn seamModule(b: *std.Build, airlock: *std.Build.Module, shakedown: *std.Build.M
         .optimize = airlock.optimize,
         .imports = &.{
             .{ .name = "seam", .module = airlock.import_table.get("seam").? },
+            .{ .name = "aegis.assert", .module = airlock.import_table.get("aegis.assert").? },
             .{ .name = "shakedown", .module = shakedown },
         },
     });

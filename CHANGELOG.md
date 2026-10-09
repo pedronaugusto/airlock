@@ -24,6 +24,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first sync reached: `commit` publishes and reports it, where it returned
   `error.LevelUnavailable` for a stronger level; `commitOrRefuse` refuses only
   when that is below the level.
+- `Batch.Failure.slot` is a `Batch.SlotIndex`, an aegis `handle.Index`, where
+  it was a `u32`. It is the place the slot was added at, whatever order the
+  commit sorted the directories in; `slot.raw()` gives the number, and
+  `slot.get(entries)` gives the caller's own entry or `error.OutOfBounds`.
+- airlock imports aegis (`aegis.id`, `aegis.handle` and `aegis.assert`) and is no
+  longer `std` only. A consumer's build fetches aegis with airlock and wires
+  nothing.
 
 ### Fixed
 
@@ -33,12 +40,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Using a `Pending` out of turn stops the program in every build, where it was
+  undefined behaviour in `ReleaseFast`, or a write to a closed descriptor:
+  `file()` and `writer()` only while it is `open` (after a sync the temp is
+  closed on POSIX, and its descriptor number may belong to another file),
+  `commit` and `commitOrRefuse` only until it has ended, and
+  `Batch.addPending` only a pending that is `open` or `synced`.
+  `Batch.init` refuses storage of more than `u32` slots, and `Seam.setPlan` a
+  plan of more than 16 entries, the same way.
+- A staged file's moves are checked against one table (a pending never goes
+  back, only a synced temp is published or kept, `discard` follows any state),
+  in every build.
+- A volume's number and the hash of its device name are different types inside
+  a batch, so one cannot stand for the other in a volume key; `FileId` keeps
+  its `u64` and `u128` fields, which strand writes into checkpoints.
 - Darwin batches overlap per-file writeouts within `parallel`, retaining writing-handle error checks and the same per-volume barriers and flushes.
 
 ### Added
 
 - Optional `Blocking` executor in sync, publish and batch options: raw syncs
-  can run on an application's executor while airlock stays a std-only leaf.
+  can run on an application's executor while airlock needs no runtime of its own.
   Null runs inline; adapters drain started jobs before returning.
 - Raw primitive probes, isolated new/overwrite rows, append comparisons and
   per-row barrier counts in `bench/`; macOS and Linux measurements with the

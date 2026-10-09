@@ -23,6 +23,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const shakedown = @import("shakedown");
 const seam = @import("seam");
+const assert = @import("aegis.assert");
 
 const os = builtin.target.os.tag;
 
@@ -145,7 +146,7 @@ pub const Seam = struct {
     /// Replaces the plan, its counts starting again: for faults planned
     /// once a fixture is set up. Not while calls are in flight.
     pub fn setPlan(s: *Seam, entries: []const Plan.Entry) void {
-        std.debug.assert(entries.len <= s.counters.len);
+        assert.pre(entries.len <= s.counters.len, "Seam.setPlan: a plan holds at most 16 entries");
         s.plan = .init(entries, .{ .steps = s.fio.steps(), .counters = &s.counters, .fired = &s.fired });
     }
 

@@ -40,6 +40,8 @@
 //! with `cause` `Canceled`.
 const Blocking = @import("Blocking.zig");
 const std = @import("std");
+const assert = @import("aegis.assert");
+const aegis_handle = @import("aegis.handle");
 const builtin = @import("builtin");
 const Io = std.Io;
 const sys = @import("sys.zig");
@@ -65,16 +67,23 @@ len: u32 = 0,
 /// Private: the failure of the last commit.
 failed: ?Failure = null,
 
-pub const Failure = struct { slot: u32, cause: anyerror };
+/// Where a slot was added: the n-th entry of this batch, whatever order the
+/// commit sorts them in. Not an index into the caller's slot storage once a
+/// commit has begun, and not a position in anything else.
+pub const SlotIndex = aegis_handle.Index(SlotTag, u32);
+const SlotTag = struct {};
+
+/// The slot (in add order) whose call failed, and its error.
+pub const Failure = struct { slot: SlotIndex, cause: anyerror };
 
 const Kind = enum(u8) { file, path, pending, dir, dir_path, fence };
 
 /// One entry of a batch. Opaque; the caller only provides the storage.
 pub const Slot = struct {
     /// Private: the identity of a directory, for dedup.
-    id: sys.Id = .{ .volume = 0, .file = 0 },
+    id: sys.Id = .{ .volume = .fromRaw(0), .file = 0 },
     /// Private: Windows, the hash of the volume's device name.
-    device: u64 = 0,
+    device: sys.DeviceId = no_device,
     /// Private: a file or directory handle, or a pending's parent.
     handle: sys.Handle = undefined,
     /// Private: the pending's state, for a pending slot.
@@ -84,7 +93,7 @@ pub const Slot = struct {
     /// Private: the path of a path slot, borrowed.
     path: []const u8 = &.{},
     /// Private: the slot's place in add order.
-    index: u32 = 0,
+    index: SlotIndex = undefined, // set by `push`; a slot beyond `len` is never read
     kind: Kind = .fence,
     publish: Pending.Publish = .replace,
     /// Private: the batch opened `handle` and closes it.
@@ -107,15 +116,17 @@ pub const Slot = struct {
 };
 
 pub fn init(storage: []Slot) Batch {
+    assert.pre(storage.len <= std.math.maxInt(u32), "Batch.init: more slots than a slot index can name");
     return .{ .slots = storage };
 }
 
 pub const AddError = error{BatchFull};
 
 fn push(b: *Batch, slot: Slot) AddError!void {
-    if (b.len == b.slots.len) return error.BatchFull;
+    // A full batch is the one way the next index fails to name a slot.
+    const index = SlotIndex.from(b.len, b.slots.len) catch return error.BatchFull;
     var s = slot;
-    s.index = b.len;
+    s.index = index;
     b.slots[b.len] = s;
     b.len += 1;
 }
@@ -142,7 +153,7 @@ pub fn addPath(b: *Batch, dir: Io.Dir, sub_path: []const u8) AddError!void {
 /// what that first sync reached is its part of the batch.
 pub fn addPending(b: *Batch, io: Io, p: *Pending, publish: Pending.Publish) AddError!void {
     const staged = &p.staged;
-    std.debug.assert(staged.state == .open or staged.state == .synced);
+    assert.pre(staged.state == .open or staged.state == .synced, "Batch.addPending: the pending already ended or failed");
     try b.push(.{ .kind = .pending, .pending = staged, .publish = publish });
     staged.dropParent(io);
 }
@@ -251,8 +262,8 @@ fn poison(b: *Batch, io: Io) void {
 
 /// A volume a batch flushes once: its key and a handle on it.
 const Volume = struct {
-    volume: u64,
-    device: u64,
+    volume: sys.VolumeId,
+    device: sys.DeviceId,
     /// A handle on the volume to flush through, and whether it is a
     /// directory (Windows reopens one for the flush). Null while the
     /// volume holds only pendings whose parents the batch has not opened
@@ -260,7 +271,7 @@ const Volume = struct {
     handle: ?sys.Handle,
     is_dir: bool,
     /// The slot `handle` came from, for `failure`.
-    slot: u32,
+    slot: SlotIndex,
     /// Something on the volume was only written out and needs the flush.
     needs_flush: bool = false,
     /// A pending temp on the volume, for the barrier before the renames,
@@ -270,6 +281,10 @@ const Volume = struct {
 };
 
 const max_volumes = 16;
+
+/// The device id of a volume with no name to hash: every platform but
+/// Windows, and a Windows filesystem that will not say.
+const no_device: sys.DeviceId = .fromRaw(0);
 
 /// The state of one commit, refusing or reporting as `fallback` says.
 fn Run(comptime fallback: Fallback) type {
@@ -418,7 +433,7 @@ fn Run(comptime fallback: Fallback) type {
                 for (all[start..end]) |*s| if (isFileSlot(s)) {
                     if (s.err) |err| return r.fail(s, err);
                     if (s.reached == .written and (s.pending == null or s.pending.?.state == .open)) {
-                        s.reached = r.registerWriteout(s, if (s.pending) |p| p.file.handle else s.handle, s.id, 0, if (s.pending) |p| p.tempName() else s.path) catch |err| return r.fail(s, err);
+                        s.reached = r.registerWriteout(s, if (s.pending) |p| p.file.handle else s.handle, s.id, no_device, if (s.pending) |p| p.tempName() else s.path) catch |err| return r.fail(s, err);
                     }
                     r.closePath(s);
                     try r.part(s, s.reached);
@@ -564,12 +579,12 @@ fn Run(comptime fallback: Fallback) type {
             const reached = try platform.writeout(r.io, r.options.blocking, handle, subject);
             if (reached != .written) return reached;
             const id = try sys.statId(r.io, handle);
-            const device = if (is_windows) try sys.volumeName(r.io, handle) else 0;
+            const device = if (is_windows) try sys.volumeName(r.io, handle) else no_device;
             return r.registerWriteout(s, handle, id, device, subject);
         }
 
         /// Serial owner of the volume table, after a successful writeout.
-        inline fn registerWriteout(r: *Self, s: *Slot, handle: sys.Handle, id: sys.Id, device: u64, subject: ?[]const u8) Error!Reached {
+        inline fn registerWriteout(r: *Self, s: *Slot, handle: sys.Handle, id: sys.Id, device: sys.DeviceId, subject: ?[]const u8) Error!Reached {
             const parent_open = s.kind == .pending and s.open;
             const rep: ?sys.Handle = if (s.kind != .pending) handle else if (parent_open) s.handle else null;
             const v = r.volume(id.volume, device, rep, parent_open, s.index) orelse
@@ -591,7 +606,7 @@ fn Run(comptime fallback: Fallback) type {
         /// none does yet, or if it is a directory and the one there is not.
         /// Null once the table is full (the caller then flushes at its own
         /// handle).
-        fn volume(r: *Self, key: u64, device: u64, handle: ?sys.Handle, is_dir: bool, slot: u32) ?*Volume {
+        fn volume(r: *Self, key: sys.VolumeId, device: sys.DeviceId, handle: ?sys.Handle, is_dir: bool, slot: SlotIndex) ?*Volume {
             for (r.volumes[0..r.volume_count]) |*v| {
                 if (v.volume == key and v.device == device) {
                     if (handle != null and (v.handle == null or (is_dir and !v.is_dir))) {
@@ -620,7 +635,7 @@ fn Run(comptime fallback: Fallback) type {
             if (!is_darwin and !is_windows) return;
             for (r.volumes[0..r.volume_count]) |v| {
                 const temp = v.temp orelse continue;
-                const slot = &r.batch.slots[v.slot];
+                const slot = r.findSlot(v.slot);
                 const reached = (if (is_windows)
                     platform.volumeFlush(r.io, r.options.blocking, temp, v.temp_name)
                 else
@@ -731,7 +746,7 @@ fn Run(comptime fallback: Fallback) type {
             for (all) |*s| if (isDirSlot(s)) {
                 const id = sys.statId(r.io, s.handle) catch |err| return r.fail(s, err);
                 s.id = id;
-                s.device = if (is_windows) sys.volumeName(r.io, s.handle) catch |err| return r.fail(s, err) else 0;
+                s.device = if (is_windows) sys.volumeName(r.io, s.handle) catch |err| return r.fail(s, err) else no_device;
             };
             // The rename order is spent: sort by directory key, in place, and
             // mark the first slot of each distinct directory.
@@ -775,10 +790,12 @@ fn Run(comptime fallback: Fallback) type {
             const da = isDirSlot(&a);
             const db = isDirSlot(&b);
             if (da != db) return da;
-            if (a.id.volume != b.id.volume) return a.id.volume < b.id.volume;
-            if (a.device != b.device) return a.device < b.device;
+            const by_volume = a.id.volume.compare(b.id.volume);
+            if (by_volume != .eq) return by_volume == .lt;
+            const by_device = a.device.compare(b.device);
+            if (by_device != .eq) return by_device == .lt;
             if (a.id.file != b.id.file) return a.id.file < b.id.file;
-            return a.index < b.index;
+            return a.index.raw() < b.index.raw(); // same domain: add order breaks the tie
         }
 
         fn sameDir(a: *const Slot, b: *const Slot) bool {
@@ -846,9 +863,14 @@ fn Run(comptime fallback: Fallback) type {
             }
         }
 
-        /// The slot added `index`-th, wherever the sort put it.
-        fn findSlot(r: *Self, index: u32) *Slot {
-            for (r.slots()) |*s| if (s.index == index) return s;
+        /// The slot added `index`-th, wherever the sort put it: where it was
+        /// added if the sort has not moved it, else found by its index.
+        fn findSlot(r: *Self, index: SlotIndex) *Slot {
+            const all = r.slots();
+            if (index.get(all)) |s| {
+                if (s.index == index) return s;
+            } else |_| {}
+            for (all) |*s| if (s.index == index) return s;
             unreachable; // unreachable: every index names a slot of this batch
         }
     };

@@ -10,7 +10,10 @@ tells files apart by identity rather than by path.
 
 Requires Zig 0.17.0. Fetch with `zig fetch --save
 git+https://github.com/pedronaugusto/airlock` and add the `airlock` module to
-your module's imports. It depends on `std` only.
+your module's imports. It depends on `std` and on three namespaces of
+[aegis](https://github.com/pedronaugusto/aegis) (`aegis.id`, `aegis.handle` and
+`aegis.assert`, which themselves need only `std`); the dependency brings them,
+and nothing is wired by hand.
 
 ## Usage
 
@@ -112,6 +115,13 @@ temp's own handle with POSIX semantics, retried with jittered backoff while a
 scanner holds the target, and a delete removes the name even while another
 process has the file open.
 
+A `Pending` is used in order, and a call out of turn stops the program in every
+build rather than reach a closed descriptor: `file` and `writer` only while the
+pending is `open`, `commit` only until it has ended, and `Batch.addPending`
+only a pending that is `open` or `synced`. After a sync the temp is closed on
+POSIX, and a descriptor number that is no longer ours may already belong to
+another file.
+
 `makePath` creates the missing directories of a path and syncs the directory
 each new one went into, so a file published into the deepest one is not lost
 with a parent nobody synced; when a directory vanishes under it (a concurrent
@@ -141,7 +151,10 @@ a batch without a second sync. The slots are the caller's storage. Each pending
 holds its temp until its sync, the batch opens each distinct parent when it
 first renames into it, and `addPath` files are opened `parallel` at a time and
 closed after their sync, so a batch holds at most one descriptor per slot plus
-`parallel`, and a batch of 3,000 paths about `parallel`.
+`parallel`, and a batch of 3,000 paths about `parallel`. After a failed commit
+`failure` names the slot by its `Batch.SlotIndex`, the place it was added at
+however the commit sorted the directories, and its error; `slot.get(entries)`
+turns it into the caller's own entry, or `error.OutOfBounds`.
 
 `FileId` is a volume and a 128-bit file number, from the handle or from a path
 without opening it. On Windows, two volumes cloned from one image keep both
@@ -176,7 +189,7 @@ Linux's optional early writeback initiates I/O without waiting and stays inline.
 
 The runtime owns the adapter. reactor's `blocking` facility will provide the
 sync-lane adapter for applications to wire into these options; airlock imports
-only std and has no dependency on reactor. For another executor, implement
+only std and aegis and has no dependency on reactor. For another executor, implement
 this small callback contract; every selected raw sync, including directory
 flushes, batch writeouts, barriers, fallbacks and fences, goes through it.
 
@@ -208,8 +221,11 @@ pages and Microsoft's documentation, and on the crash model below.
 
 ## Built with
 
-- [Zig](https://ziglang.org) 0.17.0 and its standard library; nothing else is
+- [Zig](https://ziglang.org) 0.17.0 and its standard library; nothing is
   linked into the module.
+- [aegis](https://github.com/pedronaugusto/aegis) supplies the distinct volume
+  and device ids, the typed batch slot index and the always-on contracts; the
+  module imports `aegis.id`, `aegis.handle` and `aegis.assert` alone.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the `FaultIo`,

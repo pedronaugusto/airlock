@@ -1,0 +1,60 @@
+name: Windows benchmark
+# Indicative hosted-runner numbers, run by hand. Not a target check, and kept
+# out of ci.yml, which preflight regenerates whole.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-bench:
+    name: Indicative hosted Windows benchmark (not a target check)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Record benchmark provenance
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path benchmark-evidence | Out-Null
+          $metadata = [ordered]@{
+            notice = 'indicative hosted-runner numbers, not a target check'
+            benchmarked_sha = (git rev-parse HEAD)
+            run_url = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+            run_id = '${{ github.run_id }}'
+            run_attempt = '${{ github.run_attempt }}'
+            utc = (Get-Date).ToUniversalTime().ToString('o')
+            runner_os = $env:RUNNER_OS
+            runner_arch = $env:RUNNER_ARCH
+            image_os = $env:ImageOS
+            image_version = $env:ImageVersion
+            zig = (zig version)
+            build_mode = 'ReleaseFast'
+            command = 'zig build bench -Doptimize=ReleaseFast'
+            io = 'std.Io.Threaded; hosted virtual storage'
+            checkout_directory = '${{ github.workspace }}'
+            scratch = 'preflight b.tmpPath(), then the benchmark owns a random child of scratch'
+            os = (Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, OSArchitecture)
+            cpu = @(Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors)
+            volumes = @(Get-Volume | Select-Object DriveLetter, FileSystem, FileSystemLabel, Size)
+          }
+          $metadata | ConvertTo-Json -Depth 6 | Set-Content benchmark-evidence/metadata.json -Encoding utf8
+          Get-Content benchmark-evidence/metadata.json
+      - name: Run the own benchmark suite in ReleaseFast
+        shell: pwsh
+        run: |
+          & zig build bench -Doptimize=ReleaseFast 1> benchmark-evidence/rows.jsonl 2> benchmark-evidence/stderr.txt
+          $benchExit = $LASTEXITCODE
+          Set-Content benchmark-evidence/exit-code.txt $benchExit
+          Get-Content benchmark-evidence/rows.jsonl
+          Get-Content benchmark-evidence/stderr.txt
+          if ($benchExit -ne 0) { exit $benchExit }
+      - name: Upload actual rows, stdout, stderr and provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: airlock-windows-bench-${{ github.run_id }}-${{ github.run_attempt }}
+          path: benchmark-evidence/
+          if-no-files-found: error
