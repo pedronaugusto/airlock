@@ -144,8 +144,8 @@ independent external-device test. `--smoke` takes no measurements on any OS.
 
 ## Manual hosted Windows benchmarks
 
-Dispatch the existing workflow with
-`gh workflow run ci.yml --ref <branch-or-main> -f windows-bench=true`.
+Dispatch its own workflow with
+`gh workflow run windows-bench.yml --ref <branch-or-main>`.
 It runs the own suite with Zig 0.17.0 and explicit ReleaseFast on
 `windows-latest`, retaining all emitted JSONL, stderr, exit status and runner
 metadata as an Actions artifact. It changes neither the preflight planner nor
