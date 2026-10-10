@@ -580,6 +580,7 @@ test "a gate stands a task at the first create of a name until the test lets it 
         }
     };
     var task = try testing.io.concurrent(Task.run, .{ h.io(), s.dir() });
+    // glint-ignore: Z026 -- the test's verdict is already made; cancelling a task that has ended is the cleanup
     defer _ = task.cancel(testing.io) catch {};
     try reached.waitTimeout(testing.io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(20) } });
     try testing.expect(s.read("main.lock", &.{}) == null);
