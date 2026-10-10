@@ -8,7 +8,11 @@
 //! apart from a failure (the bytes did not get down).
 //!
 //! The seam (`seam.zig`) decides each call first when the `Io` carries a
-//! test's hook; production pays one function-pointer compare per call.
+//! test's hook; production pays one function-pointer compare per call. A
+//! hook with a route has the calls it lets through made through the
+//! route's `Io` and its `flush` instead of the system, one for one: the
+//! platform's logic around each call is the same either way, so airlock
+//! runs on a simulated file system as it runs on a real one.
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -28,19 +32,44 @@ const aegis_id = @import("aegis").id;
 
 pub const Call = seam.Call;
 const Code = seam.Code;
-const intercept = seam.intercept;
+const Route = seam.Route;
 
-/// A failure code the hook injects in place of `call`, or null to run it.
-fn injected(io: Io, call: Call, path: ?[]const u8) Io.Cancelable!?Code {
-    const result = intercept(io, call, path) orelse return null;
-    return switch (result) {
-        .code => |c| if (c == success) null else c,
-        .canceled => error.Canceled,
-        .value => null,
+/// What a try at a raw call is to be.
+const Decision = union(enum) {
+    /// Made on the system.
+    system,
+    /// Not made: it returns this failure code.
+    code: Code,
+    /// Made through the hook's route.
+    route: *const Route,
+};
+
+/// What the hook, if `io` carries one, makes of a try at `call`.
+fn decide(io: Io, call: Call, path: ?[]const u8) Io.Cancelable!Decision {
+    const hook = seam.hookOf(io) orelse return .system;
+    if (hook.call(hook.ctx, call, path)) |result| switch (result) {
+        .code => |c| if (c != success) return .{ .code = c },
+        .canceled => return error.Canceled,
+        .value => {},
     };
+    return if (hook.route) |*route| .{ .route = route } else .system;
 }
 
+/// What a try came to: the code the system or the hook returned, or the
+/// route the call is to be made through instead.
+const Attempt = union(enum) { code: Code, route: *const Route };
+
 const success: Code = .SUCCESS;
+/// The code of a call interrupted before it was made.
+const interrupted: Code = if (is_windows) .CANCELLED else .INTR;
+
+/// `Io.File` and `Io.Dir` of a raw handle, for a call made through a route.
+fn fileOf(handle: Handle) Io.File {
+    return .{ .handle = handle, .flags = .{ .nonblocking = false } };
+}
+fn dirOf(handle: Handle) Io.Dir {
+    return .{ .handle = handle };
+}
 
 pub const Handle = if (is_windows) windows.HANDLE else posix.fd_t;
 
@@ -61,19 +90,32 @@ fn errnoOf(rc: anytype) posix.E {
 }
 
 /// Runs `f` until it is not interrupted, honouring a cancel between tries.
-/// The hook decides each try first.
-fn retrying(io: Io, call: Call, path: ?[]const u8, comptime f: anytype, args: anytype) Io.Cancelable!posix.E {
+/// The hook decides each try first; a try it routes is the caller's to
+/// make through the route.
+fn retrying(io: Io, call: Call, path: ?[]const u8, comptime f: anytype, args: anytype) Io.Cancelable!Attempt {
     while (true) {
         try io.checkCancel();
-        const code: posix.E = (try injected(io, call, path)) orelse errnoOf(@call(.auto, f, args));
-        if (code != .INTR) return code;
+        const code: Code = switch (try decide(io, call, path)) {
+            .system => codeOf(f, args),
+            .code => |c| c,
+            .route => |route| return .{ .route = route },
+        };
+        if (code != interrupted) return .{ .code = code };
     }
 }
 
-/// Execute only the raw call elsewhere; never read thread-local errno on
-/// the calling task after returning from an executor.
+/// The code `f(args)` returns: a raw call's errno or NTSTATUS, or a route's
+/// code as it is.
+fn codeOf(comptime f: anytype, args: anytype) Code {
+    const rc = @call(.auto, f, args);
+    if (@TypeOf(rc) == Code) return rc;
+    return errnoOf(rc);
+}
+
+/// Execute only the call elsewhere; never read thread-local errno on the
+/// calling task after returning from an executor.
 fn syncCall(io: Io, blocking: ?Blocking, comptime f: anytype, args: anytype) Io.Cancelable!Code {
-    const hook = blocking orelse return rawSync(f, args);
+    const hook = blocking orelse return codeOf(f, args);
     const Job = struct {
         const Self = @This();
         arguments: @TypeOf(args),
@@ -81,7 +123,7 @@ fn syncCall(io: Io, blocking: ?Blocking, comptime f: anytype, args: anytype) Io.
 
         fn run(argument: *anyopaque) void {
             const job: *Self = @ptrCast(@alignCast(argument)); // safe: argument points to the live Job below
-            job.result = rawSync(f, job.arguments);
+            job.result = codeOf(f, job.arguments);
         }
     };
     var job: Job = .{ .arguments = args };
@@ -89,18 +131,23 @@ fn syncCall(io: Io, blocking: ?Blocking, comptime f: anytype, args: anytype) Io.
     return job.result;
 }
 
-fn rawSync(comptime f: anytype, args: anytype) Code {
-    const rc = @call(.auto, f, args);
-    return if (is_windows) rc else errnoOf(rc);
+/// A route's sync, as the code the platform's call would return.
+fn routeFlush(route: *const Route, handle: Handle, kind: seam.Flush) Code {
+    return route.flush(route.ctx, handle, kind);
 }
 
 /// Cancellation and seam interception remain on the calling task. Each
-/// actual syscall attempt, including retries and fallbacks, uses the hook.
-fn retryingSync(io: Io, blocking: ?Blocking, call: Call, path: ?[]const u8, comptime f: anytype, args: anytype) Io.Cancelable!Code {
+/// actual sync attempt, including retries and fallbacks, uses the
+/// executor: the system's call, or the route's sync of `handle` at `kind`.
+fn retryingSync(io: Io, blocking: ?Blocking, call: Call, path: ?[]const u8, handle: Handle, kind: seam.Flush, comptime f: anytype, args: anytype) Io.Cancelable!Code {
     while (true) {
         try io.checkCancel();
-        const code = (try injected(io, call, path)) orelse try syncCall(io, blocking, f, args);
-        if (code != (if (is_windows) Code.CANCELLED else Code.INTR)) return code;
+        const code = switch (try decide(io, call, path)) {
+            .system => try syncCall(io, blocking, f, args),
+            .code => |c| c,
+            .route => |route| try syncCall(io, blocking, routeFlush, .{ route, handle, kind }),
+        };
+        if (code != interrupted) return code;
     }
 }
 
@@ -133,7 +180,7 @@ fn cFsync(fd: posix.fd_t) c_int {
 
 /// Darwin `F_FULLFSYNC`: the device writes its cache down.
 pub fn fullFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncError!void {
-    const e = try retryingSync(io, blocking, call, path, darwinFcntl, .{ fd, darwin_full_fsync });
+    const e = try retryingSync(io, blocking, call, path, fd, .full, darwinFcntl, .{ fd, darwin_full_fsync });
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .NOTTY, .PERM => error.Refused,
@@ -144,7 +191,7 @@ pub fn fullFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, call: Call, path: 
 /// Darwin `F_BARRIERFSYNC`: everything handed to the device before it is
 /// written before anything after it.
 pub fn barrierFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
-    const e = try retryingSync(io, blocking, .sync_barrier, path, darwinFcntl, .{ fd, darwin_barrier_fsync });
+    const e = try retryingSync(io, blocking, .sync_barrier, path, fd, .barrier, darwinFcntl, .{ fd, darwin_barrier_fsync });
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .NOTTY, .PERM => error.Refused,
@@ -153,11 +200,13 @@ pub fn barrierFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, path: ?[]const 
 }
 
 /// Plain `fsync` on Darwin and the BSDs: a writeout, or the end of a chain.
+/// Darwin's does not flush the device; the BSDs' is their full sync.
 pub fn plainFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncError!void {
+    const kind: seam.Flush = if (is_darwin or call == .sync_writeout) .writeout else .full;
     const e = if (is_linux)
-        try retryingSync(io, blocking, call, path, linux.fsync, .{fd})
+        try retryingSync(io, blocking, call, path, fd, kind, linux.fsync, .{fd})
     else
-        try retryingSync(io, blocking, call, path, cFsync, .{fd});
+        try retryingSync(io, blocking, call, path, fd, kind, cFsync, .{fd});
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .ROFS => error.Refused,
@@ -167,7 +216,7 @@ pub fn plainFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, call: Call, path:
 
 /// Linux `fdatasync`.
 pub fn dataFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, path: ?[]const u8) SyncError!void {
-    const e = try retryingSync(io, blocking, .sync_data, path, linux.fdatasync, .{fd});
+    const e = try retryingSync(io, blocking, .sync_data, path, fd, .data, linux.fdatasync, .{fd});
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .ROFS, .NOSYS => error.Refused,
@@ -177,7 +226,7 @@ pub fn dataFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, path: ?[]const u8)
 
 /// Linux `fsync` on a file, as the full sync.
 pub fn linuxFsync(io: Io, blocking: ?Blocking, fd: posix.fd_t, call: Call, path: ?[]const u8) (SyncError || error{BadHandle})!void {
-    const e = try retryingSync(io, blocking, call, path, linux.fsync, .{fd});
+    const e = try retryingSync(io, blocking, call, path, fd, .full, linux.fsync, .{fd});
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .ROFS => error.Refused,
@@ -196,9 +245,14 @@ pub fn isPathOnly(io: Io, fd: posix.fd_t) Io.Cancelable!bool {
     if (fd == linux.AT.FDCWD) return true;
     while (true) {
         try io.checkCancel();
-        if (try injected(io, .getfl, null)) |code| {
-            if (code == .INTR) continue;
-            return false;
+        switch (try decide(io, .getfl, null)) {
+            .system => {},
+            .code => |code| {
+                if (code == .INTR) continue;
+                return false;
+            },
+            // A routed sync fails with a bad handle only for a bad handle.
+            .route => return false,
         }
         const rc = linuxGetfl(fd);
         switch (linux.errno(rc)) {
@@ -215,7 +269,12 @@ pub fn isPathOnly(io: Io, fd: posix.fd_t) Io.Cancelable!bool {
 /// Linux `sync_file_range(SYNC_FILE_RANGE_WRITE)`: start writeback early.
 pub fn writeback(io: Io, fd: posix.fd_t, offset: u64, len: u64) Io.File.SyncError!void {
     if (!is_linux or !@hasField(linux.SYS, "sync_file_range")) return;
-    const e = try retrying(io, .writeback, null, syncFileRange, .{ fd, offset, len });
+    const e = switch (try retrying(io, .writeback, null, syncFileRange, .{ fd, offset, len })) {
+        .code => |c| c,
+        // Starting writeback promises nothing a crash keeps, so a simulated
+        // disk is told nothing: the final sync does it all.
+        .route => return,
+    };
     return switch (e) {
         .SUCCESS => {},
         // A filesystem without writeback control: the final sync does it all.
@@ -234,15 +293,22 @@ fn syncFileRange(fd: posix.fd_t, offset: u64, len: u64) usize {
 /// file. EIO (an NFS deferred write) is a failed sync.
 pub fn close(io: Io, handle: Handle, path: ?[]const u8) Io.File.SyncError!void {
     if (is_windows) return closeWindows(io, handle, path);
-    const e: posix.E = if (injected(io, .close, path) catch null) |code| blk: {
-        // The hook decided what close says; the real descriptor still goes,
-        // exactly once.
-        closeQuietly(handle);
-        break :blk code;
-    } else if (is_linux)
-        linux.errno(linux.close(handle))
-    else
-        std.c.errno(std.c.close(handle));
+    const e: posix.E = switch (decide(io, .close, path) catch .system) {
+        .code => |code| blk: {
+            // The hook decided what close says; the descriptor still goes,
+            // exactly once.
+            closeRouted(io, handle);
+            break :blk code;
+        },
+        .route => |route| {
+            fileOf(handle).close(route.io);
+            return;
+        },
+        .system => if (is_linux)
+            linux.errno(linux.close(handle))
+        else
+            std.c.errno(std.c.close(handle)),
+    };
     return switch (e) {
         .IO => error.InputOutput,
         .NOSPC => error.NoSpaceLeft,
@@ -252,11 +318,15 @@ pub fn close(io: Io, handle: Handle, path: ?[]const u8) Io.File.SyncError!void {
     };
 }
 
-/// Close a descriptor that `close` reported on through the hook only.
-fn closeQuietly(handle: Handle) void {
-    if (is_linux) {
+/// Close a handle whose close the hook answered: through the route, if
+/// there is one, otherwise on the system.
+fn closeRouted(io: Io, handle: Handle) void {
+    if (seam.hookOf(io)) |hook| if (hook.route) |route| return fileOf(handle).close(route.io);
+    if (is_windows) {
+        _ = windows.ntdll.NtClose(handle);
+    } else if (is_linux) {
         _ = linux.close(handle);
-    } else if (!is_windows) {
+    } else {
         _ = std.c.close(handle);
     }
 }
@@ -284,9 +354,13 @@ pub fn openDir(io: Io, dir: Handle, sub_path: []const u8) OpenDirError!Handle {
     flags.DIRECTORY = true;
     while (true) {
         try io.checkCancel();
-        if (try injected(io, .open_dir, sub_path)) |code| {
-            if (code == .INTR) continue;
-            return openDirFailure(code);
+        switch (try decide(io, .open_dir, sub_path)) {
+            .system => {},
+            .code => |code| {
+                if (code == .INTR) continue;
+                return openDirFailure(code);
+            },
+            .route => |route| return (try dirOf(dir).openDir(route.io, sub_path, .{})).handle,
         }
         const rc = openatRaw(dir, &path, flags, 0);
         const e = errnoOf(rc);
@@ -325,9 +399,13 @@ pub fn openFile(io: Io, dir: Handle, sub_path: []const u8) OpenFileError!Handle 
     const flags: posix.O = .{ .ACCMODE = .RDONLY, .CLOEXEC = true };
     while (true) {
         try io.checkCancel();
-        if (try injected(io, .open_file, sub_path)) |code| {
-            if (code == .INTR) continue;
-            return openFileFailure(code);
+        switch (try decide(io, .open_file, sub_path)) {
+            .system => {},
+            .code => |code| {
+                if (code == .INTR) continue;
+                return openFileFailure(code);
+            },
+            .route => |route| return (try dirOf(dir).openFile(route.io, sub_path, .{})).handle,
         }
         const rc = openatRaw(dir, &path, flags, 0);
         const e = errnoOf(rc);
@@ -376,9 +454,13 @@ pub fn createTemp(io: Io, dir: Handle, name: []const u8, mode: Io.File.Permissio
     flags.EXCL = true;
     while (true) {
         try io.checkCancel();
-        if (try injected(io, .create_temp, name)) |code| {
-            if (code == .INTR) continue;
-            return openFileFailure(code);
+        switch (try decide(io, .create_temp, name)) {
+            .system => {},
+            .code => |code| {
+                if (code == .INTR) continue;
+                return openFileFailure(code);
+            },
+            .route => |route| return createTempRouted(route, dir, name, mode, read),
         }
         const rc = openatRaw(dir, &path, flags, mode.toMode());
         const e = errnoOf(rc);
@@ -390,12 +472,21 @@ pub fn createTemp(io: Io, dir: Handle, name: []const u8, mode: Io.File.Permissio
     }
 }
 
+/// `createTemp` through a route: an exclusive create.
+fn createTempRouted(route: *const Route, dir: Handle, name: []const u8, mode: Io.File.Permissions, read: bool) CreateTempError!Handle {
+    const file = try dirOf(dir).createFile(route.io, name, .{ .read = read, .exclusive = true, .truncate = false, .permissions = mode });
+    return file.handle;
+}
+
 /// Permissions on the open handle: `fchmod`, so umask does not apply and
 /// there is no window between a stat and a chmod of the path.
 pub fn setMode(io: Io, handle: Handle, mode: Io.File.Permissions) Io.File.SetPermissionsError!void {
     if (is_windows) return setReadOnlyWindows(io, handle, isReadOnly(mode));
     const fchmod = if (is_linux) linux.fchmod else std.c.fchmod;
-    const e = try retrying(io, .set_mode, null, fchmod, .{ handle, mode.toMode() });
+    const e = switch (try retrying(io, .set_mode, null, fchmod, .{ handle, mode.toMode() })) {
+        .code => |c| c,
+        .route => |route| return fileOf(handle).setPermissions(route.io, mode),
+    };
     return switch (e) {
         .SUCCESS => {},
         .ACCES => error.AccessDenied,
@@ -425,7 +516,10 @@ fn renameatRaw(old_dir: posix.fd_t, old: [*:0]const u8, new_dir: posix.fd_t, new
 pub fn rename(io: Io, old_dir: Handle, old: []const u8, new_dir: Handle, new: []const u8) RenameError!void {
     const old_z = try posix.toPosixPath(old);
     const new_z = try posix.toPosixPath(new);
-    const e = try retrying(io, .rename, new, renameatRaw, .{ old_dir, &old_z, new_dir, &new_z });
+    const e = switch (try retrying(io, .rename, new, renameatRaw, .{ old_dir, &old_z, new_dir, &new_z })) {
+        .code => |c| c,
+        .route => |route| return dirOf(old_dir).rename(old, dirOf(new_dir), new, route.io),
+    };
     if (e != .SUCCESS) return renameFailure(e);
 }
 
@@ -464,12 +558,24 @@ pub fn renameNoReplace(io: Io, old_dir: Handle, old: []const u8, new_dir: Handle
     if (!is_linux and !is_darwin) return error.Refused;
     const old_z = try posix.toPosixPath(old);
     const new_z = try posix.toPosixPath(new);
-    const e = try retrying(io, .rename_noreplace, new, renameNoReplaceRaw, .{ old_dir, &old_z, new_dir, &new_z });
+    const e = switch (try retrying(io, .rename_noreplace, new, renameNoReplaceRaw, .{ old_dir, &old_z, new_dir, &new_z })) {
+        .code => |c| c,
+        .route => |route| return renamePreserveRouted(route, old_dir, old, new_dir, new),
+    };
     return switch (e) {
         .SUCCESS => {},
         .EXIST => error.AlreadyExists,
         .INVAL, .NOSYS => error.Refused,
         else => if (isNotSupported(e)) error.Refused else renameFailure(e),
+    };
+}
+
+/// `renameNoReplace` through a route: std's rename that never replaces.
+fn renamePreserveRouted(route: *const Route, old_dir: Handle, old: []const u8, new_dir: Handle, new: []const u8) (RenameError || Refused || error{AlreadyExists})!void {
+    return dirOf(old_dir).renamePreserve(old, dirOf(new_dir), new, route.io) catch |err| switch (err) {
+        error.PathAlreadyExists => error.AlreadyExists,
+        error.OperationUnsupported => error.Refused,
+        else => |e| e,
     };
 }
 
@@ -483,12 +589,24 @@ fn linkatRaw(old_dir: posix.fd_t, old: [*:0]const u8, new_dir: posix.fd_t, new: 
 pub fn link(io: Io, old_dir: Handle, old: []const u8, new_dir: Handle, new: []const u8) (RenameError || Refused || error{AlreadyExists})!void {
     const old_z = try posix.toPosixPath(old);
     const new_z = try posix.toPosixPath(new);
-    const e = try retrying(io, .link, new, linkatRaw, .{ old_dir, &old_z, new_dir, &new_z });
+    const e = switch (try retrying(io, .link, new, linkatRaw, .{ old_dir, &old_z, new_dir, &new_z })) {
+        .code => |c| c,
+        .route => |route| return linkRouted(route, old_dir, old, new_dir, new),
+    };
     return switch (e) {
         .SUCCESS => {},
         .EXIST => error.AlreadyExists,
         .PERM => error.Refused,
         else => if (isNotSupported(e)) error.Refused else renameFailure(e),
+    };
+}
+
+/// `link` through a route: std's hard link.
+fn linkRouted(route: *const Route, old_dir: Handle, old: []const u8, new_dir: Handle, new: []const u8) (RenameError || Refused || error{AlreadyExists})!void {
+    return dirOf(old_dir).hardLink(old, dirOf(new_dir), new, route.io, .{}) catch |err| switch (err) {
+        error.PathAlreadyExists => error.AlreadyExists,
+        error.OperationUnsupported => error.Refused,
+        else => |e| e,
     };
 }
 
@@ -503,7 +621,10 @@ fn unlinkatRaw(dir: posix.fd_t, path: [*:0]const u8) if (is_linux) usize else c_
 pub fn unlink(io: Io, dir: Handle, name: []const u8) UnlinkError!void {
     if (is_windows) return unlinkWindows(io, dir, name);
     const path = try posix.toPosixPath(name);
-    const e = try retrying(io, .unlink, name, unlinkatRaw, .{ dir, &path });
+    const e = switch (try retrying(io, .unlink, name, unlinkatRaw, .{ dir, &path })) {
+        .code => |c| c,
+        .route => |route| return dirOf(dir).deleteFile(route.io, name),
+    };
     return switch (e) {
         .SUCCESS => {},
         .NOENT => error.FileNotFound,
@@ -532,7 +653,10 @@ fn mkdiratRaw(dir: posix.fd_t, path: [*:0]const u8, mode: posix.mode_t) if (is_l
 pub fn makeDir(io: Io, dir: Handle, name: []const u8) MakeDirError!void {
     if (is_windows) return makeDirWindows(io, dir, name);
     const path = try posix.toPosixPath(name);
-    const e = try retrying(io, .make_dir, name, mkdiratRaw, .{ dir, &path, 0o777 });
+    const e = switch (try retrying(io, .make_dir, name, mkdiratRaw, .{ dir, &path, 0o777 })) {
+        .code => |c| c,
+        .route => |route| return dirOf(dir).createDir(route.io, name, .default_dir),
+    };
     return switch (e) {
         .SUCCESS => {},
         .EXIST => error.PathAlreadyExists,
@@ -565,7 +689,10 @@ pub fn symLink(io: Io, target: []const u8, dir: Handle, name: []const u8) SymLin
     if (is_windows) return error.OperationUnsupported;
     const target_z = try posix.toPosixPath(target);
     const path = try posix.toPosixPath(name);
-    const e = try retrying(io, .symlink, name, symlinkatRaw, .{ &target_z, dir, &path });
+    const e = switch (try retrying(io, .symlink, name, symlinkatRaw, .{ &target_z, dir, &path })) {
+        .code => |c| c,
+        .route => |route| return dirOf(dir).symLink(route.io, target, name, .{}),
+    };
     return switch (e) {
         .SUCCESS => {},
         .EXIST => error.PathAlreadyExists,
@@ -632,16 +759,31 @@ pub fn statId(io: Io, handle: Handle) StatIdError!Id {
     if (is_windows) return statIdWindows(io, handle);
     if (is_linux) {
         var buf = std.mem.zeroes(linux.Statx);
-        const e = try retrying(io, .stat_id, null, statxRaw, .{ handle, "", linux.AT.EMPTY_PATH, &buf });
+        const e = switch (try retrying(io, .stat_id, null, statxRaw, .{ handle, "", linux.AT.EMPTY_PATH, &buf })) {
+            .code => |c| c,
+            .route => |route| return routedId(try fileOf(handle).stat(route.io)),
+        };
         if (e != .SUCCESS) return statFailure(e);
         if (!buf.mask.INO) return error.Unexpected;
         return .{ .volume = linuxVolume(buf.dev_major, buf.dev_minor), .file = buf.ino };
     }
     var buf = std.mem.zeroes(posix.Stat);
-    const e = try retrying(io, .stat_id, null, fstatRaw, .{ handle, &buf });
+    const e = switch (try retrying(io, .stat_id, null, fstatRaw, .{ handle, &buf })) {
+        .code => |c| c,
+        .route => |route| return routedId(try fileOf(handle).stat(route.io)),
+    };
     if (e != .SUCCESS) return statFailure(e);
     return .{ .volume = .fromRaw(unsigned(buf.dev)), .file = unsigned(buf.ino) };
 }
+
+/// A file's identity through a route: its inode, on the one volume the
+/// route's file system is.
+fn routedId(stat: Io.File.Stat) Id {
+    return .{ .volume = routed_volume, .file = unsigned(stat.inode) };
+}
+
+/// The volume every file reached through a route is on.
+const routed_volume: VolumeId = .fromRaw(0);
 
 fn statFailure(e: posix.E) StatIdError {
     return switch (e) {
@@ -660,14 +802,20 @@ pub fn statIdPath(io: Io, dir: Handle, sub_path: []const u8, follow: bool) StatP
     if (is_linux) {
         var buf = std.mem.zeroes(linux.Statx);
         const flags: u32 = if (follow) 0 else linux.AT.SYMLINK_NOFOLLOW;
-        const e = try retrying(io, .stat_id, sub_path, statxRaw, .{ dir, &path, flags, &buf });
+        const e = switch (try retrying(io, .stat_id, sub_path, statxRaw, .{ dir, &path, flags, &buf })) {
+            .code => |c| c,
+            .route => |route| return routedId(try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+        };
         if (e != .SUCCESS) return statPathFailure(e);
         if (!buf.mask.INO) return error.Unexpected;
         return .{ .volume = linuxVolume(buf.dev_major, buf.dev_minor), .file = buf.ino };
     }
     var buf = std.mem.zeroes(posix.Stat);
     const flags: u32 = if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW;
-    const e = try retrying(io, .stat_id, sub_path, fstatatRaw, .{ dir, &path, &buf, flags });
+    const e = switch (try retrying(io, .stat_id, sub_path, fstatatRaw, .{ dir, &path, &buf, flags })) {
+        .code => |c| c,
+        .route => |route| return routedId(try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+    };
     if (e != .SUCCESS) return statPathFailure(e);
     return .{ .volume = .fromRaw(unsigned(buf.dev)), .file = unsigned(buf.ino) };
 }
@@ -720,13 +868,17 @@ extern "ntdll" fn NtFlushBuffersFileEx(
 ) callconv(.winapi) windows.NTSTATUS;
 
 /// Runs `f` until it is not cancelled by an APC, honouring a cancel
-/// between tries. The hook decides each try first.
-fn retryingNt(io: Io, call: Call, path: ?[]const u8, comptime f: anytype, args: anytype) Io.Cancelable!windows.NTSTATUS {
-    while (true) {
-        try io.checkCancel();
-        const status: windows.NTSTATUS = (try injected(io, call, path)) orelse @call(.auto, f, args);
-        if (status != .CANCELLED) return status;
-    }
+/// between tries. The hook decides each try first; a try it routes is the
+/// caller's to make through the route.
+const retryingNt = retrying;
+
+/// The status of a Windows call that has no route of its own: a routed try
+/// is `routed`.
+fn statusOf(attempt: Attempt, routed: windows.NTSTATUS) windows.NTSTATUS {
+    return switch (attempt) {
+        .code => |c| c,
+        .route => routed,
+    };
 }
 
 fn ntSyncFailure(status: windows.NTSTATUS) Io.File.SyncError {
@@ -755,7 +907,7 @@ fn ntFlushEx(handle: windows.HANDLE, flags: u32) windows.NTSTATUS {
 
 /// `NtFlushBuffersFile`: contents, metadata and the device cache.
 pub fn flushWindows(io: Io, blocking: ?Blocking, handle: windows.HANDLE, call: Call, path: ?[]const u8) SyncError!void {
-    const status = try retryingSync(io, blocking, call, path, ntFlush, .{handle});
+    const status = try retryingSync(io, blocking, call, path, handle, .full, ntFlush, .{handle});
     if (status == .SUCCESS) return;
     if (status == .NOT_SUPPORTED or status == .INVALID_DEVICE_REQUEST) return error.Refused;
     return ntSyncFailure(status);
@@ -764,19 +916,20 @@ pub fn flushWindows(io: Io, blocking: ?Blocking, handle: windows.HANDLE, call: C
 /// `NtFlushBuffersFileEx` with one flag. Refused outside NTFS (and for
 /// `no_sync`, FAT and exFAT): ReFS, redirectors.
 pub fn flushExWindows(io: Io, blocking: ?Blocking, handle: windows.HANDLE, flag: FlushEx, path: ?[]const u8) SyncError!void {
-    const call: Call = switch (flag) {
-        .data_sync_only => .sync_data,
-        .no_sync => .sync_writeout,
+    const call: Call, const kind: seam.Flush = switch (flag) {
+        .data_sync_only => .{ .sync_data, .data },
+        .no_sync => .{ .sync_writeout, .writeout },
     };
-    const status = try retryingSync(io, blocking, call, path, ntFlushEx, .{ handle, @backingInt(flag) });
+    const status = try retryingSync(io, blocking, call, path, handle, kind, ntFlushEx, .{ handle, @backingInt(flag) });
     if (status == .SUCCESS) return;
     if (isRefusalNt(status)) return error.Refused;
     return ntSyncFailure(status);
 }
 
 fn closeWindows(io: Io, handle: windows.HANDLE, path: ?[]const u8) Io.File.SyncError!void {
-    _ = injected(io, .close, path) catch null;
-    _ = windows.ntdll.NtClose(handle);
+    // Whatever the hook says, the handle goes, exactly once.
+    _ = decide(io, .close, path) catch .system;
+    closeRouted(io, handle);
 }
 
 /// A name as NT wants it relative to `root`: WTF-16, slashes turned round.
@@ -822,12 +975,15 @@ pub fn openDirWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, flush_
         } },
     };
     var handle: windows.HANDLE = undefined;
-    const status = try retryingNt(io, .open_dir, sub_path, ntCreate, .{
+    const status = switch (try retryingNt(io, .open_dir, sub_path, ntCreate, .{
         &handle,                                                                  access,
         &attr,                                                                    windows.FILE.ATTRIBUTE{ .NORMAL = true },
         windows.FILE.SHARE.VALID_FLAGS,                                           windows.FILE.CREATE_DISPOSITION.OPEN,
         windows.FILE.MODE{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
-    });
+    })) {
+        .code => |c| c,
+        .route => |route| return (try dirOf(root).openDir(route.io, if (sub_path.len == 0) "." else sub_path, .{})).handle,
+    };
     return switch (status) {
         .SUCCESS => handle,
         .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => error.FileNotFound,
@@ -850,12 +1006,15 @@ fn makeDirWindows(io: Io, root: windows.HANDLE, name: []const u8) MakeDirError!v
         .SPECIFIC = .{ .FILE_DIRECTORY = .{ .LIST = true, .READ_ATTRIBUTES = true } },
     };
     var handle: windows.HANDLE = undefined;
-    const status = try retryingNt(io, .make_dir, name, ntCreate, .{
+    const status = switch (try retryingNt(io, .make_dir, name, ntCreate, .{
         &handle,                                                                  access,
         &attr,                                                                    windows.FILE.ATTRIBUTE{ .NORMAL = true },
         windows.FILE.SHARE.VALID_FLAGS,                                           windows.FILE.CREATE_DISPOSITION.CREATE,
         windows.FILE.MODE{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
-    });
+    })) {
+        .code => |c| c,
+        .route => |route| return dirOf(root).createDir(route.io, name, .default_dir),
+    };
     switch (status) {
         .SUCCESS => release(io, handle),
         .OBJECT_NAME_COLLISION => return error.PathAlreadyExists,
@@ -931,12 +1090,15 @@ fn openAttributes(io: Io, root: windows.HANDLE, name: []const u8) OpenFileError!
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true, .WRITE_ATTRIBUTES = true } },
     };
     var handle: windows.HANDLE = undefined;
-    const status = try retryingNt(io, .open_file, name, ntCreate, .{
+    const status = switch (try retryingNt(io, .open_file, name, ntCreate, .{
         &handle,                                                                                                  access,
         &attr,                                                                                                    windows.FILE.ATTRIBUTE{ .NORMAL = true },
         windows.FILE.SHARE.VALID_FLAGS,                                                                           windows.FILE.CREATE_DISPOSITION.OPEN,
         windows.FILE.MODE{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true },
-    });
+    })) {
+        .code => |c| c,
+        .route => |route| return (try dirOf(root).openFile(route.io, name, .{ .path_only = true, .follow_symlinks = false })).handle,
+    };
     if (status != .SUCCESS) return openFailureNt(status);
     return handle;
 }
@@ -958,7 +1120,13 @@ fn setAttributes(io: Io, handle: windows.HANDLE, attributes: windows.FILE.ATTRIB
     };
     // No attributes at all is spelled NORMAL.
     if (@as(u32, @bitCast(attributes)) == 0) info.FileAttributes = .{ .NORMAL = true };
-    return retryingNt(io, .set_mode, null, ntSetInfo, .{ handle, std.mem.asBytes(&info), .Basic });
+    return switch (try retryingNt(io, .set_mode, null, ntSetInfo, .{ handle, std.mem.asBytes(&info), .Basic })) {
+        .code => |c| c,
+        .route => |route| {
+            fileOf(handle).setPermissions(route.io, windowsPermissions(attributes.READONLY)) catch return .ACCESS_DENIED;
+            return .SUCCESS;
+        },
+    };
 }
 
 fn openByName(io: Io, root: windows.HANDLE, sub_path: []const u8, purpose: OpenFor) OpenFileError!windows.HANDLE {
@@ -972,12 +1140,21 @@ fn openByName(io: Io, root: windows.HANDLE, sub_path: []const u8, purpose: OpenF
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true } },
     };
     var handle: windows.HANDLE = undefined;
-    const status = try retryingNt(io, .open_file, sub_path, ntCreate, .{
+    const status = switch (try retryingNt(io, .open_file, sub_path, ntCreate, .{
         &handle,                                                                                                                          access,
         &attr,                                                                                                                            windows.FILE.ATTRIBUTE{ .NORMAL = true },
         windows.FILE.SHARE.VALID_FLAGS,                                                                                                   windows.FILE.CREATE_DISPOSITION.OPEN,
         windows.FILE.MODE{ .NON_DIRECTORY_FILE = purpose == .sync, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = purpose != .sync },
-    });
+    })) {
+        .code => |c| c,
+        // A routed sync needs no write access, and a routed rename or
+        // delete goes by name: a handle on the file is all either needs.
+        .route => |route| return (try dirOf(root).openFile(route.io, sub_path, .{
+            .allow_directory = purpose != .sync,
+            .path_only = purpose != .sync,
+            .follow_symlinks = purpose == .sync,
+        })).handle,
+    };
     return switch (status) {
         .SUCCESS => handle,
         else => openFailureNt(status),
@@ -1012,12 +1189,15 @@ fn createTempWindows(io: Io, root: windows.HANDLE, name: []const u8, read: bool)
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true, .WRITE_ATTRIBUTES = true } },
     };
     var handle: windows.HANDLE = undefined;
-    const status = try retryingNt(io, .create_temp, name, ntCreate, .{
+    const status = switch (try retryingNt(io, .create_temp, name, ntCreate, .{
         &handle,                                                                      access,
         &attr,                                                                        windows.FILE.ATTRIBUTE{ .NORMAL = true },
         windows.FILE.SHARE{ .READ = true, .DELETE = true },                           windows.FILE.CREATE_DISPOSITION.CREATE,
         windows.FILE.MODE{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
-    });
+    })) {
+        .code => |c| c,
+        .route => |route| return createTempRouted(route, root, name, .default_file, read),
+    };
     return switch (status) {
         .SUCCESS => handle,
         // The name lingers while another process holds the deleted file.
@@ -1035,12 +1215,20 @@ fn setReadOnlyWindows(io: Io, handle: windows.HANDLE, read_only: bool) Io.File.S
         .ChangeTime = 0,
         .FileAttributes = .{ .READONLY = true },
     };
-    const status = try retryingNt(io, .set_mode, null, ntSetInfo, .{ handle, std.mem.asBytes(&info), .Basic });
+    const status = switch (try retryingNt(io, .set_mode, null, ntSetInfo, .{ handle, std.mem.asBytes(&info), .Basic })) {
+        .code => |c| c,
+        .route => |route| return fileOf(handle).setPermissions(route.io, windowsPermissions(true)),
+    };
     return switch (status) {
         .SUCCESS => {},
         .ACCESS_DENIED => error.AccessDenied,
         else => windows.unexpectedStatus(status),
     };
+}
+
+/// Windows permissions are attributes: read-only, or not.
+fn windowsPermissions(read_only: bool) Io.File.Permissions {
+    return @fromBackingInt(@as(u32, @intFromBool(read_only))); // FILE_ATTRIBUTE_READONLY
 }
 
 fn ntSetInfo(handle: windows.HANDLE, info: []u8, class: windows.FILE.INFORMATION_CLASS) windows.NTSTATUS {
@@ -1051,12 +1239,13 @@ fn ntSetInfo(handle: windows.HANDLE, info: []u8, class: windows.FILE.INFORMATION
 /// How a Windows rename by handle ended.
 pub const RenameOutcome = enum { renamed, collision, denied, sharing };
 
-/// Rename the open file `handle` to `name` in `root`, by handle:
-/// `FileRenameInformationEx` with POSIX semantics, falling back to
-/// `FileRenameInformation` where the filesystem or the OS refuses it.
-/// `denied` and `sharing` are contention a retry may outlast: NTFS reports
-/// "the target is open" as access denied.
-pub fn renameByHandle(io: Io, handle: windows.HANDLE, root: windows.HANDLE, name: []const u8, replace: bool) RenameError!RenameOutcome {
+/// Rename the open file `handle`, named `from` in `from_dir`, to `name` in
+/// `root`, by handle: `FileRenameInformationEx` with POSIX semantics,
+/// falling back to `FileRenameInformation` where the filesystem or the OS
+/// refuses it. `denied` and `sharing` are contention a retry may outlast:
+/// NTFS reports "the target is open" as access denied. A route has no
+/// rename by handle, so it renames by `from`'s name.
+pub fn renameByHandle(io: Io, handle: windows.HANDLE, from_dir: windows.HANDLE, from: []const u8, root: windows.HANDLE, name: []const u8, replace: bool) RenameError!RenameOutcome {
     const space = try ntName(root, name);
     const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
     var info: windows.FILE.RENAME_INFORMATION = .init(.{
@@ -1064,14 +1253,17 @@ pub fn renameByHandle(io: Io, handle: windows.HANDLE, root: windows.HANDLE, name
         .RootDirectory = if (absolute) null else root,
         .FileName = space.span(),
     });
-    var status = try retryingNt(io, .win_rename_ex, name, ntSetInfo, .{ handle, info.toBuffer(), .RenameEx });
+    var status = switch (try retryingNt(io, .win_rename_ex, name, ntSetInfo, .{ handle, info.toBuffer(), .RenameEx })) {
+        .code => |c| c,
+        .route => |route| return renameRouted(route, from_dir, from, root, name, replace),
+    };
     if (status == .INVALID_PARAMETER or status == .INVALID_INFO_CLASS or status == .NOT_SUPPORTED) {
         info.Flags = .{ .REPLACE_IF_EXISTS = replace };
-        status = try retryingNt(io, .rename, name, ntSetInfo, .{ handle, info.toBuffer(), .Rename });
+        status = statusOf(try retryingNt(io, .rename, name, ntSetInfo, .{ handle, info.toBuffer(), .Rename }), .NOT_SUPPORTED);
         // The legacy rename will not replace a read-only target: clear the
         // attribute once and rename again.
         if (status == .ACCESS_DENIED and replace and clearReadOnly(io, root, name)) {
-            status = try retryingNt(io, .rename, name, ntSetInfo, .{ handle, info.toBuffer(), .Rename });
+            status = statusOf(try retryingNt(io, .rename, name, ntSetInfo, .{ handle, info.toBuffer(), .Rename }), .NOT_SUPPORTED);
         }
     }
     return switch (status) {
@@ -1091,18 +1283,42 @@ pub fn renameByHandle(io: Io, handle: windows.HANDLE, root: windows.HANDLE, name
     };
 }
 
-/// Delete the open file `handle`: `FileDispositionInformationEx` with
-/// POSIX semantics, so the name goes even while a scanner holds the file.
-pub fn dispose(io: Io, handle: windows.HANDLE, path: ?[]const u8) UnlinkError!void {
+/// A Windows rename by handle, made through a route by name: the outcomes
+/// `renameByHandle` reports, from std's errors.
+fn renameRouted(route: *const Route, from_dir: windows.HANDLE, from: []const u8, root: windows.HANDLE, name: []const u8, replace: bool) RenameError!RenameOutcome {
+    const renamed = if (replace)
+        dirOf(from_dir).rename(from, dirOf(root), name, route.io)
+    else
+        dirOf(from_dir).renamePreserve(from, dirOf(root), name, route.io) catch |err| switch (err) {
+            error.PathAlreadyExists => return .collision,
+            error.OperationUnsupported => return error.Unexpected,
+            else => |e| e,
+        };
+    renamed catch |err| switch (err) {
+        error.AccessDenied => return .denied,
+        error.FileBusy => return .sharing,
+        else => |e| return e,
+    };
+    return .renamed;
+}
+
+/// Delete the open file `handle`, named `name` in `dir`:
+/// `FileDispositionInformationEx` with POSIX semantics, so the name goes
+/// even while a scanner holds the file. A route has no delete by handle, so
+/// it deletes by name.
+pub fn dispose(io: Io, handle: windows.HANDLE, dir: windows.HANDLE, name: []const u8) UnlinkError!void {
     var flags: windows.FILE.DISPOSITION.INFORMATION.EX = .{ .Flags = .{
         .DELETE = true,
         .POSIX_SEMANTICS = true,
         .IGNORE_READONLY_ATTRIBUTE = true,
     } };
-    var status = try retryingNt(io, .dispose, path, ntSetInfo, .{ handle, std.mem.asBytes(&flags), .DispositionEx });
+    var status = switch (try retryingNt(io, .dispose, name, ntSetInfo, .{ handle, std.mem.asBytes(&flags), .DispositionEx })) {
+        .code => |c| c,
+        .route => |route| return dirOf(dir).deleteFile(route.io, name),
+    };
     if (status == .INVALID_PARAMETER or status == .INVALID_INFO_CLASS or status == .NOT_SUPPORTED) {
         var legacy: windows.FILE.DISPOSITION.INFORMATION = .{ .DeleteFile = .TRUE };
-        status = try retryingNt(io, .dispose, path, ntSetInfo, .{ handle, std.mem.asBytes(&legacy), .Disposition });
+        status = statusOf(try retryingNt(io, .dispose, name, ntSetInfo, .{ handle, std.mem.asBytes(&legacy), .Disposition }), .NOT_SUPPORTED);
     }
     return switch (status) {
         .SUCCESS => {},
@@ -1131,7 +1347,7 @@ fn unlinkWindows(io: Io, root: windows.HANDLE, name: []const u8) UnlinkError!voi
         else => error.Unexpected,
     };
     defer release(io, handle);
-    return dispose(io, handle, name);
+    return dispose(io, handle, root, name);
 }
 
 /// `FILE_ID_INFORMATION`: the volume's 64-bit serial number and the file's
@@ -1153,7 +1369,10 @@ fn ntQueryVolume(handle: windows.HANDLE, buf: []u8) windows.NTSTATUS {
 
 fn statIdWindows(io: Io, handle: windows.HANDLE) StatIdError!Id {
     var id: FileIdInformation = undefined;
-    const status = try retryingNt(io, .stat_id, null, ntQueryInfo, .{ handle, std.mem.asBytes(&id), .Id });
+    const status = switch (try retryingNt(io, .stat_id, null, ntQueryInfo, .{ handle, std.mem.asBytes(&id), .Id })) {
+        .code => |c| c,
+        .route => |route| return routedId(try fileOf(handle).stat(route.io)),
+    };
     switch (status) {
         .SUCCESS => return .{
             .volume = .fromRaw(id.VolumeSerialNumber),
@@ -1196,12 +1415,18 @@ fn statIdPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow:
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true } },
     };
     var handle: windows.HANDLE = undefined;
-    const status = try retryingNt(io, .open_file, sub_path, ntCreate, .{
+    const status = switch (try retryingNt(io, .open_file, sub_path, ntCreate, .{
         &handle,                                                                         access,
         &attr,                                                                           windows.FILE.ATTRIBUTE{ .NORMAL = true },
         windows.FILE.SHARE.VALID_FLAGS,                                                  windows.FILE.CREATE_DISPOSITION.OPEN,
         windows.FILE.MODE{ .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = !follow },
-    });
+    })) {
+        .code => |c| c,
+        .route => |route| blk: {
+            handle = (try dirOf(root).openFile(route.io, sub_path, .{ .path_only = true, .follow_symlinks = follow })).handle;
+            break :blk .SUCCESS;
+        },
+    };
     if (status != .SUCCESS) return openFailureNt(status);
     defer release(io, handle);
     return statIdWindows(io, handle);
@@ -1211,11 +1436,15 @@ fn statIdPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow:
 /// (`\Device\HarddiskVolumeN`), which tells apart two volumes that share a
 /// serial (cloned VHDs and VM images keep it).
 pub fn volumeName(io: Io, handle: windows.HANDLE) StatIdError!DeviceId {
-    if (intercept(io, .volume_name, null)) |r| switch (r) {
-        .value => |v| return .fromRaw(v),
-        .canceled => return error.Canceled,
-        .code => |c| if (c != success) return windows.unexpectedStatus(c),
-    };
+    if (seam.hookOf(io)) |hook| {
+        if (hook.call(hook.ctx, .volume_name, null)) |r| switch (r) {
+            .value => |v| return .fromRaw(v),
+            .canceled => return error.Canceled,
+            .code => |c| if (c != success) return windows.unexpectedStatus(c),
+        };
+        // A route's file system is one volume, with no name to hash.
+        if (hook.route != null) return .fromRaw(0);
+    }
     var buf: extern struct { len: u32, name: [60]u16 } = undefined;
     const status = ntQueryInfo(handle, std.mem.asBytes(&buf), .VolumeName);
     switch (status) {
@@ -1250,7 +1479,7 @@ test "blocking hook captures Darwin errno before leaving its worker" {
     };
     const h = try test_seam.Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
-    const code = try retryingSync(h.io(), .{ .run = Adapter.run }, .sync_full, null, darwinFcntl, .{ @as(posix.fd_t, -1), darwin_full_fsync });
+    const code = try retryingSync(h.io(), .{ .run = Adapter.run }, .sync_full, null, -1, .full, darwinFcntl, .{ @as(posix.fd_t, -1), darwin_full_fsync });
     try testing.expectEqual(posix.E.BADF, code);
     try testing.expectEqual(1, h.syncs());
 }
