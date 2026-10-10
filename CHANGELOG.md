@@ -32,6 +32,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   longer `std` only. A consumer's build fetches aegis with airlock and wires
   nothing.
 
+### Added
+
+- `airlock.testing` takes a `Gate`: `Options.gate` stands a task still at the first
+  raw call of a kind at a name, until the test releases it, for a test that
+  races something else against one step of a publish. `Seam.reopen` arms it again.
+
 ### Fixed
 
 - On macOS a publish whose file no sync reached (every sync refused) reports
