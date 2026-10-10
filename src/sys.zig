@@ -264,7 +264,7 @@ fn closeQuietly(handle: Handle) void {
 /// `close` where its answer changes nothing: a handle being dropped after
 /// another failure, or one airlock only read through.
 pub fn release(io: Io, handle: Handle) void {
-    // ziglint-ignore: Z026 a handle dropped after another failure; that failure is the one the caller gets
+    // glint-ignore: Z026 -- a handle dropped after another failure; that failure is the one the caller gets
     close(io, handle, null) catch {};
 }
 

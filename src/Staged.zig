@@ -505,7 +505,7 @@ pub fn markFailed(p: *Staged, io: Io, cause: anyerror) void {
 /// handle, so the name goes even while a scanner holds the file.
 fn removeTemp(p: *Staged, io: Io) void {
     if (is_windows and p.file_open) {
-        // ziglint-ignore: Z026 cleanup after a failure the caller already gets
+        // glint-ignore: Z026 -- cleanup after a failure the caller already gets
         sys.dispose(io, p.file.handle, p.tempName()) catch {};
         sys.release(io, p.file.handle);
         p.file_open = false;
@@ -516,7 +516,7 @@ fn removeTemp(p: *Staged, io: Io) void {
         p.file_open = false;
     }
     if (p.parent_open) {
-        // ziglint-ignore: Z026 cleanup after a failure the caller already gets
+        // glint-ignore: Z026 -- cleanup after a failure the caller already gets
         sys.unlink(io, p.parent.handle, p.tempName()) catch {};
         return;
     }
@@ -524,7 +524,7 @@ fn removeTemp(p: *Staged, io: Io) void {
     var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const parent = p.parentSubPath() orelse "";
     const path = if (parent.len == 0) p.tempName() else std.mem.print(&buffer, "{s}/{s}", .{ parent, p.tempName() }) catch return;
-    // ziglint-ignore: Z026 cleanup after a failure the caller already gets
+    // glint-ignore: Z026 -- cleanup after a failure the caller already gets
     sys.unlink(io, p.root.handle, path) catch {};
 }
 
@@ -630,7 +630,7 @@ fn linkFallback(p: *Staged, io: Io, publish: Publish) CommitError!Renamed {
     };
     // The new name holds the file; the temp's name is a leftover
     // `pruneTemps` removes if this fails.
-    // ziglint-ignore: Z026 the published name holds the file; a leftover temp name is prunable by its prefix
+    // glint-ignore: Z026 -- the published name holds the file; a leftover temp name is prunable by its prefix
     sys.unlink(io, parent, p.tempName()) catch {};
     return .renamed;
 }

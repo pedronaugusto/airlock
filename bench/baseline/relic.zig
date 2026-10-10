@@ -35,6 +35,7 @@ pub fn batch(io: Io, dir: Io.Dir, files: []const Io.File) !void {
     const file = try dir.createFile(io, name, .{ .exclusive = true });
     defer {
         file.close(io);
+        // glint-ignore: Z026 -- the entry is scratch the row removes; a leftover is in the run directory
         dir.deleteFile(io, name) catch {};
     }
     try file.sync(io);
@@ -49,6 +50,7 @@ pub fn atomicWrite(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8)
     var file = try dir.createFile(io, temp, .{ .exclusive = true });
     errdefer {
         file.close(io);
+        // glint-ignore: Z026 -- the entry is scratch the row removes; a leftover is in the run directory
         dir.deleteFile(io, temp) catch {};
     }
     try file.writePositionalAll(io, bytes, 0);

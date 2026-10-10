@@ -315,13 +315,13 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
         // refuses the sync leaves no such order, so it is refused, or
         // reported, before the rename.
         reached = linkSync(fallback, io, options.sync.blocking, parent.dir) catch |err| {
-            // ziglint-ignore: Z026 cleanup after a failure the caller already gets
+            // glint-ignore: Z026 -- cleanup after a failure the caller already gets
             sys.unlink(io, parent.dir.handle, temp) catch {};
             return err;
         };
     }
     sys.rename(io, parent.dir.handle, temp, parent.dir.handle, base) catch |err| {
-        // ziglint-ignore: Z026 cleanup after a failure the caller already gets
+        // glint-ignore: Z026 -- cleanup after a failure the caller already gets
         sys.unlink(io, parent.dir.handle, temp) catch {};
         return err;
     };

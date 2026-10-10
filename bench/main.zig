@@ -204,6 +204,7 @@ pub fn main(init: std.process.Init) !void {
     var scratch_buffer: [64]u8 = undefined;
     const scratch = try std.mem.print(&scratch_buffer, "airlock-bench-{x}", .{&random});
     try parent.createDir(io, scratch, .default_dir);
+    // glint-ignore: Z026 -- scratch removal after the row; a leftover is in the run directory
     defer parent.deleteTree(io, scratch) catch {};
     var root = try parent.openDir(io, scratch, .{});
     defer root.close(io);
@@ -236,6 +237,7 @@ pub fn main(init: std.process.Init) !void {
         const row = full;
         try root.createDir(io, "row", .default_dir);
         ctx.dir = try root.openDir(io, "row", .{ .iterate = true });
+        // glint-ignore: Z026 -- scratch removal after the row; a leftover is in the run directory
         defer root.deleteTree(io, "row") catch {};
         defer ctx.dir.close(io);
         ctx.file = try ctx.dir.createFile(io, "probe", .{ .read = true });
@@ -275,7 +277,7 @@ pub fn main(init: std.process.Init) !void {
             else => Tally{ .f = 1, .raw_calls = 1 },
         } else try tallyRow(&ctx, &row);
         const fmt = "{{\"row\":\"{s}\",\"ops\":{d},\"p50_us\":{d:.1},\"p99_us\":{d:.1},\"per_second\":{d:.1},\"W\":{d},\"B\":{d},\"F\":{d},\"raw_calls\":{d},\"counts_available\":{s}}}\n";
-        try stdout.interface.print(fmt, .{ row.name, row.ops, micros(samples[samples.len / 2]), micros(samples[(samples.len * 99) / 100]), per_second, tally.w, tally.b, tally.f, tally.raw_calls, if (std.mem.indexOf(u8, row.name, "relic") != null or std.mem.eql(u8, row.name, "ab/append/flush-each")) "false" else "true" });
+        try stdout.interface.print(fmt, .{ row.name, row.ops, micros(samples[samples.len / 2]), micros(samples[(samples.len * 99) / 100]), per_second, tally.w, tally.b, tally.f, tally.raw_calls, if (std.mem.find(u8, row.name, "relic") != null or std.mem.eql(u8, row.name, "ab/append/flush-each")) "false" else "true" });
         try stdout.interface.flush();
     }
     if (std.mem.startsWith(u8, "counts/", prefix) or std.mem.startsWith(u8, prefix, "counts/")) {
@@ -403,6 +405,7 @@ fn symLinkRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
 fn createNewRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     _ = row;
     const name = ctx.names[i % ctx.names.len][0..7];
+    // glint-ignore: Z026 -- scratch removal after the row; a leftover is in the run directory
     ctx.dir.deleteFile(ctx.io, name) catch {};
     _ = try airlock.writeFile(ctx.io, ctx.dir, name, &ctx.page, .{ .commit = .{ .publish = .create_new } });
 }
@@ -480,7 +483,7 @@ const Tally = struct { w: u32 = 0, b: u32 = 0, f: u32 = 0, raw_calls: u32 = 0 };
 
 /// Count separately from the timer; fault instrumentation is never timed.
 fn tallyRow(ctx: *Context, row: *const Row) !Tally {
-    if (std.mem.indexOf(u8, row.name, "relic") != null or std.mem.eql(u8, row.name, "ab/append/flush-each")) return .{};
+    if (std.mem.find(u8, row.name, "relic") != null or std.mem.eql(u8, row.name, "ab/append/flush-each")) return .{};
     const h = try seam.Seam.create(ctx.gpa, ctx.io, .{});
     defer h.destroy();
     var counted = ctx.*;
