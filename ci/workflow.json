@@ -1,4 +1,6 @@
 {
+  "land": true,
+  "attest": true,
   "package": "airlock",
   "compile_step": "check",
   "targets": [
