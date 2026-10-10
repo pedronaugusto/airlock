@@ -560,3 +560,32 @@ test "Windows: the legacy rename replaces a read-only file without waiting out t
     try expectContents(&s, "a", "new");
     try testing.expectEqual(@as(u32, 2), h.count(.rename));
 }
+
+test "a gate stands a task at the first create of a name until the test lets it go" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    var reached: Io.Event = .unset;
+    var release: Io.Event = .unset;
+    const h = try Seam.create(testing.allocator, testing.io, .{ .gate = .{ .call = .create_temp, .suffix = "main.lock", .reached = &reached, .release = &release } });
+    defer h.destroy();
+    const Task = struct {
+        fn run(io: Io, dir: Io.Dir) !void {
+            // Another name passes the gate; the lock stands at it.
+            var other = try airlock.create(io, dir, "other", .{ .temp = .{ .exact = "other.lock" } });
+            other.discard(io);
+            var lock = try airlock.create(io, dir, "main", .{ .temp = .{ .exact = "main.lock" } });
+            defer lock.discard(io);
+            try lock.file().writePositionalAll(io, "held\n", 0);
+        }
+    };
+    var task = try testing.io.concurrent(Task.run, .{ h.io(), s.dir() });
+    defer _ = task.cancel(testing.io) catch {};
+    try reached.waitTimeout(testing.io, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(20) } });
+    try testing.expect(s.read("main.lock", &.{}) == null);
+    release.set(testing.io);
+    try task.await(testing.io);
+    // It is the first matching call that waits: a second passes.
+    var again = try airlock.create(h.io(), s.dir(), "main", .{ .temp = .{ .exact = "main.lock" } });
+    again.discard(h.io());
+}

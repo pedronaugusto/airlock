@@ -57,10 +57,23 @@ pub fn always(call: Call, code: Code) Plan.Entry {
     return .{ .at = .{ .nth = .{ .call = call, .n = 1 } }, .fault = .{ .code = code }, .times = 0 };
 }
 
+/// A place the test stands a task at: the first `call` made at a name that
+/// ends with `suffix` sets `reached` and waits for `release`, so the test can
+/// do something else, collect garbage or race a second process, while one
+/// task is between two steps of a publish. Later calls pass.
+pub const Gate = struct {
+    call: Call,
+    suffix: []const u8 = "",
+    reached: *Io.Event,
+    release: *Io.Event,
+};
+
 pub const Options = struct {
     /// Faults by airlock call. Borrowed for the seam's life; at most 16
     /// entries.
     plan: []const Plan.Entry = &.{},
+    /// A task to stand still at one call.
+    gate: ?Gate = null,
     trace: shakedown.IoTrace.Mode = .all,
     /// The seed of `io.random`, so temp names repeat from run to run.
     seed: u64 = 1,
@@ -80,6 +93,8 @@ pub const Seam = struct {
     /// Whether `fio` is the seam's own (`everyFault` hands one in).
     owns_fio: bool,
     plan: Plan,
+    gate: ?Gate = null,
+    gate_taken: std.atomic.Value(bool) = .init(false),
     counters: [16]u32 = undefined,
     fired: [32]Plan.Fired = undefined,
     /// Raw calls run on several tasks at once (a batch's concurrent
@@ -126,6 +141,7 @@ pub const Seam = struct {
             .hooked = undefined,
         };
         if (options.sample_descriptors) s.peak_descriptors = 0;
+        s.gate = options.gate;
         s.setPlan(options.plan);
         s.hook = .{ .ctx = s, .call = decide, .base = fio.io() };
         s.hooked = .init(fio.io(), .{ .hook = &s.hook });
@@ -141,6 +157,12 @@ pub const Seam = struct {
     /// The `Io` to hand the code under test.
     pub fn io(s: *Seam) Io {
         return s.hooked.io();
+    }
+
+    /// Lets a task standing at the gate go, as `Gate.release` does, and opens
+    /// the gate again for the next matching call.
+    pub fn reopen(s: *Seam) void {
+        s.gate_taken.store(false, .release);
     }
 
     /// Replaces the plan, its counts starting again: for faults planned
@@ -219,6 +241,10 @@ pub const Seam = struct {
     fn decide(ctx: *anyopaque, call: Call, path: ?[]const u8) ?Result {
         const s: *Seam = @ptrCast(@alignCast(ctx)); // safe: `over` makes the hook with its own seam as ctx
         if (s.peak_descriptors) |peak| s.peak_descriptors = @max(peak, openDescriptors());
+        if (s.gate) |gate| if (gate.call == call and std.mem.endsWith(u8, path orelse "", gate.suffix) and !s.gate_taken.swap(true, .acq_rel)) {
+            gate.reached.set(s.hook.base);
+            gate.release.wait(s.hook.base) catch return .canceled;
+        };
         const begun = s.fio.beginForeign(Call, call, path);
         var result: ?Result = null;
         if (begun.fault) |fault| switch (fault) {

@@ -286,6 +286,11 @@ try std.testing.expectError(error.SyncFailed, log.write(hooked.io(), record)); /
 try std.testing.expectEqual(2, hooked.syncs());
 ```
 
+A test that must race something against one step of a publish stands the task
+still there with `Options.gate`: the first call of a kind at a name that ends with
+a suffix sets one `Io.Event` and waits for another, so the test can run a garbage
+collector, or a second process, while a lock is about to be taken, and let it go.
+
 [CI](.github/workflows/ci.yml) runs the source checks and the Linux Debug suite
 on every push it is asked for, and before a merge the Debug suite on macOS and
 Windows as well. `zig build check` compiles the local tests and example; CI cross-compiles for `x86_64-linux-gnu`,
