@@ -57,7 +57,7 @@ const Operation = struct {
             for (s.dests()) |d| try fs.write(d, "old");
         }
         if (s.kind == .rename) try fs.write("src", "new");
-        s.h = try Seam.create(testing.allocator, sim.io(), .{ .fs = fs, .plan = s.plan, .trace = .off });
+        s.h = try Seam.create(testing.allocator, sim.io(), .{ .plan = s.plan, .trace = .off });
         s.reached = .none;
         s.returned = false;
         s.ready = s.kind != .sym_link;
@@ -131,13 +131,22 @@ const Operation = struct {
         s.reached = try batch.commit(io, .{ .parallel = 1, .barrier = s.barrier });
     }
 
+    /// What a program does after the crash: removes the temps it left,
+    /// through a seam over the recovery's own simulation.
     pub fn recover(s: *Operation, io: Io) !void {
         _ = s;
-        _ = io;
+        const h = try Seam.create(testing.allocator, io, .{ .trace = .off });
+        defer h.destroy();
+        for ([_][]const u8{ ".", "sub" }) |path| {
+            var dir = try Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+            defer dir.close(io);
+            _ = try airlock.pruneTemps(h.io(), dir, ".", .{ .older_than = .zero });
+        }
     }
 
     /// What the disk came back with, against what the run promised.
     pub fn check(s: *Operation, io: Io) !void {
+        try expectNoTemps(io);
         if (!s.ready) return;
         const durable = s.returned and s.reached.atLeast(.data);
         const cwd = Io.Dir.cwd();
@@ -170,6 +179,18 @@ const Operation = struct {
         }
     }
 };
+
+/// No temp survives the recovery's prune.
+fn expectNoTemps(io: Io) !void {
+    for ([_][]const u8{ ".", "sub" }) |path| {
+        var dir = try Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |entry| {
+            if (std.mem.startsWith(u8, entry.name, ".")) return error.TempLeft;
+        }
+    }
+}
 
 fn expectContents(io: Io, name: []const u8, expected: []const u8) !void {
     var buffer: [16]u8 = undefined;
