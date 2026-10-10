@@ -34,6 +34,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- airlock runs inside a shakedown `Sim`. `airlock.testing`'s `Options.fs`
+  routes every raw call into the simulation: opens, creates, renames, links,
+  removes, stats and closes through the `Io`, and each sync onto
+  `Sim.Fs.flush` at the strength the platform's call has (a writeout, a
+  barrier, a data or a full flush). The hook still decides each call first,
+  one for one with the raw call it stands for, so plans, traces and counts are
+  the same; the calls only stop failing with `EBADF` on simulated handles.
+  The tests run every operation through shakedown's `everyCrash`: a power loss
+  at every step, every state the disk could come back in.
 - `airlock.testing` takes a `Gate`: `Options.gate` stands a task still at the first
   raw call of a kind at a name, until the test releases it, for a test that
   races something else against one step of a publish. `Seam.reopen` arms it again.

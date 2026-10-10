@@ -162,10 +162,18 @@ fn seamModule(b: *std.Build, airlock: *std.Build.Module, shakedown: *std.Build.M
 /// The published `airlock.testing`, made once per build of the package.
 fn testingModule(b: *std.Build, airlock: *std.Build.Module) error{LazyDependencyNeeded}!*std.Build.Module {
     if (b.modules.get("airlock.testing")) |made| return made;
-    const shakedown = try b.dependencyLazy("shakedown", .{ .target = airlock.resolved_target.?, .optimize = airlock.optimize.? });
-    const module = seamModule(b, airlock, shakedown.module("shakedown"));
+    const shakedown = try shakedownModule(b, airlock.resolved_target.?, airlock.optimize.?, airlock.import_table.get("aegis").?);
+    const module = seamModule(b, airlock, shakedown);
     b.modules.put(b.graph.arena, "airlock.testing", module) catch @panic("OOM");
     return module;
+}
+
+/// shakedown, bound to airlock's own aegis, so a build links one aegis.
+fn shakedownModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, aegis: *std.Build.Module) error{LazyDependencyNeeded}!*std.Build.Module {
+    const shakedown = try b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
+    const shakedown_build = b.lazyImport(@This(), "shakedown") orelse return error.LazyDependencyNeeded;
+    shakedown_build.useAegis(shakedown, aegis);
+    return shakedown.module("shakedown");
 }
 
 /// airlock and its seam again, in the mode a benchmark builds in: an
@@ -175,10 +183,10 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     const airlock = airlockModule(b, target, optimize);
     // The tests asked for shakedown first; until it is fetched the build
     // stops before anything is compiled.
-    const shakedown = b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize }) catch
+    const shakedown = shakedownModule(b, target, optimize, airlock.import_table.get("aegis").?) catch
         return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "airlock", .module = airlock }}) catch @panic("OOM");
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "airlock", .module = airlock },
-        .{ .name = "airlock.testing", .module = seamModule(b, airlock, shakedown.module("shakedown")) },
+        .{ .name = "airlock.testing", .module = seamModule(b, airlock, shakedown) },
     }) catch @panic("OOM");
 }

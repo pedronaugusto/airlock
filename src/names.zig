@@ -98,7 +98,7 @@ fn renameWindows(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new:
     defer sys.release(io, handle);
     var backoff: platform.Backoff = .start(io, busy);
     while (true) {
-        const outcome = try sys.renameByHandle(io, handle, new_dir.handle, new, true);
+        const outcome = try sys.renameByHandle(io, handle, old_dir.handle, old, new_dir.handle, new, true);
         switch (outcome) {
             .renamed => return,
             .collision => return error.DirNotEmpty,

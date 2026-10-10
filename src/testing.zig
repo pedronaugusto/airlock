@@ -15,6 +15,13 @@
 //!     try code.under(seam.io());
 //!     try std.testing.expectEqual(1, seam.syncs());
 //!
+//! Over a `Sim` with a file system, `Options.fs` routes airlock's calls
+//! into the simulation: its opens, renames, links, removes and stats go
+//! through the `Io`, its syncs onto `Sim.Fs.flush` at the strength each
+//! one has, so a crash keeps what the platform's calls would keep:
+//!
+//!     const seam = try airlock.testing.Seam.create(gpa, sim.io(), .{ .fs = sim.fs() });
+//!
 //! A project's build gets this module from `airlock`'s build.zig:
 //! `@import("airlock").testing(airlock_dependency)`. Only a build that asks
 //! for it fetches shakedown.
@@ -83,6 +90,11 @@ pub const Options = struct {
     /// POSIX: count this process's open descriptors at every raw call and
     /// keep the most seen in `peak_descriptors`.
     sample_descriptors: bool = false,
+    /// The simulated disk the `Io`'s files are on, when the `Io` is a
+    /// `Sim`'s: airlock's calls are then made through the `Io` under the
+    /// seam's `FaultIo`, and its syncs on this disk, instead of on the
+    /// system. Borrowed for the seam's life.
+    fs: ?*shakedown.Sim.Fs = null,
 };
 
 /// One test's hooked `Io`. Must not move once `io` is called; `create`
@@ -144,6 +156,7 @@ pub const Seam = struct {
         s.gate = options.gate;
         s.setPlan(options.plan);
         s.hook = .{ .ctx = s, .call = decide, .base = fio.io() };
+        if (options.fs) |fs| s.hook.route = .{ .io = fio.base, .ctx = fs, .flush = simulatedFlush };
         s.hooked = .init(fio.io(), .{ .hook = &s.hook });
         return s;
     }
@@ -264,6 +277,25 @@ pub const Seam = struct {
         return result;
     }
 };
+
+/// A routed sync onto the simulated disk, as the code the platform's call
+/// returns for what the disk answered.
+fn simulatedFlush(ctx: *anyopaque, handle: Io.File.Handle, kind: seam.Flush) Code {
+    const fs: *shakedown.Sim.Fs = @ptrCast(@alignCast(ctx)); // safe: `over` makes the route with the options' disk as ctx
+    const simulated: shakedown.Sim.Fs.Flush = switch (kind) {
+        .writeout => .writeout,
+        .barrier => .barrier,
+        .data => .data,
+        .full => .full,
+    };
+    fs.flush(handle, simulated) catch |err| return switch (err) {
+        error.NoSpaceLeft => if (os == .windows) .DISK_FULL else .NOSPC,
+        error.BadHandle => if (os == .windows) .INVALID_HANDLE else .BADF,
+        error.OutOfMemory => if (os == .windows) .NO_MEMORY else .NOMEM,
+        else => io_error,
+    };
+    return .SUCCESS;
+}
 
 /// How many descriptors this process has open (POSIX; 0 elsewhere).
 pub fn openDescriptors() usize {

@@ -12,4 +12,5 @@ test {
     _ = @import("names_test.zig");
     _ = @import("testing/model.zig");
     _ = @import("every_fault_test.zig");
+    _ = @import("crash_test.zig");
 }

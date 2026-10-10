@@ -163,7 +163,9 @@ name as well.
 
 Every raw call goes through one file, `src/sys.zig`, behind a test seam: when
 the `Io` a call is given carries a test's hook, the hook decides the call
-first. Production pays one function-pointer compare per call. The seam is a
+first, and a hook over a simulated file system has the call made there
+instead of on the system. Production pays one function-pointer compare per
+call. The seam is a
 module of its own that only airlock and `airlock.testing` import, so neither
 exports it. Nothing allocates.
 
@@ -248,7 +250,11 @@ no more than a crash model proves, and that no crash state shows a rename after
 a fence without those before it. The model replays a run's calls against each
 platform's documented persistence rules and enumerates every state a crash
 could leave; on macOS it runs with the barrier honoured and dropped, and shows
-the window `barrier = false` closes. A batch's descriptors are counted at every
+the window `barrier = false` closes. The same operations then run inside a
+shakedown `Sim`, their calls routed onto its simulated disk, through
+`everyCrash`: a power loss at every step of each, and every state the disk
+could come back in, each checked old or new and never torn, new in every state
+once the operation returned at `data`, and the fence held. A batch's descriptors are counted at every
 raw call, so the budget above is measured at its peak, and the Windows retry
 deadlines run on shakedown's clock. `zig build bench` times the benchmarks in
 ReleaseFast by hand: each level's sync cost, replaces and batches per level
@@ -284,6 +290,14 @@ defer hooked.destroy();
 try log.write(hooked.io(), record); // the first sync succeeds
 try std.testing.expectError(error.SyncFailed, log.write(hooked.io(), record)); // the second fails
 try std.testing.expectEqual(2, hooked.syncs());
+```
+
+Under a shakedown `Sim`, `Options.fs` routes airlock's calls into the
+simulation: through its `Io`, and each sync onto its disk at the strength the
+platform's call has, so a crash keeps what that call would keep:
+
+```zig
+const hooked = try seam.Seam.create(gpa, sim.io(), .{ .fs = sim.fs() });
 ```
 
 A test that must race something against one step of a publish stands the task

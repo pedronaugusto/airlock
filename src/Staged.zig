@@ -504,9 +504,16 @@ pub fn markFailed(p: *Staged, io: Io, cause: anyerror) void {
 /// Closes the temp if it is open and removes its name. On Windows by
 /// handle, so the name goes even while a scanner holds the file.
 fn removeTemp(p: *Staged, io: Io) void {
+    // Once a batch closed the parent, the temp is named from the caller's
+    // directory.
+    var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const parent = p.parentSubPath() orelse "";
+    const dir = if (p.parent_open) p.parent.handle else p.root.handle;
+    const name: ?[]const u8 = if (p.parent_open or parent.len == 0) p.tempName() else std.mem.print(&buffer, "{s}/{s}", .{ parent, p.tempName() }) catch null;
     if (is_windows and p.file_open) {
+        // By handle: the name is what a hook sees, and a route deletes by.
         // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-        sys.dispose(io, p.file.handle, p.tempName()) catch {};
+        sys.dispose(io, p.file.handle, dir, name orelse p.tempName()) catch {};
         sys.release(io, p.file.handle);
         p.file_open = false;
         return;
@@ -515,17 +522,8 @@ fn removeTemp(p: *Staged, io: Io) void {
         sys.release(io, p.file.handle);
         p.file_open = false;
     }
-    if (p.parent_open) {
-        // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-        sys.unlink(io, p.parent.handle, p.tempName()) catch {};
-        return;
-    }
-    // A batch closed the parent: name the temp from the caller's directory.
-    var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
-    const parent = p.parentSubPath() orelse "";
-    const path = if (parent.len == 0) p.tempName() else std.mem.print(&buffer, "{s}/{s}", .{ parent, p.tempName() }) catch return;
     // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-    sys.unlink(io, p.root.handle, path) catch {};
+    sys.unlink(io, dir, name orelse return) catch {};
 }
 
 fn releaseParent(p: *Staged, io: Io) void {
@@ -638,7 +636,7 @@ fn linkFallback(p: *Staged, io: Io, publish: Publish) CommitError!Renamed {
 fn renameWindows(p: *Staged, io: Io, options: CommitOptions) CommitError!Renamed {
     var backoff: platform.Backoff = .start(io, options.busy_deadline);
     while (true) {
-        const outcome = try sys.renameByHandle(io, p.file.handle, p.parent.handle, p.baseName(), options.publish == .replace);
+        const outcome = try sys.renameByHandle(io, p.file.handle, p.parent.handle, p.tempName(), p.parent.handle, p.baseName(), options.publish == .replace);
         switch (outcome) {
             .renamed => return .renamed,
             .collision => return .taken,
@@ -666,7 +664,7 @@ fn taken(p: *Staged, io: Io, publish: Publish) CommitError!Committed {
 
 fn removeTakenTemp(p: *Staged, io: Io) Io.Dir.DeleteFileError!void {
     if (is_windows) {
-        try sys.dispose(io, p.file.handle, p.tempName());
+        try sys.dispose(io, p.file.handle, p.parent.handle, p.tempName());
         return;
     }
     try sys.unlink(io, p.parent.handle, p.tempName());
