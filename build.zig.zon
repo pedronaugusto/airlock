@@ -21,8 +21,8 @@
             .lazy = true,
         },
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#f2d05ebc81c9a40e2b7f73532c92cb1fd1aa191c",
-            .hash = "shakedown-0.1.0-BR8U4zZeFQDGT9-MxnDGAEtGU0i-W0Vw2Sg9ZoMRyZEt",
+            .url = "git+https://github.com/pedronaugusto/shakedown#d95deb1d8859416f23689440b1af5da3d034860e",
+            .hash = "shakedown-0.1.0-BR8U45NvFQB7Z_VGFcneyHXmB5wYCSM73NQLSpQkx4UB",
             .lazy = true,
         },
         .aegis = .{

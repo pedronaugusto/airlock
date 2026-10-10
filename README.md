@@ -292,12 +292,12 @@ try std.testing.expectError(error.SyncFailed, log.write(hooked.io(), record)); /
 try std.testing.expectEqual(2, hooked.syncs());
 ```
 
-Under a shakedown `Sim`, `Options.fs` routes airlock's calls into the
-simulation: through its `Io`, and each sync onto its disk at the strength the
-platform's call has, so a crash keeps what that call would keep:
+Over a shakedown `Sim`, a seam routes airlock's calls into the simulation:
+through its `Io`, and each sync onto its disk at the strength the platform's
+call has, so a crash keeps what that call would keep:
 
 ```zig
-const hooked = try seam.Seam.create(gpa, sim.io(), .{ .fs = sim.fs() });
+const hooked = try seam.Seam.create(gpa, sim.io(), .{});
 ```
 
 A test that must race something against one step of a publish stands the task

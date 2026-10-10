@@ -34,8 +34,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- airlock runs inside a shakedown `Sim`. `airlock.testing`'s `Options.fs`
-  routes every raw call into the simulation: opens, creates, renames, links,
+- airlock runs inside a shakedown `Sim`. A seam over a simulation's `Io`
+  routes every raw call into it: opens, creates, renames, links,
   removes, stats and closes through the `Io`, and each sync onto
   `Sim.Fs.flush` at the strength the platform's call has (a writeout, a
   barrier, a data or a full flush). The hook still decides each call first,
