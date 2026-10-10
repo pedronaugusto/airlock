@@ -5,11 +5,11 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     //=====================================================================
-    // The module. Pure Zig over `std` and three of aegis's namespaces
-    // (`aegis.id`, `aegis.handle`, `aegis.assert`, std-only themselves):
-    // nothing to link and no build options, so nothing a consumer has to
-    // match. The seam in front of its raw calls is a module of its own that
-    // only airlock and `airlock.testing` import, so neither exports it.
+    // The module. Pure Zig over `std` and aegis (its `id`, `handle` and
+    // `assert` namespaces): nothing to link and no build options, so nothing a
+    // consumer has to match. The seam in front of its raw calls is a module of
+    // its own that only airlock and `airlock.testing` import, so neither
+    // exports it.
     //=====================================================================
 
     const module = airlockModule(b, target, optimize);
@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{.{ .name = "seam", .module = module.import_table.get("seam").? }},
         }),
     });
-    for (aegisImports(b, target, optimize)) |import| tests.root_module.addImport(import.name, import.module);
+    tests.root_module.addImport("aegis", aegisModule(b, target, optimize));
     var needed: error{LazyDependencyNeeded}!void = {};
     if (testingModule(b, module)) |seam| {
         tests.root_module.addImport("airlock.testing", seam);
@@ -134,20 +134,14 @@ fn airlockModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .optimize = optimize,
         .imports = &.{.{ .name = "seam", .module = seam }},
     });
-    for (aegisImports(b, target, optimize)) |import| module.addImport(import.name, import.module);
+    module.addImport("aegis", aegisModule(b, target, optimize));
     return module;
 }
 
-/// The aegis namespaces airlock imports, each as its own module: ids for the
-/// volume and device numbers, typed indices for a batch's slots, and the
-/// always-on contracts.
-fn aegisImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) [3]std.Build.Module.Import {
-    const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize });
-    return .{
-        .{ .name = "aegis.id", .module = aegis.module("aegis.id") },
-        .{ .name = "aegis.handle", .module = aegis.module("aegis.handle") },
-        .{ .name = "aegis.assert", .module = aegis.module("aegis.assert") },
-    };
+/// aegis, from which airlock takes ids for the volume and device numbers, typed
+/// indices for a batch's slots, and the always-on contracts.
+fn aegisModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Module {
+    return b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
 }
 
 /// `airlock.testing` over `airlock`'s own seam: the hook it builds is the
@@ -159,7 +153,7 @@ fn seamModule(b: *std.Build, airlock: *std.Build.Module, shakedown: *std.Build.M
         .optimize = airlock.optimize,
         .imports = &.{
             .{ .name = "seam", .module = airlock.import_table.get("seam").? },
-            .{ .name = "aegis.assert", .module = airlock.import_table.get("aegis.assert").? },
+            .{ .name = "aegis", .module = airlock.import_table.get("aegis").? },
             .{ .name = "shakedown", .module = shakedown },
         },
     });

@@ -10,7 +10,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Staged = @import("Staged.zig");
-const assert = @import("aegis.assert");
+const assert = @import("aegis").assert;
 
 const Pending = @This();
 

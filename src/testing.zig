@@ -23,7 +23,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const shakedown = @import("shakedown");
 const seam = @import("seam");
-const assert = @import("aegis.assert");
+const assert = @import("aegis").assert;
 
 const os = builtin.target.os.tag;
 

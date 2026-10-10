@@ -21,13 +21,13 @@
             .lazy = true,
         },
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#e99eccb269dfeeb4569bce843743ec80c6e094c3",
-            .hash = "shakedown-0.1.0-BR8U4-XJEAB46Facu1RERO-yErm9BwNcJGUxxk9vMLQv",
+            .url = "git+https://github.com/pedronaugusto/shakedown#99418acb02deacefe8cc555c4205dce98f54ef68",
+            .hash = "shakedown-0.1.0-BR8U409YEgCLU7igVgkutLKZ1u5FzuaC6geo-4n84d_G",
             .lazy = true,
         },
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#f199c0d7004cf022026b6d3933543665fd35a994",
-            .hash = "aegis-0.0.0-rsxouoQPBAA-wTYL0qWzpqy-1nrKc3R3Ze5Cl_S2HKse",
+            .url = "git+https://github.com/pedronaugusto/aegis#be2523ffd337fa31b5336e6f652f642c43622471",
+            .hash = "aegis-0.0.0-rsxoutrdBgCSI4l3iGMCx8rEymViUGaDM3yuGFI3z01T",
         },
     },
 }

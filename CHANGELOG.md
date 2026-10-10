@@ -28,7 +28,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it was a `u32`. It is the place the slot was added at, whatever order the
   commit sorted the directories in; `slot.raw()` gives the number, and
   `slot.get(entries)` gives the caller's own entry or `error.OutOfBounds`.
-- airlock imports aegis (`aegis.id`, `aegis.handle` and `aegis.assert`) and is no
+- airlock imports aegis (its `id`, `handle` and `assert` namespaces) and is no
   longer `std` only. A consumer's build fetches aegis with airlock and wires
   nothing.
 

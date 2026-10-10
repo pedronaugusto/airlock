@@ -10,10 +10,10 @@ tells files apart by identity rather than by path.
 
 Requires Zig 0.17.0. Fetch with `zig fetch --save
 git+https://github.com/pedronaugusto/airlock` and add the `airlock` module to
-your module's imports. It depends on `std` and on three namespaces of
-[aegis](https://github.com/pedronaugusto/aegis) (`aegis.id`, `aegis.handle` and
-`aegis.assert`, which themselves need only `std`); the dependency brings them,
-and nothing is wired by hand.
+your module's imports. It depends on `std` and on
+[aegis](https://github.com/pedronaugusto/aegis), of which it uses the `id`,
+`handle` and `assert` namespaces; the dependency brings it, and nothing is
+wired by hand.
 
 ## Usage
 
@@ -225,7 +225,7 @@ pages and Microsoft's documentation, and on the crash model below.
   linked into the module.
 - [aegis](https://github.com/pedronaugusto/aegis) supplies the distinct volume
   and device ids, the typed batch slot index and the always-on contracts; the
-  module imports `aegis.id`, `aegis.handle` and `aegis.assert` alone.
+  module uses its `id`, `handle` and `assert` namespaces alone.
 - [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
   the tests and CI.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the `FaultIo`,

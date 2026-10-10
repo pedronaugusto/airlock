@@ -6,7 +6,7 @@
 //! a caller's to take.
 const Blocking = @import("Blocking.zig");
 const std = @import("std");
-const assert = @import("aegis.assert");
+const assert = @import("aegis").assert;
 const builtin = @import("builtin");
 const Io = std.Io;
 const sys = @import("sys.zig");

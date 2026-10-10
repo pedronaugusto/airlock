@@ -61,7 +61,7 @@ fn faultClasses(call: Call) []const shakedown.IoFault {
     };
 }
 
-const Operation = struct {
+pub const Operation = struct {
     kind: Kind,
     scratch: harness.Scratch = undefined,
     h: *Seam = undefined,

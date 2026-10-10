@@ -24,7 +24,7 @@ const is_darwin = native_os.isDarwin();
 const Blocking = @import("Blocking.zig");
 
 const seam = @import("seam");
-const aegis_id = @import("aegis.id");
+const aegis_id = @import("aegis").id;
 
 pub const Call = seam.Call;
 const Code = seam.Code;

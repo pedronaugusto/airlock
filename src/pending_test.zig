@@ -33,7 +33,7 @@ fn expectContents(s: *harness.Scratch, name: []const u8, expected: ?[]const u8) 
 }
 
 /// A commit for `Seam.drive` to run on another task.
-const Commit = struct {
+pub const Commit = struct {
     p: *airlock.Pending,
     io: Io,
     options: airlock.Pending.CommitOptions,

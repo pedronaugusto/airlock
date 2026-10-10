@@ -21,8 +21,8 @@ calls, not physical cache drains or filesystem transaction boundaries.
 
 ## aegis types, contracts and the sites kept raw
 
-airlock imports three aegis namespaces, each its own module: `aegis.id`,
-`aegis.handle` and `aegis.assert`. Each is used where it catches a mistake.
+airlock imports aegis and uses three of its namespaces: `id`, `handle` and
+`assert`. Each is used where it catches a mistake.
 
 - **Volume and device ids** (`sys.VolumeId`, `sys.DeviceId`, aegis `id.Id`).
   A batch tells volumes apart by two 64-bit numbers that mean different
@@ -74,9 +74,9 @@ Kept raw, each with one of the five reasons:
 
 `ci/preflight.json` declares glint's A004 at `gate` for the sources under
 `src`, tests included. Benchmarks, the example and `ci` are not listed in the
-package's `.paths`, so they are outside that declaration. It takes effect once
-glint accepts the setting; published glint admits its aegis rules in report
-mode only.
+package's `.paths`, so they are outside that declaration. The pinned preflight
+runs glint, which accepts the setting, so A004 and Z026 (every empty catch
+carries a written reason) fail `zig build lint`.
 
 ## Benchmark workloads
 
