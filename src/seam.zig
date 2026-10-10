@@ -1,6 +1,7 @@
 //! The seam in front of every raw call airlock makes: what a call is, what
-//! a test makes of it instead, and how a raw call finds the test's hook in
-//! the `Io` it was given.
+//! a test makes of it instead, where a call it lets through is made (the
+//! system, or a simulated file system behind an `Io`), and how a raw call
+//! finds the test's hook in the `Io` it was given.
 //!
 //! A module of its own, imported by airlock and by `airlock.testing` and
 //! exported by neither: production airlock asks only whether an `Io`
@@ -79,13 +80,34 @@ pub const Result = union(enum) {
     value: u64,
 };
 
+/// How strong a sync is, as a simulated disk models it: a writeout hands
+/// the data to the device, a barrier orders what was handed before it, a
+/// data or full sync makes it durable (the data alone, or with metadata).
+pub const Flush = enum { writeout, barrier, data, full };
+
+/// A file system behind an `Io`, a simulated one, where the calls a hook
+/// lets through are made instead of on the system: every open, create,
+/// rename, link, remove, stat and close through `io`, every sync through
+/// `flush`. Each call is still decided by the hook first, one for one with
+/// the raw call it stands for.
+pub const Route = struct {
+    io: Io,
+    ctx: *anyopaque,
+    /// A sync of `handle`, a file or a directory, at `kind`: the code the
+    /// platform's call would return.
+    flush: *const fn (ctx: *anyopaque, handle: Io.File.Handle, kind: Flush) Code,
+};
+
 /// Routes airlock's raw calls to a test. `base` is the `Io` a std-level
 /// `fileSync` through the hooked layer goes to.
 pub const Hook = struct {
     ctx: *anyopaque,
-    /// Returns what the call does instead, or null to make the real call.
+    /// Returns what the call does instead, or null to make the call.
     call: *const fn (ctx: *anyopaque, call: Call, path: ?[]const u8) ?Result,
     base: Io,
+    /// Where a call the hook lets through is made: on the system when
+    /// null, through the route otherwise.
+    route: ?Route = null,
 };
 
 /// The state of the layer that carries a hook.
@@ -98,9 +120,9 @@ pub fn hookedSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
     return file.sync(state.hook.base);
 }
 
-/// The hook's answer for this call, if `io` carries one.
-pub fn intercept(io: Io, call: Call, path: ?[]const u8) ?Result {
+/// The hook `io` carries, if it carries one: one compare.
+pub fn hookOf(io: Io) ?*const Hook {
     if (io.vtable.fileSync != &hookedSync) return null;
     const state: *const HookedState = @ptrCast(@alignCast(io.userdata.?)); // safe: an Io whose fileSync is hookedSync carries a HookedState as userdata
-    return state.hook.call(state.hook.ctx, call, path);
+    return state.hook;
 }
