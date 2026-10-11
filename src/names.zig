@@ -18,7 +18,7 @@ const is_windows = builtin.target.os.tag == .windows;
 
 /// The errors behind `error.PublishedNotDurable`: the name changed, and the
 /// sync that would make the change durable failed.
-pub const SyncAfterError = platform.DirSyncError || Io.File.StatError;
+pub const SyncAfterError = platform.DirSyncError || sys.StatIdError;
 
 /// Where a call puts what `error.PublishedNotDurable` hides.
 pub const Diagnostics = struct {
@@ -110,7 +110,7 @@ fn renameWindows(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new:
     }
 }
 
-pub const RemoveError = Io.Dir.DeleteFileError || error{
+pub const RemoveError = sys.UnlinkError || error{
     /// The name is gone; the directory sync after it failed or was
     /// canceled. `diagnostics` says which.
     PublishedNotDurable,
@@ -142,7 +142,7 @@ pub const MakePathOptions = struct {
     diagnostics: ?*Diagnostics = null,
 };
 
-pub const MakePathError = Io.Dir.CreateDirError || Io.Dir.OpenError || platform.DirSyncError || error{
+pub const MakePathError = sys.MakeDirError || sys.OpenDirError || platform.DirSyncError || error{
     /// A directory was created; the sync of the directory that received
     /// it failed or was canceled.
     PublishedNotDurable,
@@ -248,7 +248,7 @@ pub const SymLinkOptions = struct {
     diagnostics: ?*Diagnostics = null,
 };
 
-pub const SymLinkError = sys.SymLinkError || Io.Dir.RenameError || Io.Dir.OpenError || platform.DirSyncError || error{
+pub const SymLinkError = sys.SymLinkError || Io.Dir.RenameError || sys.OpenDirError || platform.DirSyncError || error{
     /// The link is in place; the directory sync after the rename failed or
     /// was canceled.
     PublishedNotDurable,
@@ -351,7 +351,7 @@ pub const PruneOptions = struct {
     older_than: Io.Duration = .fromSeconds(3600),
 };
 
-pub const PruneError = Io.Dir.Iterator.Error || Io.Dir.StatFileError || Io.Dir.DeleteFileError;
+pub const PruneError = Io.Dir.Iterator.Error || sys.StatPathError || sys.UnlinkError;
 
 /// Removes the random temps a crash or a kill left in `dir`: the names
 /// `prefix` and 26 base32 characters, as `Temp.random` draws them, and
@@ -387,7 +387,7 @@ const Parent = struct {
     dir: Io.Dir,
     owned: bool,
 
-    fn open(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Dir.OpenError!Parent {
+    fn open(io: Io, dir: Io.Dir, sub_path: []const u8) sys.OpenDirError!Parent {
         const base_start = Staged.baseStart(sub_path);
         if (base_start == 0) return .{ .dir = dir, .owned = false };
         return .{ .dir = .{ .handle = try sys.openDir(io, dir.handle, Staged.parentPath(sub_path, base_start)) }, .owned = true };
@@ -406,7 +406,7 @@ fn syncOne(io: Io, blocking: ?Blocking, dir: Io.Dir, busy: Io.Duration) platform
     return if (outcome.refused) .ordered else outcome.reached;
 }
 
-fn sameDirectory(io: Io, a: Io.Dir, b: Io.Dir) Io.File.StatError!bool {
+fn sameDirectory(io: Io, a: Io.Dir, b: Io.Dir) sys.StatIdError!bool {
     if (a.handle == b.handle) return true;
     if (!is_windows and (a.handle == sys.at_fdcwd or b.handle == sys.at_fdcwd)) return false;
     const x = try sys.statId(io, a.handle);

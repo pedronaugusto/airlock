@@ -192,7 +192,7 @@ pub fn syncFile(io: Io, file: Io.File, options: SyncOptions) Io.File.SyncError!R
     return syncChain(io, options.blocking, file.handle, options.level, options.barrier, null);
 }
 
-pub const DirSyncError = Io.File.SyncError || Io.Dir.OpenError;
+pub const DirSyncError = Io.File.SyncError || sys.OpenDirError;
 
 /// What a directory sync came to: what it reached, and whether the
 /// filesystem refused it (which leaves an operation `.ordered`).
@@ -245,7 +245,7 @@ fn reopened(io: Io, blocking: ?Blocking, handle: sys.Handle, subject: ?[]const u
 /// Windows: a handle on the directory `handle` with the rights a flush
 /// needs, retrying a sharing violation until `busy` runs out. Opened
 /// before a rename, so a refusal is known before anything is published.
-pub fn openDirFlush(io: Io, handle: sys.Handle, busy: Io.Duration) Io.Dir.OpenError!sys.Handle {
+pub fn openDirFlush(io: Io, handle: sys.Handle, busy: Io.Duration) sys.OpenDirError!sys.Handle {
     var backoff: Backoff = .start(io, busy);
     while (true) {
         return sys.openDirWindows(io, handle, "", true) catch |err| switch (err) {
@@ -288,7 +288,7 @@ pub const Backoff = struct {
     }
 };
 
-pub const SyncPathError = Io.File.SyncError || Io.File.OpenError;
+pub const SyncPathError = Io.File.SyncError || sys.OpenFileError;
 
 /// Opens `sub_path` (for write on Windows, where a flush needs it;
 /// read-only elsewhere) and syncs it.

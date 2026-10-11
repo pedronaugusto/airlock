@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- airlock runs inside a shakedown `Sim`. A seam over a simulation's `Io`
+  routes every raw call into it: opens, creates, renames, links,
+  removes, stats and closes through the `Io`, and each sync onto
+  `Sim.Fs.flush` at the strength the platform's call has (a writeout, a
+  barrier, a data or a full flush). The hook still decides each call first,
+  one for one with the raw call it stands for, so plans, traces and counts are
+  the same; the calls only stop failing with `EBADF` on simulated handles.
+  The tests run every operation through shakedown's `everyCrash`: a power loss
+  at every step, every state the disk could come back in.
+
+### Fixed
+
+- A device failure, a full disk and a name whose file awaits deletion are named
+  errors, where Windows (and POSIX for `EIO` on a mkdir and `ENOSPC` on a
+  chmod) reported `error.Unexpected`: `InputOutput` and `NoSpaceLeft` join the
+  error sets of the calls that can meet them, and `FileId` and `Batch` gain
+  `InputOutput`.
+- On Windows a call a simulation answers no longer converts its names to NT's
+  form, which took several 64 KiB buffers of a simulated task's stack.
+
 ## [0.3.0] - 2026-10-13
 
 ### Breaking
@@ -54,15 +76,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- airlock runs inside a shakedown `Sim`. A seam over a simulation's `Io`
-  routes every raw call into it: opens, creates, renames, links,
-  removes, stats and closes through the `Io`, and each sync onto
-  `Sim.Fs.flush` at the strength the platform's call has (a writeout, a
-  barrier, a data or a full flush). The hook still decides each call first,
-  one for one with the raw call it stands for, so plans, traces and counts are
-  the same; the calls only stop failing with `EBADF` on simulated handles.
-  The tests run every operation through shakedown's `everyCrash`: a power loss
-  at every step, every state the disk could come back in.
 - `airlock.testing` takes a `Gate`: `Options.gate` stands a task still at the first
   raw call of a kind at a name, until the test releases it, for a test that
   races something else against one step of a publish. `Seam.reopen` arms it again.

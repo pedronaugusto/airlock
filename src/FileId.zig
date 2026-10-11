@@ -25,7 +25,7 @@ volume: u64,
 /// The inode on POSIX; the file id on Windows, which is 128 bits on ReFS.
 file: u128,
 
-pub const Error = Io.File.StatError;
+pub const Error = sys.StatIdError;
 
 /// The identity of what `file` is open on.
 pub fn of(io: Io, file: Io.File) Error!FileId {
@@ -38,7 +38,7 @@ pub const PathOptions = struct {
     follow_symlinks: bool = true,
 };
 
-pub const PathError = Io.Dir.StatFileError;
+pub const PathError = sys.StatPathError;
 
 /// The identity of what `sub_path` names relative to `dir` (which an
 /// absolute `sub_path` ignores). On POSIX this reads the path without

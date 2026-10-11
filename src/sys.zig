@@ -343,7 +343,7 @@ fn openatRaw(dir: posix.fd_t, path: [*:0]const u8, flags: posix.O, mode: posix.m
     return std.c.openat(dir, path, flags, mode);
 }
 
-pub const OpenDirError = Io.Dir.OpenError;
+pub const OpenDirError = Io.Dir.OpenError || error{ InputOutput, NoSpaceLeft };
 
 /// A directory opened read-only so it can be synced and named relative to:
 /// `openat(O_RDONLY | O_DIRECTORY | O_CLOEXEC)`, never `O_PATH`.
@@ -384,11 +384,13 @@ fn openDirFailure(e: posix.E) OpenDirError {
         .NODEV => error.NoDevice,
         .NOMEM => error.SystemResources,
         .NAMETOOLONG => error.NameTooLong,
+        .IO => error.InputOutput,
+        .NOSPC, .DQUOT => error.NoSpaceLeft,
         else => posix.unexpectedErrno(e),
     };
 }
 
-pub const OpenFileError = Io.File.OpenError;
+pub const OpenFileError = Io.File.OpenError || error{InputOutput};
 
 /// An existing file opened to be synced: read-only on POSIX, for write on
 /// Windows (a flush needs write access; a read-only file has its attribute
@@ -432,6 +434,7 @@ fn openFileFailure(e: posix.E) OpenFileError {
         .NOMEM => error.SystemResources,
         .NAMETOOLONG => error.NameTooLong,
         .NOSPC, .DQUOT => error.NoSpaceLeft,
+        .IO => error.InputOutput,
         .ROFS => error.ReadOnlyFileSystem,
         .TXTBSY => error.FileBusy,
         .BUSY => error.DeviceBusy,
@@ -441,7 +444,7 @@ fn openFileFailure(e: posix.E) OpenFileError {
     };
 }
 
-pub const CreateTempError = Io.File.OpenError || error{Busy};
+pub const CreateTempError = OpenFileError || error{Busy};
 
 /// Exclusive create of `name` in `dir`: `O_CREAT | O_EXCL`, so an existing
 /// name is never clobbered. Windows: share read and delete only, with
@@ -480,7 +483,7 @@ fn createTempRouted(route: *const Route, dir: Handle, name: []const u8, mode: Io
 
 /// Permissions on the open handle: `fchmod`, so umask does not apply and
 /// there is no window between a stat and a chmod of the path.
-pub fn setMode(io: Io, handle: Handle, mode: Io.File.Permissions) Io.File.SetPermissionsError!void {
+pub fn setMode(io: Io, handle: Handle, mode: Io.File.Permissions) SetModeError!void {
     if (is_windows) return setReadOnlyWindows(io, handle, isReadOnly(mode));
     const fchmod = if (is_linux) linux.fchmod else std.c.fchmod;
     const e = switch (try retrying(io, .set_mode, null, fchmod, .{ handle, mode.toMode() })) {
@@ -495,6 +498,7 @@ pub fn setMode(io: Io, handle: Handle, mode: Io.File.Permissions) Io.File.SetPer
         .LOOP => error.SymLinkLoop,
         .NOENT => error.FileNotFound,
         .NOMEM => error.SystemResources,
+        .NOSPC, .DQUOT => error.NoSpaceLeft,
         .ROFS => error.ReadOnlyFileSystem,
         else => posix.unexpectedErrno(e),
     };
@@ -610,7 +614,7 @@ fn linkRouted(route: *const Route, old_dir: Handle, old: []const u8, new_dir: Ha
     };
 }
 
-pub const UnlinkError = Io.Dir.DeleteFileError;
+pub const UnlinkError = Io.Dir.DeleteFileError || error{NoSpaceLeft};
 
 fn unlinkatRaw(dir: posix.fd_t, path: [*:0]const u8) if (is_linux) usize else c_int {
     if (is_linux) return linux.unlinkat(dir, path, 0);
@@ -637,12 +641,13 @@ pub fn unlink(io: Io, dir: Handle, name: []const u8) UnlinkError!void {
         .NAMETOOLONG => error.NameTooLong,
         .NOTDIR => error.NotDir,
         .NOMEM => error.SystemResources,
+        .NOSPC => error.NoSpaceLeft,
         .ROFS => error.ReadOnlyFileSystem,
         else => posix.unexpectedErrno(e),
     };
 }
 
-pub const MakeDirError = Io.Dir.CreateDirError;
+pub const MakeDirError = Io.Dir.CreateDirError || error{InputOutput};
 
 fn mkdiratRaw(dir: posix.fd_t, path: [*:0]const u8, mode: posix.mode_t) if (is_linux) usize else c_int {
     if (is_linux) return linux.mkdirat(dir, path, mode);
@@ -671,6 +676,7 @@ pub fn makeDir(io: Io, dir: Handle, name: []const u8) MakeDirError!void {
         .NOSPC => error.NoSpaceLeft,
         .NOTDIR => error.NotDir,
         .ROFS => error.ReadOnlyFileSystem,
+        .IO => error.InputOutput,
         else => posix.unexpectedErrno(e),
     };
 }
@@ -726,8 +732,11 @@ const DeviceTag = struct {};
 /// wide, so it cannot stand for a volume id even by mistake.
 pub const Id = struct { volume: VolumeId, file: u128 };
 
-pub const StatIdError = Io.File.StatError;
-pub const StatPathError = Io.Dir.StatFileError;
+pub const StatIdError = Io.File.StatError || error{InputOutput};
+pub const StatPathError = Io.Dir.StatFileError || OpenFileError;
+
+/// What `setMode` fails with: std's, and a full disk (a metadata write can need room).
+pub const SetModeError = Io.File.SetPermissionsError || error{NoSpaceLeft};
 
 /// The bits of a `dev_t` or `ino_t`, whichever sign and width the platform
 /// gives it: Darwin's device number is an `i32`.
@@ -790,6 +799,7 @@ fn statFailure(e: posix.E) StatIdError {
         .NOMEM => error.SystemResources,
         .ACCES => error.AccessDenied,
         .PERM => error.PermissionDenied,
+        .IO => error.InputOutput,
         else => posix.unexpectedErrno(e),
     };
 }
@@ -891,6 +901,14 @@ fn ntSyncFailure(status: windows.NTSTATUS) Io.File.SyncError {
     };
 }
 
+/// The statuses that say the device failed: `EIO`.
+fn isDeviceFailureNt(status: windows.NTSTATUS) bool {
+    return switch (status) {
+        .UNEXPECTED_NETWORK_ERROR, .DEVICE_DATA_ERROR, .DATA_ERROR, .IO_DEVICE_ERROR, .FILE_CORRUPT_ERROR => true,
+        else => false,
+    };
+}
+
 fn isRefusalNt(status: windows.NTSTATUS) bool {
     return status == .INVALID_PARAMETER or status == .NOT_SUPPORTED or status == .INVALID_DEVICE_REQUEST;
 }
@@ -933,6 +951,10 @@ fn closeWindows(io: Io, handle: windows.HANDLE, path: ?[]const u8) Io.File.SyncE
 }
 
 /// A name as NT wants it relative to `root`: WTF-16, slashes turned round.
+/// A 64 KiB buffer and several copies of it in a Debug build, which is why
+/// the conversion is made only where a call is made on the system, inside
+/// the function that makes it: a call a route answers never needs the name
+/// in NT's form, and runs on a simulation's small task stack.
 fn ntName(root: windows.HANDLE, name: []const u8) Io.Dir.PathNameError!Io.Threaded.WindowsPathSpace {
     return Io.Threaded.sliceToPrefixedFileW(root, name, .{}) catch |err| switch (err) {
         error.NameTooLong => error.NameTooLong,
@@ -940,31 +962,42 @@ fn ntName(root: windows.HANDLE, name: []const u8) Io.Dir.PathNameError!Io.Thread
     };
 }
 
+/// The status a name that does not convert stands for.
+fn ntNameStatus(err: Io.Dir.PathNameError) windows.NTSTATUS {
+    return switch (err) {
+        error.NameTooLong => .NAME_TOO_LONG,
+        else => .OBJECT_NAME_INVALID,
+    };
+}
+
+/// `NtCreateFile` on `name` relative to `root` (`root` itself when `name`
+/// is empty).
 fn ntCreate(
     handle: *windows.HANDLE,
     access: windows.ACCESS_MASK,
-    attr: *const windows.OBJECT.ATTRIBUTES,
+    root: windows.HANDLE,
+    name: []const u8,
     attributes: windows.FILE.ATTRIBUTE,
     share: windows.FILE.SHARE,
     disposition: windows.FILE.CREATE_DISPOSITION,
     options: windows.FILE.MODE,
 ) windows.NTSTATUS {
+    var nt: windows.UNICODE_STRING = .init(&.{});
+    var absolute = false;
+    var space: Io.Threaded.WindowsPathSpace = undefined;
+    if (name.len != 0) {
+        space = ntName(root, name) catch |err| return ntNameStatus(err);
+        nt = space.string();
+        absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
+    }
+    const attr: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = if (absolute) null else root, .ObjectName = &nt };
     var iosb: windows.IO_STATUS_BLOCK = undefined;
-    return windows.ntdll.NtCreateFile(handle, access, attr, &iosb, null, attributes, share, disposition, options, null, 0);
+    return windows.ntdll.NtCreateFile(handle, access, &attr, &iosb, null, attributes, share, disposition, options, null, 0);
 }
 
 /// A directory opened relative to `root` (`sub_path` empty: `root` itself
 /// again), with the rights a flush and relative opens need.
 pub fn openDirWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, flush_only: bool) OpenDirError!windows.HANDLE {
-    var space: Io.Threaded.WindowsPathSpace = undefined;
-    var name: windows.UNICODE_STRING = .init(&.{});
-    var absolute = false;
-    if (sub_path.len != 0) {
-        space = try ntName(root, sub_path);
-        name = space.string();
-        absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
-    }
-    const attr: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = if (absolute) null else root, .ObjectName = &name };
     const access: windows.ACCESS_MASK = .{
         .STANDARD = .{ .SYNCHRONIZE = true },
         .SPECIFIC = .{ .FILE_DIRECTORY = .{
@@ -976,10 +1009,10 @@ pub fn openDirWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, flush_
     };
     var handle: windows.HANDLE = undefined;
     const status = switch (try retryingNt(io, .open_dir, sub_path, ntCreate, .{
-        &handle,                                                                  access,
-        &attr,                                                                    windows.FILE.ATTRIBUTE{ .NORMAL = true },
-        windows.FILE.SHARE.VALID_FLAGS,                                           windows.FILE.CREATE_DISPOSITION.OPEN,
-        windows.FILE.MODE{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
+        &handle,                                  access,
+        root,                                     sub_path,
+        windows.FILE.ATTRIBUTE{ .NORMAL = true }, windows.FILE.SHARE.VALID_FLAGS,
+        windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
     })) {
         .code => |c| c,
         .route => |route| return (try dirOf(root).openDir(route.io, if (sub_path.len == 0) "." else sub_path, .{})).handle,
@@ -990,27 +1023,27 @@ pub fn openDirWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, flush_
         .NOT_A_DIRECTORY => error.NotDir,
         .ACCESS_DENIED, .SHARING_VIOLATION => error.AccessDenied,
         .OBJECT_NAME_INVALID => error.BadPathName,
+        .NAME_TOO_LONG => error.NameTooLong,
         .BAD_NETWORK_PATH, .BAD_NETWORK_NAME => error.NetworkNotFound,
         .NOT_SUPPORTED, .INVALID_DEVICE_REQUEST => error.NoDevice,
-        else => windows.unexpectedStatus(status),
+        .DISK_FULL => error.NoSpaceLeft,
+        // Win32 reports a name whose file awaits deletion as access denied.
+        .DELETE_PENDING => error.AccessDenied,
+        else => if (isDeviceFailureNt(status)) error.InputOutput else windows.unexpectedStatus(status),
     };
 }
 
 fn makeDirWindows(io: Io, root: windows.HANDLE, name: []const u8) MakeDirError!void {
-    const space = try ntName(root, name);
-    var nt = space.string();
-    const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
-    const attr: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = if (absolute) null else root, .ObjectName = &nt };
     const access: windows.ACCESS_MASK = .{
         .STANDARD = .{ .SYNCHRONIZE = true },
         .SPECIFIC = .{ .FILE_DIRECTORY = .{ .LIST = true, .READ_ATTRIBUTES = true } },
     };
     var handle: windows.HANDLE = undefined;
     const status = switch (try retryingNt(io, .make_dir, name, ntCreate, .{
-        &handle,                                                                  access,
-        &attr,                                                                    windows.FILE.ATTRIBUTE{ .NORMAL = true },
-        windows.FILE.SHARE.VALID_FLAGS,                                           windows.FILE.CREATE_DISPOSITION.CREATE,
-        windows.FILE.MODE{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
+        &handle,                                  access,
+        root,                                     name,
+        windows.FILE.ATTRIBUTE{ .NORMAL = true }, windows.FILE.SHARE.VALID_FLAGS,
+        windows.FILE.CREATE_DISPOSITION.CREATE,   windows.FILE.MODE{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
     })) {
         .code => |c| c,
         .route => |route| return dirOf(root).createDir(route.io, name, .default_dir),
@@ -1022,10 +1055,12 @@ fn makeDirWindows(io: Io, root: windows.HANDLE, name: []const u8) MakeDirError!v
         .NOT_A_DIRECTORY => return error.NotDir,
         .ACCESS_DENIED => return error.AccessDenied,
         .OBJECT_NAME_INVALID => return error.BadPathName,
+        .NAME_TOO_LONG => return error.NameTooLong,
         .DISK_FULL => return error.NoSpaceLeft,
         .MEDIA_WRITE_PROTECTED => return error.ReadOnlyFileSystem,
         .BAD_NETWORK_PATH, .BAD_NETWORK_NAME => return error.NetworkNotFound,
-        else => return windows.unexpectedStatus(status),
+        .DELETE_PENDING => return error.AccessDenied,
+        else => return if (isDeviceFailureNt(status)) error.InputOutput else windows.unexpectedStatus(status),
     }
 }
 
@@ -1081,20 +1116,16 @@ fn clearReadOnly(io: Io, root: windows.HANDLE, name: []const u8) bool {
 /// A handle on `name` in `root` for its attributes alone, the link itself
 /// if it is one.
 fn openAttributes(io: Io, root: windows.HANDLE, name: []const u8) OpenFileError!windows.HANDLE {
-    const space = try ntName(root, name);
-    var nt = space.string();
-    const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
-    const attr: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = if (absolute) null else root, .ObjectName = &nt };
     const access: windows.ACCESS_MASK = .{
         .STANDARD = .{ .SYNCHRONIZE = true },
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true, .WRITE_ATTRIBUTES = true } },
     };
     var handle: windows.HANDLE = undefined;
     const status = switch (try retryingNt(io, .open_file, name, ntCreate, .{
-        &handle,                                                                                                  access,
-        &attr,                                                                                                    windows.FILE.ATTRIBUTE{ .NORMAL = true },
-        windows.FILE.SHARE.VALID_FLAGS,                                                                           windows.FILE.CREATE_DISPOSITION.OPEN,
-        windows.FILE.MODE{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true },
+        &handle,                                  access,
+        root,                                     name,
+        windows.FILE.ATTRIBUTE{ .NORMAL = true }, windows.FILE.SHARE.VALID_FLAGS,
+        windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true },
     })) {
         .code => |c| c,
         .route => |route| return (try dirOf(root).openFile(route.io, name, .{ .path_only = true, .follow_symlinks = false })).handle,
@@ -1130,10 +1161,6 @@ fn setAttributes(io: Io, handle: windows.HANDLE, attributes: windows.FILE.ATTRIB
 }
 
 fn openByName(io: Io, root: windows.HANDLE, sub_path: []const u8, purpose: OpenFor) OpenFileError!windows.HANDLE {
-    const space = try ntName(root, sub_path);
-    var name = space.string();
-    const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
-    const attr: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = if (absolute) null else root, .ObjectName = &name };
     const access: windows.ACCESS_MASK = .{
         .STANDARD = .{ .SYNCHRONIZE = true, .RIGHTS = .{ .DELETE = purpose != .sync } },
         .GENERIC = .{ .WRITE = purpose == .sync },
@@ -1141,10 +1168,10 @@ fn openByName(io: Io, root: windows.HANDLE, sub_path: []const u8, purpose: OpenF
     };
     var handle: windows.HANDLE = undefined;
     const status = switch (try retryingNt(io, .open_file, sub_path, ntCreate, .{
-        &handle,                                                                                                                          access,
-        &attr,                                                                                                                            windows.FILE.ATTRIBUTE{ .NORMAL = true },
-        windows.FILE.SHARE.VALID_FLAGS,                                                                                                   windows.FILE.CREATE_DISPOSITION.OPEN,
-        windows.FILE.MODE{ .NON_DIRECTORY_FILE = purpose == .sync, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = purpose != .sync },
+        &handle,                                  access,
+        root,                                     sub_path,
+        windows.FILE.ATTRIBUTE{ .NORMAL = true }, windows.FILE.SHARE.VALID_FLAGS,
+        windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .NON_DIRECTORY_FILE = purpose == .sync, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = purpose != .sync },
     })) {
         .code => |c| c,
         // A routed sync needs no write access, and a routed rename or
@@ -1161,11 +1188,12 @@ fn openByName(io: Io, root: windows.HANDLE, sub_path: []const u8, purpose: OpenF
     };
 }
 
-fn openFailureNt(status: windows.NTSTATUS) Io.File.OpenError {
+fn openFailureNt(status: windows.NTSTATUS) OpenFileError {
     return switch (status) {
         .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => error.FileNotFound,
         .OBJECT_NAME_COLLISION => error.PathAlreadyExists,
         .OBJECT_NAME_INVALID => error.BadPathName,
+        .NAME_TOO_LONG => error.NameTooLong,
         .ACCESS_DENIED => error.AccessDenied,
         .SHARING_VIOLATION => error.FileBusy,
         .FILE_IS_A_DIRECTORY => error.IsDir,
@@ -1175,14 +1203,12 @@ fn openFailureNt(status: windows.NTSTATUS) Io.File.OpenError {
         .NO_MEDIA_IN_DEVICE => error.NoDevice,
         .VIRUS_INFECTED, .VIRUS_DELETED => error.AntivirusInterference,
         .MEDIA_WRITE_PROTECTED => error.ReadOnlyFileSystem,
-        else => windows.unexpectedStatus(status),
+        .DELETE_PENDING => error.FileBusy,
+        else => if (isDeviceFailureNt(status)) error.InputOutput else windows.unexpectedStatus(status),
     };
 }
 
 fn createTempWindows(io: Io, root: windows.HANDLE, name: []const u8, read: bool) CreateTempError!windows.HANDLE {
-    const space = try ntName(root, name);
-    var nt = space.string();
-    const attr: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = root, .ObjectName = &nt };
     const access: windows.ACCESS_MASK = .{
         .STANDARD = .{ .SYNCHRONIZE = true, .RIGHTS = .{ .DELETE = true } },
         .GENERIC = .{ .WRITE = true, .READ = read },
@@ -1190,10 +1216,10 @@ fn createTempWindows(io: Io, root: windows.HANDLE, name: []const u8, read: bool)
     };
     var handle: windows.HANDLE = undefined;
     const status = switch (try retryingNt(io, .create_temp, name, ntCreate, .{
-        &handle,                                                                      access,
-        &attr,                                                                        windows.FILE.ATTRIBUTE{ .NORMAL = true },
-        windows.FILE.SHARE{ .READ = true, .DELETE = true },                           windows.FILE.CREATE_DISPOSITION.CREATE,
-        windows.FILE.MODE{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
+        &handle,                                  access,
+        root,                                     name,
+        windows.FILE.ATTRIBUTE{ .NORMAL = true }, windows.FILE.SHARE{ .READ = true, .DELETE = true },
+        windows.FILE.CREATE_DISPOSITION.CREATE,   windows.FILE.MODE{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
     })) {
         .code => |c| c,
         .route => |route| return createTempRouted(route, root, name, .default_file, read),
@@ -1206,7 +1232,7 @@ fn createTempWindows(io: Io, root: windows.HANDLE, name: []const u8, read: bool)
     };
 }
 
-fn setReadOnlyWindows(io: Io, handle: windows.HANDLE, read_only: bool) Io.File.SetPermissionsError!void {
+fn setReadOnlyWindows(io: Io, handle: windows.HANDLE, read_only: bool) SetModeError!void {
     if (!read_only) return;
     var info: windows.FILE.BASIC_INFORMATION = .{
         .CreationTime = 0,
@@ -1222,7 +1248,9 @@ fn setReadOnlyWindows(io: Io, handle: windows.HANDLE, read_only: bool) Io.File.S
     return switch (status) {
         .SUCCESS => {},
         .ACCESS_DENIED => error.AccessDenied,
-        else => windows.unexpectedStatus(status),
+        .DISK_FULL => error.NoSpaceLeft,
+        .MEDIA_WRITE_PROTECTED => error.ReadOnlyFileSystem,
+        else => if (isDeviceFailureNt(status)) error.InputOutput else windows.unexpectedStatus(status),
     };
 }
 
@@ -1236,6 +1264,23 @@ fn ntSetInfo(handle: windows.HANDLE, info: []u8, class: windows.FILE.INFORMATION
     return windows.ntdll.NtSetInformationFile(handle, &iosb, info.ptr, @intCast(info.len), class);
 }
 
+/// `FileRenameInformationEx` (`posix`) or `FileRenameInformation` on `handle`
+/// to `name` in `root`. The information holds the name in a buffer of its
+/// own, 64 KiB: it is built here, where the call is made.
+fn ntRenameByHandle(handle: windows.HANDLE, root: windows.HANDLE, name: []const u8, replace: bool, posix_semantics: bool) windows.NTSTATUS {
+    const space = ntName(root, name) catch |err| return ntNameStatus(err);
+    const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
+    var info: windows.FILE.RENAME_INFORMATION = .init(.{
+        .Flags = if (posix_semantics)
+            .{ .REPLACE_IF_EXISTS = replace, .POSIX_SEMANTICS = true, .IGNORE_READONLY_ATTRIBUTE = true }
+        else
+            .{ .REPLACE_IF_EXISTS = replace },
+        .RootDirectory = if (absolute) null else root,
+        .FileName = space.span(),
+    });
+    return ntSetInfo(handle, info.toBuffer(), if (posix_semantics) .RenameEx else .Rename);
+}
+
 /// How a Windows rename by handle ended.
 pub const RenameOutcome = enum { renamed, collision, denied, sharing };
 
@@ -1246,24 +1291,16 @@ pub const RenameOutcome = enum { renamed, collision, denied, sharing };
 /// NTFS reports "the target is open" as access denied. A route has no
 /// rename by handle, so it renames by `from`'s name.
 pub fn renameByHandle(io: Io, handle: windows.HANDLE, from_dir: windows.HANDLE, from: []const u8, root: windows.HANDLE, name: []const u8, replace: bool) RenameError!RenameOutcome {
-    const space = try ntName(root, name);
-    const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
-    var info: windows.FILE.RENAME_INFORMATION = .init(.{
-        .Flags = .{ .REPLACE_IF_EXISTS = replace, .POSIX_SEMANTICS = true, .IGNORE_READONLY_ATTRIBUTE = true },
-        .RootDirectory = if (absolute) null else root,
-        .FileName = space.span(),
-    });
-    var status = switch (try retryingNt(io, .win_rename_ex, name, ntSetInfo, .{ handle, info.toBuffer(), .RenameEx })) {
+    var status = switch (try retryingNt(io, .win_rename_ex, name, ntRenameByHandle, .{ handle, root, name, replace, true })) {
         .code => |c| c,
         .route => |route| return renameRouted(route, from_dir, from, root, name, replace),
     };
     if (status == .INVALID_PARAMETER or status == .INVALID_INFO_CLASS or status == .NOT_SUPPORTED) {
-        info.Flags = .{ .REPLACE_IF_EXISTS = replace };
-        status = statusOf(try retryingNt(io, .rename, name, ntSetInfo, .{ handle, info.toBuffer(), .Rename }), .NOT_SUPPORTED);
+        status = statusOf(try retryingNt(io, .rename, name, ntRenameByHandle, .{ handle, root, name, replace, false }), .NOT_SUPPORTED);
         // The legacy rename will not replace a read-only target: clear the
         // attribute once and rename again.
         if (status == .ACCESS_DENIED and replace and clearReadOnly(io, root, name)) {
-            status = statusOf(try retryingNt(io, .rename, name, ntSetInfo, .{ handle, info.toBuffer(), .Rename }), .NOT_SUPPORTED);
+            status = statusOf(try retryingNt(io, .rename, name, ntRenameByHandle, .{ handle, root, name, replace, false }), .NOT_SUPPORTED);
         }
     }
     return switch (status) {
@@ -1273,13 +1310,14 @@ pub fn renameByHandle(io: Io, handle: windows.HANDLE, from_dir: windows.HANDLE, 
         .SHARING_VIOLATION, .DELETE_PENDING => .sharing,
         .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => error.FileNotFound,
         .OBJECT_NAME_INVALID => error.BadPathName,
+        .NAME_TOO_LONG => error.NameTooLong,
         .NOT_SAME_DEVICE => error.CrossDevice,
         .DIRECTORY_NOT_EMPTY => error.DirNotEmpty,
         .FILE_IS_A_DIRECTORY => error.IsDir,
         .NOT_A_DIRECTORY => error.NotDir,
         .DISK_FULL => error.NoSpaceLeft,
         .MEDIA_WRITE_PROTECTED => error.ReadOnlyFileSystem,
-        else => windows.unexpectedStatus(status),
+        else => if (isDeviceFailureNt(status)) error.HardwareFailure else windows.unexpectedStatus(status),
     };
 }
 
@@ -1326,7 +1364,8 @@ pub fn dispose(io: Io, handle: windows.HANDLE, dir: windows.HANDLE, name: []cons
         .SHARING_VIOLATION => error.FileBusy,
         .DIRECTORY_NOT_EMPTY, .FILE_IS_A_DIRECTORY => error.IsDir,
         .MEDIA_WRITE_PROTECTED => error.ReadOnlyFileSystem,
-        else => windows.unexpectedStatus(status),
+        .DISK_FULL => error.NoSpaceLeft,
+        else => if (isDeviceFailureNt(status)) error.FileSystem else windows.unexpectedStatus(status),
     };
 }
 
@@ -1367,11 +1406,20 @@ fn ntQueryVolume(handle: windows.HANDLE, buf: []u8) windows.NTSTATUS {
     return windows.ntdll.NtQueryVolumeInformationFile(handle, &iosb, buf.ptr, @intCast(buf.len), .Volume);
 }
 
+fn statFailureNt(status: windows.NTSTATUS) StatIdError {
+    return switch (status) {
+        .ACCESS_DENIED => error.AccessDenied,
+        else => if (isDeviceFailureNt(status)) error.InputOutput else windows.unexpectedStatus(status),
+    };
+}
+
 fn statIdWindows(io: Io, handle: windows.HANDLE) StatIdError!Id {
     var id: FileIdInformation = undefined;
     const status = switch (try retryingNt(io, .stat_id, null, ntQueryInfo, .{ handle, std.mem.asBytes(&id), .Id })) {
         .code => |c| c,
-        .route => |route| return routedId(try fileOf(handle).stat(route.io)),
+        // The process's current directory is a handle of its own to a
+        // simulation, which names it as a directory, not as a file.
+        .route => |route| return routedId(if (handle == Io.Dir.cwd().handle) try dirOf(handle).stat(route.io) else try fileOf(handle).stat(route.io)),
     };
     switch (status) {
         .SUCCESS => return .{
@@ -1382,7 +1430,7 @@ fn statIdWindows(io: Io, handle: windows.HANDLE) StatIdError!Id {
         // No 128-bit ids (FAT, some redirectors): the volume's 32-bit
         // serial and the 64-bit index are what there is.
         .INVALID_PARAMETER, .INVALID_INFO_CLASS, .NOT_IMPLEMENTED, .NOT_SUPPORTED => {},
-        else => return windows.unexpectedStatus(status),
+        else => return statFailureNt(status),
     }
     var volume: extern struct {
         info: windows.FILE.FS_VOLUME_INFORMATION,
@@ -1391,13 +1439,13 @@ fn statIdWindows(io: Io, handle: windows.HANDLE) StatIdError!Id {
     switch (ntQueryVolume(handle, std.mem.asBytes(&volume))) {
         .SUCCESS, .BUFFER_OVERFLOW => {},
         .ACCESS_DENIED => return error.AccessDenied,
-        else => |s| return windows.unexpectedStatus(s),
+        else => |s| return statFailureNt(s),
     }
     var internal: windows.FILE.INTERNAL_INFORMATION = undefined;
     switch (ntQueryInfo(handle, std.mem.asBytes(&internal), .Internal)) {
         .SUCCESS => {},
         .ACCESS_DENIED => return error.AccessDenied,
-        else => |s| return windows.unexpectedStatus(s),
+        else => |s| return statFailureNt(s),
     }
     return .{
         .volume = .fromRaw(volume.info.VolumeSerialNumber),
@@ -1406,20 +1454,16 @@ fn statIdWindows(io: Io, handle: windows.HANDLE) StatIdError!Id {
 }
 
 fn statIdPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow: bool) StatPathError!Id {
-    const space = try ntName(root, sub_path);
-    var name = space.string();
-    const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
-    const attr: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = if (absolute) null else root, .ObjectName = &name };
     const access: windows.ACCESS_MASK = .{
         .STANDARD = .{ .SYNCHRONIZE = true },
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true } },
     };
     var handle: windows.HANDLE = undefined;
     const status = switch (try retryingNt(io, .open_file, sub_path, ntCreate, .{
-        &handle,                                                                         access,
-        &attr,                                                                           windows.FILE.ATTRIBUTE{ .NORMAL = true },
-        windows.FILE.SHARE.VALID_FLAGS,                                                  windows.FILE.CREATE_DISPOSITION.OPEN,
-        windows.FILE.MODE{ .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = !follow },
+        &handle,                                  access,
+        root,                                     sub_path,
+        windows.FILE.ATTRIBUTE{ .NORMAL = true }, windows.FILE.SHARE.VALID_FLAGS,
+        windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = !follow },
     })) {
         .code => |c| c,
         .route => |route| blk: {
@@ -1440,7 +1484,7 @@ pub fn volumeName(io: Io, handle: windows.HANDLE) StatIdError!DeviceId {
         if (hook.call(hook.ctx, .volume_name, null)) |r| switch (r) {
             .value => |v| return .fromRaw(v),
             .canceled => return error.Canceled,
-            .code => |c| if (c != success) return windows.unexpectedStatus(c),
+            .code => |c| if (c != success) return statFailureNt(c),
         };
         // A route's file system is one volume, with no name to hash.
         if (hook.route != null) return .fromRaw(0);
@@ -1453,7 +1497,7 @@ pub fn volumeName(io: Io, handle: windows.HANDLE) StatIdError!DeviceId {
         // A filesystem that will not say: one name for all of them, so the
         // serial alone decides, as before the name was asked.
         .INVALID_PARAMETER, .INVALID_INFO_CLASS, .NOT_IMPLEMENTED, .NOT_SUPPORTED => return .fromRaw(0),
-        else => return windows.unexpectedStatus(status),
+        else => return statFailureNt(status),
     }
     const chars = @min(buf.len / 2, buf.name.len);
     return .fromRaw(std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(buf.name[0..chars])));

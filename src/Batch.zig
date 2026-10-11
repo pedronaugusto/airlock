@@ -186,7 +186,7 @@ pub const Options = struct {
     blocking: ?Blocking = null,
 };
 
-pub const Error = Pending.CommitError || platform.SyncPathError || platform.DirSyncError || Io.File.StatError || error{BatchFull};
+pub const Error = Pending.CommitError || platform.SyncPathError || platform.DirSyncError || sys.StatIdError || error{BatchFull};
 
 /// `Error`, and a filesystem that cannot keep the level.
 pub const CommitOrRefuseError = Error || error{

@@ -126,7 +126,7 @@ pub const CreateOptions = struct {
     writeback_bytes: u32 = 0,
 };
 
-pub const CreateError = Io.File.OpenError || Io.File.SetPermissionsError || Io.Dir.StatFileError || error{
+pub const CreateError = sys.OpenFileError || sys.SetModeError || sys.StatPathError || error{
     /// Windows: the exact name lingers while another process holds the
     /// file it named, deleted.
     Busy,
@@ -393,7 +393,7 @@ pub const CommitOptions = struct {
 /// `Batch` syncs it.
 pub const Committed = struct { reached: Reached, kept: bool };
 
-pub const CommitError = platform.DirSyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.File.Writer.Error || error{
+pub const CommitError = platform.DirSyncError || Io.Dir.RenameError || sys.UnlinkError || Io.File.Writer.Error || error{
     /// `create_new`, and the name is taken. The temp is removed.
     PathAlreadyExists,
     /// The new name is visible; its directory sync failed or was
@@ -662,7 +662,7 @@ fn taken(p: *Staged, io: Io, publish: Publish) CommitError!Committed {
     return .{ .reached = .none, .kept = true };
 }
 
-fn removeTakenTemp(p: *Staged, io: Io) Io.Dir.DeleteFileError!void {
+fn removeTakenTemp(p: *Staged, io: Io) sys.UnlinkError!void {
     if (is_windows) {
         try sys.dispose(io, p.file.handle, p.parent.handle, p.tempName());
         return;
