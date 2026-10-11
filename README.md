@@ -226,15 +226,18 @@ pages and Microsoft's documentation, and on the crash model below.
 - [aegis](https://github.com/pedronaugusto/aegis) supplies the distinct volume
   and device ids, the typed batch slot index and the always-on contracts; the
   module uses its `id`, `handle` and `assert` namespaces alone.
-- [preflight](https://github.com/pedronaugusto/preflight) runs the source checks,
-  the tests and CI.
+- [bay](https://github.com/pedronaugusto/bay) runs airlock's development.
+  [preflight](https://github.com/pedronaugusto/preflight) (the source checks,
+  the tests and CI) is a dev dependency, which a project that depends on airlock
+  never sees.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the `FaultIo`,
-  clock and `everyFault` the tests and `airlock.testing` run on, fetched only
-  by a build that asks for them.
+  clock and `everyFault` the tests and `airlock.testing` run on. It is a lazy
+  dependency, fetched only by a build that asks for `airlock.testing`, and
+  also a dev dependency, which the benchmarks measure through.
 
 ## Testing
 
-`zig build test` runs the unit suite and the example. Every raw call is a step
+`bay test` runs the unit suite and the example. Every raw call is a step
 of a [shakedown](https://github.com/pedronaugusto/shakedown) `FaultIo`, so the
 tests assert the exact calls each level makes on each platform, which fixes
 the barrier counts above. They fault each call with each class of error: a
@@ -250,7 +253,7 @@ platform's documented persistence rules and enumerates every state a crash
 could leave; on macOS it runs with the barrier honoured and dropped, and shows
 the window `barrier = false` closes. A batch's descriptors are counted at every
 raw call, so the budget above is measured at its peak, and the Windows retry
-deadlines run on shakedown's clock. `zig build bench` times the benchmarks in
+deadlines run on shakedown's clock. `bay bench` times the benchmarks in
 ReleaseFast by hand: each level's sync cost, replaces and batches per level
 and size, the raw calls and barriers of each operation counted through the
 seam, and relic's durability code beside airlock on the same work. Run from
@@ -293,7 +296,7 @@ collector, or a second process, while a lock is about to be taken, and let it go
 
 [CI](.github/workflows/ci.yml) runs the source checks and the Linux Debug suite
 on every push it is asked for, and before a merge the Debug suite on macOS and
-Windows as well. `zig build check` compiles the local tests and example; CI cross-compiles for `x86_64-linux-gnu`,
+Windows as well. `bay check` compiles the local tests and example; CI cross-compiles for `x86_64-linux-gnu`,
 `aarch64-linux-gnu`, `x86_64-linux-musl`, `x86_64-windows-gnu`,
 `aarch64-windows-gnu`, `x86_64-macos` and `aarch64-macos`.
 

@@ -1,51 +1,48 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) !void {
-    // lazyImport compares every package of the dependency tree at comptime;
-    // a large tree runs past the default quota of 1000 branches.
-    @setEvalBranchQuota(100_000);
+/// What a project that depends on airlock builds: the `airlock` module, pure Zig
+/// over `std` and aegis (its `id`, `handle` and `assert` namespaces), with
+/// nothing to link and no build options, so nothing a consumer has to match.
+/// The seam in front of its raw calls is a module of its own that only airlock
+/// and `airlock.testing` import, so neither exports it. `airlock.testing` is
+/// made by `testing`, and only a build that calls it fetches shakedown.
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    b.modules.put(b.graph.arena, "airlock", airlockModule(b, target, optimize)) catch @panic("OOM");
+}
 
-    //=====================================================================
-    // The module. Pure Zig over `std` and aegis (its `id`, `handle` and
-    // `assert` namespaces): nothing to link and no build options, so nothing a
-    // consumer has to match. The seam in front of its raw calls is a module of
-    // its own that only airlock and `airlock.testing` import, so neither
-    // exports it.
-    //=====================================================================
-
-    const module = airlockModule(b, target, optimize);
-    b.modules.put(b.graph.arena, "airlock", module) catch @panic("OOM");
-
-    // Everything below is airlock's own: a project depending on airlock
-    // neither needs nor fetches shakedown or preflight.
-    if (b.pkg_hash.len != 0) return;
-
-    //=====================================================================
-    // Tests, on `airlock.testing`. shakedown is a lazy, test-only
-    // dependency: production airlock imports nothing of ours. Its error is
-    // returned last, so one configure pass asks for it and for preflight
-    // together.
-    //=====================================================================
-
+/// airlock's development: its tests, example and benchmarks under preflight's
+/// gate. The tests run on `airlock.testing` over shakedown, which airlock ships
+/// lazily for that seam; it is bound to airlock's aegis. Run through bay.
+pub fn dev(b: *std.Build, tools: type) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
     const test_filter = b.option([]const u8, "test-filter", "Select tests by name");
+    const package = b.dependency("airlock", .{ .target = target, .optimize = optimize });
+    const p = package.builder;
+    const module = package.module("airlock");
+    // Fetches shakedown on the first pass, which ends here until it is there.
+    const seam = testing(package) catch return;
+
+    //=====================================================================
+    // Tests, on `airlock.testing`. Production airlock imports nothing of
+    // ours; shakedown is the seam's, fetched only by a build that asks for it.
+    //=====================================================================
+
     const tests = b.addTest(.{
         .name = "airlock-tests",
         .filters = if (test_filter) |filter| &.{filter} else &.{},
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests.zig"),
+            .root_source_file = p.path("src/tests.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "seam", .module = module.import_table.get("seam").? }},
         }),
     });
-    tests.root_module.addImport("aegis", aegisModule(b, target, optimize));
-    var needed: error{LazyDependencyNeeded}!void = {};
-    if (testingModule(b, module)) |seam| {
-        tests.root_module.addImport("airlock.testing", seam);
-        tests.root_module.addImport("shakedown", seam.import_table.get("shakedown").?);
-    } else |err| needed = err;
+    tests.root_module.addImport("aegis", aegisModule(p, target, optimize));
+    tests.root_module.addImport("airlock.testing", seam);
+    tests.root_module.addImport("shakedown", seam.import_table.get("shakedown").?);
 
     const test_step = b.step("test", "Run the tests, the example and benchmark startup");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -62,14 +59,14 @@ pub fn build(b: *std.Build) !void {
     const example = b.addExecutable(.{
         .name = "usage",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/usage.zig"),
+            .root_source_file = p.path("examples/usage.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "airlock", .module = module }},
         }),
     });
     const example_run = b.addRunArtifact(example);
-    example_run.setCwd(b.path("."));
+    example_run.setCwd(p.path("."));
     const examples_step = b.step("examples", "Build and run the usage example");
     examples_step.dependOn(&example_run.step);
     test_step.dependOn(examples_step);
@@ -78,34 +75,30 @@ pub fn build(b: *std.Build) !void {
     b.getInstallStep().dependOn(check_step);
 
     //=====================================================================
-    // CI wiring and the benchmarks. preflight is lazy and only this tree
-    // asks for it. `zig build bench` times bench/main.zig in ReleaseFast
+    // The gate and the benchmarks. `bay bench` times bench/main.zig in ReleaseFast
     // by hand; CI invokes `--smoke`, which returns without measuring rows.
     //=====================================================================
 
-    if (b.lazyImport(@This(), "preflight")) |preflight| {
-        preflight.addCi(b, .{
-            .tests = test_step,
-            .portable_tests = true,
-            .bench = .{
-                .programs = &.{
-                    .{ .name = "airlock-bench", .source = "bench/main.zig" },
-                    .{ .name = "airlock-macos-batch", .source = "bench/macos_batch.zig" },
-                },
-                .imports = benchImports,
-                .target = target,
-                .optimize = optimize,
+    tools.preflight.addCi(b, p, .{
+        .tests = test_step,
+        .portable_tests = true,
+        .bench = .{
+            .programs = &.{
+                .{ .name = "airlock-bench", .source = "bench/main.zig" },
+                .{ .name = "airlock-macos-batch", .source = "bench/macos_batch.zig" },
             },
-        });
-        // A project that depends on airlock by path, with no packages to
-        // fetch: the build a consumer gets.
-        preflight.addConsumerCheck(b, .{
-            .package = "airlock",
-            .program = b.path("ci/consumer.zig"),
-            .packages = &.{b.dependency("aegis", .{ .target = target, .optimize = optimize })},
-        });
-    }
-    return needed;
+            .imports = benchImports,
+            .target = target,
+            .optimize = optimize,
+        },
+    });
+    // A project that depends on airlock by path, with no packages to
+    // fetch: the build a consumer gets.
+    tools.preflight.addConsumerCheck(b, p, .{
+        .package = "airlock",
+        .program = p.path("ci/consumer.zig"),
+        .packages = &.{p.dependency("aegis", .{ .target = target, .optimize = optimize })},
+    });
 }
 
 /// The test seam for a project's tests: the module `airlock.testing`, on
@@ -165,7 +158,9 @@ fn seamModule(b: *std.Build, airlock: *std.Build.Module, shakedown: *std.Build.M
 /// The published `airlock.testing`, made once per build of the package.
 fn testingModule(b: *std.Build, airlock: *std.Build.Module) error{LazyDependencyNeeded}!*std.Build.Module {
     if (b.modules.get("airlock.testing")) |made| return made;
-    const shakedown = try b.dependencyLazy("shakedown", .{ .target = airlock.resolved_target.?, .optimize = airlock.optimize.? });
+    // One aegis is linked: shakedown takes airlock's own.
+    const shakedown = try b.dependencyLazy("shakedown", .{ .target = airlock.resolved_target.?, .optimize = airlock.optimize.?, .aegis = .consumer });
+    shakedown.module("shakedown").addImport("aegis", airlock.import_table.get("aegis").?);
     const module = seamModule(b, airlock, shakedown.module("shakedown"));
     b.modules.put(b.graph.arena, "airlock.testing", module) catch @panic("OOM");
     return module;
@@ -173,15 +168,16 @@ fn testingModule(b: *std.Build, airlock: *std.Build.Module) error{LazyDependency
 
 /// airlock and its seam again, in the mode a benchmark builds in: an
 /// imported module keeps its own mode, so a ReleaseFast benchmark over the
-/// Debug module would time the Debug module.
+/// Debug module would time the Debug module. `b` is the development build.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
-    const airlock = airlockModule(b, target, optimize);
-    // The tests asked for shakedown first; until it is fetched the build
-    // stops before anything is compiled.
-    const shakedown = b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize }) catch
-        return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "airlock", .module = airlock }}) catch @panic("OOM");
+    const p = b.dependency("airlock", .{ .target = target, .optimize = optimize }).builder;
+    const airlock = airlockModule(p, target, optimize);
+    // The same binding as `testing` makes, over a module of this mode.
+    const shakedown = p.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
+    shakedown.module("shakedown").addImport("aegis", airlock.import_table.get("aegis").?);
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "airlock", .module = airlock },
-        .{ .name = "airlock.testing", .module = seamModule(b, airlock, shakedown.module("shakedown")) },
+        .{ .name = "shakedown", .module = shakedown.module("shakedown") },
+        .{ .name = "airlock.testing", .module = seamModule(p, airlock, shakedown.module("shakedown")) },
     }) catch @panic("OOM");
 }
