@@ -164,7 +164,6 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "airlock", .module = airlock },
-        .{ .name = "shakedown", .module = shakedown.module("shakedown") },
         .{ .name = "airlock.testing", .module = seamModule(p, airlock, shakedown.module("shakedown")) },
     }) catch @panic("OOM");
 }

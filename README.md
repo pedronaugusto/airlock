@@ -270,8 +270,9 @@ given, so an `Io` double of your own never sees them. `airlock.testing` is the
 `Io` that does: a `Seam` over shakedown's `FaultIo`, where each of airlock's
 calls is a traced step, counted by `count` and `syncs`, failed by a `Plan` of
 airlock calls (`fail`, `always`), and reached by shakedown's `everyFault`.
-Your build gets it from airlock's build.zig, on your shakedown, so your tests
-link one:
+Your build gets it from airlock's build.zig, on your shakedown. Under bay your tests
+link one shakedown and one aegis; without bay, pin the aegis release shakedown pins
+(shakedown's README says how):
 
 ```zig
 const airlock_build = @import("airlock"); // airlock's build.zig, at the top of yours
