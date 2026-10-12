@@ -9,7 +9,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking
 
 - `testing(dependency, shakedown)` takes the project's own shakedown module, and `aegis(dependency)` gives the aegis airlock is built on, for the project to bind its shakedown to with shakedown's `useAegis`: a project's tests link the shakedown it pins, and nothing reaches into airlock's modules for one. airlock no longer has a lazy shakedown dependency, and `testing` no longer returns `error.LazyDependencyNeeded`.
-
 - airlock is developed with [bay](https://github.com/pedronaugusto/bay): preflight is a dev dependency, and the tests, example and benchmarks are the development build's (`bay test`, `bay bench`). shakedown stays a lazy dependency for `airlock.testing` and is also a dev dependency. What a project that depends on airlock builds is unchanged, except that `airlock.testing` takes shakedown bound to airlock's aegis, so a binary links one aegis.
 - `sys` leaves the module. The test seam is `airlock.testing`, a module of its
   own that a project's build gets from `@import("airlock").testing(dependency)`:
@@ -40,40 +39,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `airlock.testing` takes a `Gate`: `Options.gate` stands a task still at the first
   raw call of a kind at a name, until the test releases it, for a test that
   races something else against one step of a publish. `Seam.reopen` arms it again.
-
-### Fixed
-
-- On macOS a publish whose file no sync reached (every sync refused) reports
-  `.none`, not `.full`: the directory's `F_FULLFSYNC` persists only what was
-  handed to the device.
-
-### Changed
-
-- Using a `Pending` out of turn stops the program in every build, where it was
-  undefined behaviour in `ReleaseFast`, or a write to a closed descriptor:
-  `file()` and `writer()` only while it is `open` (after a sync the temp is
-  closed on POSIX, and its descriptor number may belong to another file),
-  `commit` and `commitOrRefuse` only until it has ended, and
-  `Batch.addPending` only a pending that is `open` or `synced`.
-  `Batch.init` refuses storage of more than `u32` slots, and `Seam.setPlan` a
-  plan of more than 16 entries, the same way.
-- A staged file's moves are checked against one table (a pending never goes
-  back, only a synced temp is published or kept, `discard` follows any state),
-  in every build.
-- A volume's number and the hash of its device name are different types inside
-  a batch, so one cannot stand for the other in a volume key; `FileId` keeps
-  its `u64` and `u128` fields, which strand writes into checkpoints.
-- Darwin batches overlap per-file writeouts within `parallel`, retaining writing-handle error checks and the same per-volume barriers and flushes.
-
-### Added
-
 - Optional `Blocking` executor in sync, publish and batch options: raw syncs
   can run on an application's executor while airlock needs no runtime of its own.
   Null runs inline; adapters drain started jobs before returning.
 - Raw primitive probes, isolated new/overwrite rows, append comparisons and
   per-row barrier counts in `bench/`; macOS and Linux measurements with the
   design's acceptance targets. CI compiles benchmark rows without timing them.
-
 - `Level` and `Reached`: a durability level per call, and what the call
   reached.
 - `syncFile`, `syncDir` and `syncPath`, through the platform's fallback chain:
@@ -105,5 +76,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `FileId`, a file's volume and 128-bit number, by handle or by path.
 - `airlock.testing`, the test seam every raw call goes through, on shakedown,
   for airlock's tests and its users'.
+
+### Changed
+
+- Using a `Pending` out of turn stops the program in every build, where it was
+  undefined behaviour in `ReleaseFast`, or a write to a closed descriptor:
+  `file()` and `writer()` only while it is `open` (after a sync the temp is
+  closed on POSIX, and its descriptor number may belong to another file),
+  `commit` and `commitOrRefuse` only until it has ended, and
+  `Batch.addPending` only a pending that is `open` or `synced`.
+  `Batch.init` refuses storage of more than `u32` slots, and `Seam.setPlan` a
+  plan of more than 16 entries, the same way.
+- A staged file's moves are checked against one table (a pending never goes
+  back, only a synced temp is published or kept, `discard` follows any state),
+  in every build.
+- A volume's number and the hash of its device name are different types inside
+  a batch, so one cannot stand for the other in a volume key; `FileId` keeps
+  its `u64` and `u128` fields, which strand writes into checkpoints.
+- Darwin batches overlap per-file writeouts within `parallel`, retaining writing-handle error checks and the same per-volume barriers and flushes.
+- Pins aegis 0.1.0.
+
+### Fixed
+
+- On macOS a publish whose file no sync reached (every sync refused) reports
+  `.none`, not `.full`: the directory's `F_FULLFSYNC` persists only what was
+  handed to the device.
 
 [Unreleased]: https://github.com/pedronaugusto/airlock/commits/main
