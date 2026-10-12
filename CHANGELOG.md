@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-12
+
 ### Breaking
 
 - `testing(dependency, shakedown)` takes the project's own shakedown module, and `aegis(dependency)` gives the aegis airlock is built on, for the project to bind its shakedown to with shakedown's `useAegis`: a project's tests link the shakedown it pins, and nothing reaches into airlock's modules for one. airlock no longer has a lazy shakedown dependency, and `testing` no longer returns `error.LazyDependencyNeeded`.
