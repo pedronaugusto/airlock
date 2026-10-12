@@ -13,8 +13,8 @@ pub fn build(b: *std.Build) void {
 }
 
 /// airlock's development: its tests, example and benchmarks under preflight's
-/// gate. The tests run on `airlock.testing` over shakedown, a dev dependency
-/// bound to airlock's aegis, as a project's tests are. Run through bay.
+/// gate. The tests run on `airlock.testing` over shakedown, a dev dependency,
+/// as a project's tests are. Run through bay.
 pub fn dev(b: *std.Build, tools: type) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -22,9 +22,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const package = b.dependency("airlock", .{ .target = target, .optimize = optimize });
     const p = package.builder;
     const module = package.module("airlock");
-    use_aegis = tools.shakedown.useAegis;
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-    use_aegis(shakedown, aegis(package));
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     const seam = testing(package, shakedown.module("shakedown"));
 
     //=====================================================================
@@ -105,26 +103,17 @@ pub fn dev(b: *std.Build, tools: type) void {
 
 /// The test seam for a project's tests: the module `airlock.testing`, for
 /// `airlock`'s dependency in that project's build, on `shakedown`, the
-/// project's own, bound to `aegis(airlock)` so that a test binary links one
-/// shakedown and one aegis.
+/// project's own, so that a test binary links one shakedown.
 ///
 ///     const airlock_build = @import("airlock"); // at the top of the build.zig
 ///
 ///     const airlock = b.dependency("airlock", .{ .target = target, .optimize = optimize });
-///     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-///     @import("shakedown").useAegis(shakedown, airlock_build.aegis(airlock));
+///     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
 ///     const seam = airlock_build.testing(airlock, shakedown.module("shakedown"));
 ///     tests.root_module.addImport("airlock.testing", seam);
 ///     tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
 pub fn testing(airlock: *std.Build.Dependency, shakedown: *std.Build.Module) *std.Build.Module {
     return seamModule(airlock.builder, airlock.module("airlock"), shakedown);
-}
-
-/// The aegis `airlock`'s dependency is built on, for the project's
-/// shakedown to be bound to (shakedown's `useAegis`), and for anything else
-/// of the project's that takes aegis's types from airlock.
-pub fn aegis(airlock: *std.Build.Dependency) *std.Build.Module {
-    return airlock.module("airlock").import_table.get("aegis").?;
 }
 
 /// `airlock` and the seam module it imports, built for `target` and
@@ -166,18 +155,13 @@ fn seamModule(b: *std.Build, airlock: *std.Build.Module, shakedown: *std.Build.M
     });
 }
 
-/// `tools.shakedown.useAegis`, set by `dev` for the benchmark imports, which are built without `tools`.
-var use_aegis: *const fn (*std.Build.Dependency, *std.Build.Module) void = undefined;
-
 /// airlock and its seam again, in the mode a benchmark builds in: an
 /// imported module keeps its own mode, so a ReleaseFast benchmark over the
 /// Debug module would time the Debug module. `b` is the development build.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const p = b.dependency("airlock", .{ .target = target, .optimize = optimize }).builder;
     const airlock = airlockModule(p, target, optimize);
-    // The same binding as the tests', over a module of this mode.
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-    use_aegis(shakedown, airlock.import_table.get("aegis").?);
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     return b.allocator.dupe(std.Build.Module.Import, &.{
         .{ .name = "airlock", .module = airlock },
         .{ .name = "shakedown", .module = shakedown.module("shakedown") },

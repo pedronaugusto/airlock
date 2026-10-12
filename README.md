@@ -270,15 +270,14 @@ given, so an `Io` double of your own never sees them. `airlock.testing` is the
 `Io` that does: a `Seam` over shakedown's `FaultIo`, where each of airlock's
 calls is a traced step, counted by `count` and `syncs`, failed by a `Plan` of
 airlock calls (`fail`, `always`), and reached by shakedown's `everyFault`.
-Your build gets it from airlock's build.zig, on your shakedown, bound to the
-aegis airlock is built on, so your tests link one of each:
+Your build gets it from airlock's build.zig, on your shakedown, so your tests
+link one:
 
 ```zig
 const airlock_build = @import("airlock"); // airlock's build.zig, at the top of yours
 
 const airlock = b.dependency("airlock", .{ .target = target, .optimize = optimize });
-const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-@import("shakedown").useAegis(shakedown, airlock_build.aegis(airlock));
+const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
 tests.root_module.addImport("airlock.testing", airlock_build.testing(airlock, shakedown.module("shakedown")));
 tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
 ```

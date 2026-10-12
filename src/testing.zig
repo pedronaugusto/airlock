@@ -16,7 +16,7 @@
 //!     try std.testing.expectEqual(1, seam.syncs());
 //!
 //! A project's build gets this module from `airlock`'s build.zig, on the
-//! project's own shakedown bound to `@import("airlock").aegis(airlock_dependency)`:
+//! project's own shakedown:
 //! `@import("airlock").testing(airlock_dependency, shakedown_module)`.
 const std = @import("std");
 const builtin = @import("builtin");
