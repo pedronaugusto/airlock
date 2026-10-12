@@ -231,9 +231,9 @@ pages and Microsoft's documentation, and on the crash model below.
   the tests and CI) is a dev dependency, which a project that depends on airlock
   never sees.
 - [shakedown](https://github.com/pedronaugusto/shakedown) is the `FaultIo`,
-  clock and `everyFault` the tests and `airlock.testing` run on. It is a lazy
-  dependency, fetched only by a build that asks for `airlock.testing`, and
-  also a dev dependency, which the benchmarks measure through.
+  clock and `everyFault` the tests and `airlock.testing` run on. It is a dev
+  dependency, which the benchmarks measure through too; a project's build that
+  asks for `airlock.testing` gives it its own.
 
 ## Testing
 
@@ -270,13 +270,17 @@ given, so an `Io` double of your own never sees them. `airlock.testing` is the
 `Io` that does: a `Seam` over shakedown's `FaultIo`, where each of airlock's
 calls is a traced step, counted by `count` and `syncs`, failed by a `Plan` of
 airlock calls (`fail`, `always`), and reached by shakedown's `everyFault`.
-Your build gets it from airlock's build.zig, and only then fetches shakedown:
+Your build gets it from airlock's build.zig, on your shakedown, bound to the
+aegis airlock is built on, so your tests link one of each:
 
 ```zig
 const airlock_build = @import("airlock"); // airlock's build.zig, at the top of yours
 
 const airlock = b.dependency("airlock", .{ .target = target, .optimize = optimize });
-tests.root_module.addImport("airlock.testing", try airlock_build.testing(airlock));
+const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
+@import("shakedown").useAegis(shakedown, airlock_build.aegis(airlock));
+tests.root_module.addImport("airlock.testing", airlock_build.testing(airlock, shakedown.module("shakedown")));
+tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
 ```
 
 ```zig

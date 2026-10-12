@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `testing(dependency, shakedown)` takes the project's own shakedown module, and `aegis(dependency)` gives the aegis airlock is built on, for the project to bind its shakedown to with shakedown's `useAegis`: a project's tests link the shakedown it pins, and nothing reaches into airlock's modules for one. airlock no longer has a lazy shakedown dependency, and `testing` no longer returns `error.LazyDependencyNeeded`.
+
 - airlock is developed with [bay](https://github.com/pedronaugusto/bay): preflight is a dev dependency, and the tests, example and benchmarks are the development build's (`bay test`, `bay bench`). shakedown stays a lazy dependency for `airlock.testing` and is also a dev dependency. What a project that depends on airlock builds is unchanged, except that `airlock.testing` takes shakedown bound to airlock's aegis, so a binary links one aegis.
 - `sys` leaves the module. The test seam is `airlock.testing`, a module of its
   own that a project's build gets from `@import("airlock").testing(dependency)`:
