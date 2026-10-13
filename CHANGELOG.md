@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-13
+
 ### Breaking
 
 - `aegis(dependency)` is gone. It gave a project the aegis to bind its shakedown to, and bay gives a graph one aegis, so nothing binds it: `testing` takes the project's shakedown as it is.
