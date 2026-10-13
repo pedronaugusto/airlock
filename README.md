@@ -189,11 +189,12 @@ calling task; only the raw sync runs elsewhere, and errno is read on that
 thread. Renames, opens, closes and identity calls stay on their existing path.
 Linux's optional early writeback initiates I/O without waiting and stays inline.
 
-The runtime owns the adapter. reactor's `blocking` facility will provide the
-sync-lane adapter for applications to wire into these options; airlock imports
-only std and aegis and has no dependency on reactor. For another executor, implement
-this small callback contract; every selected raw sync, including directory
-flushes, batch writeouts, barriers, fallbacks and fences, goes through it.
+The runtime owns the adapter. On a reactor runtime it is `reactor.syncLane`
+(`.blocking = .{ .run = reactor.syncLane }`), which runs each raw sync on the
+runtime's `sync` lane; airlock imports only std and aegis and has no dependency
+on reactor. For another executor, implement this small callback contract; every
+selected raw sync, including directory flushes, batch writeouts, barriers,
+fallbacks and fences, goes through it.
 
 ## Scope
 

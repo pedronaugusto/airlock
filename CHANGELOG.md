@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The README names reactor's adapter for `Blocking`: `reactor.syncLane`, which runs each raw sync on a runtime's `sync` lane.
+
 ## [0.3.1] - 2026-10-13
 
 ### Added
