@@ -16,8 +16,8 @@
     },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.7#9608fdbe59a78c835b0f466d59b182d23cb58baf",
-            .hash = "aegis-0.1.7-rsxouv3QBwALdSRI5UHUWiRqtoSFtabs6TVkrLEiaOoC",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.8#7081a64bbf1d2ea3aeef4f3a68789395129aae40",
+            .hash = "aegis-0.1.8-rsxouk3RBwB9Gf3ufLvaDfLadP9eSSCxDSpZq4v920O2",
         },
     },
     .dev_dependencies = .{
@@ -27,8 +27,8 @@
         },
 
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.5.4#3a726a2a44ff5bf0a92fdd377542b79ad5f30c3b",
-            .hash = "preflight-0.5.4-LX1ZwpDiDwBgvtQD93hVidVLiUB9g2V3-Xo80Vs4mwHg",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.5.5#8f3c97125d899197c426502338d21a754739af66",
+            .hash = "preflight-0.5.5-LX1ZwiDjDwAUhzeLVMFWbC6fN99BWcXW16QrIsyEtwgV",
         },
     },
 }
