@@ -795,7 +795,7 @@ fn Run(comptime fallback: Fallback) type {
             const by_device = a.device.compare(b.device);
             if (by_device != .eq) return by_device == .lt;
             if (a.id.file != b.id.file) return a.id.file < b.id.file;
-            return a.index.raw() < b.index.raw(); // same domain: add order breaks the tie
+            return a.index.compare(b.index) == .lt; // add order breaks the tie
         }
 
         fn sameDir(a: *const Slot, b: *const Slot) bool {
