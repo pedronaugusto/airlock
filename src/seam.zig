@@ -69,6 +69,9 @@ pub const Call = enum(u8) {
     /// What volume a directory is on: `fstatfs`; on Windows the volume's
     /// device query, the attribute query following it.
     statfs,
+    /// A batch of a directory's entries with their attributes: Darwin
+    /// `getattrlistbulk`.
+    scan,
 };
 
 /// An errno on POSIX, an NTSTATUS on Windows.

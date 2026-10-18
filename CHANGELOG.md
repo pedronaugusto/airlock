@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `airlock.testing.Call` gains `scan`, Darwin's batch call.
+
+### Added
+
+- `airlock.scan(dir, buffer)` (`airlock.Scan`): a directory's entries, each with its whole stat (`airlock.Stat`), read into a buffer the caller owns. Darwin reads them in batches through `getattrlistbulk`, the device, owner and group included; a volume that refuses the call, and every other platform, reads the directory and stats each entry, so on Windows an entry's kind is its attributes' and reparse tag's, not the listing's. A directory's size is zero on both arms. Over a simulation it reads and stats through the `Io`. Moved from relic's working-tree scan.
+
 ## [0.4.0] - 2026-10-18
 
 ### Breaking

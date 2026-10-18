@@ -1,8 +1,8 @@
 //! Durable files: sync a file or a directory at a chosen level and learn
 //! what was reached, publish a file or a symbolic link atomically, create
 //! directories durably, put many files under one barrier, remove the temps
-//! a crash left, tell files apart by identity, stat a path whole, and ask
-//! what volume a directory is on.
+//! a crash left, tell files apart by identity, stat a path whole, read a
+//! directory with its stats, and ask what volume a directory is on.
 //!
 //! Every call that may block takes `io: Io` first and never stores it;
 //! nothing allocates; buffers and slot storage belong to the caller.
@@ -114,6 +114,12 @@ pub const stat = stat_mod.stat;
 /// What volume a directory is on: remote or not, and its type's name.
 pub const Volume = @import("Volume.zig");
 
+/// One directory's entries with their stats, into a caller's buffer: Darwin
+/// reads them in batches.
+pub const Scan = @import("Scan.zig");
+/// A scan of a directory from its first entry.
+pub const scan = Scan.init;
+
 test {
     _ = level;
     _ = platform;
@@ -123,4 +129,5 @@ test {
     _ = FileId;
     _ = stat_mod;
     _ = Volume;
+    _ = Scan;
 }

@@ -15,6 +15,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/FileId.zig",
         "src/stat.zig",
         "src/Volume.zig",
+        "src/Scan.zig",
     } },
     .{ .name = "staging", .patterns = &.{
         "src/Staged.zig",
@@ -89,5 +90,6 @@ pub const owned: []const gantry.rules.TokenRule = &.{
         "unlinkat",
         "mkdirat",
         "symlinkat",
+        "getattrlistbulk",
     }, .owners = &.{ "src/sys.zig", "bench/primitives.zig", "bench/baseline/**" } },
 };

@@ -170,6 +170,12 @@ reads both as `FileNotFound`). `Volume.of` says whether a directory's volume
 is another machine's and names its file system, for a program about to put
 something there that not every volume holds, such as a Unix socket.
 
+`scan(dir, buffer)` reads a directory's entries, each with the stat `stat`
+gives it, into a buffer the caller owns. On Darwin it reads them in batches
+(`getattrlistbulk`, a call per several hundred entries); a volume without
+that call, and every other platform, is a directory read and a stat per
+entry. A directory's size is zero on either arm.
+
 Every raw call goes through one file, `src/sys.zig`, behind a test seam: when
 the `Io` a call is given carries a test's hook, the hook decides the call
 first, and a hook over a simulated file system has the call made there

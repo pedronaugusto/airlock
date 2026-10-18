@@ -902,7 +902,7 @@ pub fn kindOfMode(mode: u32) Io.File.Kind {
 }
 
 /// The type bits of a kind, for a stat taken through a route.
-fn modeOfKind(kind: Io.File.Kind) u32 {
+pub fn modeOfKind(kind: Io.File.Kind) u32 {
     return switch (kind) {
         .file => 0o100000,
         .directory => 0o040000,
@@ -916,7 +916,7 @@ fn modeOfKind(kind: Io.File.Kind) u32 {
 }
 
 /// The mode's permission bits, as `std.Io` holds them.
-fn permissionsOfMode(mode: u32) Io.File.Permissions {
+pub fn permissionsOfMode(mode: u32) Io.File.Permissions {
     return if (Io.File.Permissions.has_executable_bit) .fromMode(@intCast(mode & 0o7777)) else .default_file;
 }
 
@@ -1000,6 +1000,104 @@ pub fn statPath(io: Io, dir: Handle, sub_path: []const u8, follow: bool) StatPat
         .attributes = 0,
         .reparse_tag = 0,
     };
+}
+
+/// Darwin's `getattrlistbulk(2)`: the attributes a batch asks of every
+/// entry, packed in the order of their bits, after the entry's length and
+/// the set the volume returned.
+pub const batch_attr = struct {
+    pub const cmn_name: u32 = 0x0000_0001;
+    pub const cmn_devid: u32 = 0x0000_0002;
+    pub const cmn_objtype: u32 = 0x0000_0008;
+    pub const cmn_crtime: u32 = 0x0000_0200;
+    pub const cmn_modtime: u32 = 0x0000_0400;
+    pub const cmn_chgtime: u32 = 0x0000_0800;
+    pub const cmn_ownerid: u32 = 0x0000_8000;
+    pub const cmn_grpid: u32 = 0x0001_0000;
+    pub const cmn_accessmask: u32 = 0x0002_0000;
+    pub const cmn_fileid: u32 = 0x0200_0000;
+    pub const cmn_returned_attrs: u32 = 0x8000_0000;
+    pub const file_datalength: u32 = 0x0000_0200;
+
+    pub const common = cmn_returned_attrs | cmn_name | cmn_devid | cmn_objtype | cmn_crtime |
+        cmn_modtime | cmn_chgtime | cmn_ownerid | cmn_grpid | cmn_accessmask | cmn_fileid;
+
+    /// The kernel's `struct attrlist`: two shorts and five bitmaps.
+    const List = extern struct {
+        bitmapcount: u16,
+        reserved: u16,
+        commonattr: u32,
+        volattr: u32,
+        dirattr: u32,
+        fileattr: u32,
+        forkattr: u32,
+    };
+
+    comptime {
+        std.debug.assert(@sizeOf(List) == 24);
+    }
+
+    const list: List = .{
+        .bitmapcount = 5,
+        .reserved = 0,
+        .commonattr = common,
+        .volattr = 0,
+        .dirattr = 0,
+        .fileattr = file_datalength,
+        .forkattr = 0,
+    };
+};
+
+const darwin_batch = struct {
+    extern "c" fn getattrlistbulk(dirfd: c_int, alist: *const anyopaque, attr_buf: [*]u8, attr_buf_size: usize, options: u64) c_int;
+};
+
+/// One batch call. The first of a scan puts the descriptor's offset back
+/// at the start, since a batch walks it forward and the caller's handle may
+/// have been scanned before.
+fn batchRaw(dir: posix.fd_t, buffer: []u8, first: bool, count: *u32) c_int {
+    if (first) _ = std.c.lseek(dir, 0, std.c.SEEK.SET);
+    var list = batch_attr.list;
+    const rc = darwin_batch.getattrlistbulk(dir, &list, buffer.ptr, buffer.len, 0);
+    if (rc >= 0) count.* = @intCast(rc);
+    return rc;
+}
+
+/// What one batch call came to.
+pub const BatchRead = union(enum) {
+    /// This many entries are packed at the start of the buffer; none at the
+    /// end of the directory.
+    entries: u32,
+    /// The volume has no batch call: nothing was read, and the directory
+    /// is read the ordinary way. Only a scan's first call answers this.
+    unsupported,
+    /// A route's file system has no batch call: read it through the `Io`.
+    routed,
+};
+
+pub const BatchError = Io.Dir.Reader.Error || error{InputOutput};
+
+/// Darwin: the next batch of `dir`'s entries with their attributes, into
+/// `buffer`.
+pub fn readBatch(io: Io, dir: Handle, buffer: []u8, first: bool) BatchError!BatchRead {
+    if (!is_darwin) return .unsupported;
+    var count: u32 = 0;
+    const e = switch (try retrying(io, .scan, null, batchRaw, .{ dir, buffer, first, &count })) {
+        .code => |c| c,
+        .route => return if (first) .routed else error.Unexpected,
+    };
+    switch (e) {
+        .SUCCESS => {},
+        // A volume that does not support the call, or not every attribute
+        // asked of it, refuses before it gives anything out.
+        .OPNOTSUPP, .INVAL => return if (first) .unsupported else posix.unexpectedErrno(e),
+        .ACCES => return error.AccessDenied,
+        .PERM => return error.PermissionDenied,
+        .NOMEM => return error.SystemResources,
+        .IO => return error.InputOutput,
+        else => return posix.unexpectedErrno(e),
+    }
+    return .{ .entries = count };
 }
 
 /// What a volume is, as the platform describes it.
