@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A batch orders slots that share a device and file by `Index.compare`, aegis's
+  order for indices, not by their raw values.
+
 ## [0.3.5] - 2026-10-14
 
 ### Changed
