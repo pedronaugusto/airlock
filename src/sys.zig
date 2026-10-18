@@ -843,6 +843,314 @@ fn statPathFailure(e: posix.E) StatPathError {
     };
 }
 
+/// Everything one stat of a path reports, as the platform reports it.
+pub const Full = struct {
+    kind: Io.File.Kind,
+    size: u64,
+    /// The type and permission bits; on Windows none (0).
+    mode: u32,
+    /// The mode's permissions, or on Windows the file's attributes, as
+    /// `std.Io` sets them.
+    permissions: Io.File.Permissions,
+    mtime: Io.Timestamp,
+    /// The status change time; on Windows the attribute change time.
+    ctime: Io.Timestamp,
+    /// The creation time where the platform keeps one: Windows, Darwin and
+    /// the BSDs, Linux where `statx` reports it.
+    birth: ?Io.Timestamp,
+    /// The inode; on Windows the 64-bit file index.
+    inode: u64,
+    /// The device, as the platform's `dev_t` holds it (Linux: `makedev`);
+    /// on Windows the volume's serial number.
+    device: u64,
+    /// The owner and group; zero on Windows.
+    uid: u32,
+    gid: u32,
+    /// Windows: the attributes and, for a reparse point, its tag. Zero
+    /// elsewhere.
+    attributes: u32,
+    reparse_tag: u32,
+};
+
+fn statxFullRaw(dir: posix.fd_t, path: [*:0]const u8, flags: u32, buf: *linux.Statx) usize {
+    const mask: linux.STATX = .{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .UID = true, .GID = true, .MTIME = true, .CTIME = true, .BTIME = true };
+    return linux.statx(dir, path, flags | linux.AT.NO_AUTOMOUNT, mask, buf);
+}
+
+fn nanoseconds(sec: anytype, nsec: anytype) Io.Timestamp {
+    return .{ .nanoseconds = @as(i96, sec) * std.time.ns_per_s + nsec };
+}
+
+/// A Linux device number as glibc's `makedev` packs it into a `dev_t`.
+fn linuxDevice(major: u32, minor: u32) u64 {
+    return ((@as(u64, major) & 0xfffff000) << 32) | ((@as(u64, major) & 0xfff) << 8) |
+        ((@as(u64, minor) & 0xffffff00) << 12) | (@as(u64, minor) & 0xff);
+}
+
+/// The file type the mode bits name.
+pub fn kindOfMode(mode: u32) Io.File.Kind {
+    return switch (mode & 0o170000) {
+        0o100000 => .file,
+        0o040000 => .directory,
+        0o120000 => .sym_link,
+        0o060000 => .block_device,
+        0o020000 => .character_device,
+        0o010000 => .named_pipe,
+        0o140000 => .unix_domain_socket,
+        else => .unknown,
+    };
+}
+
+/// The type bits of a kind, for a stat taken through a route.
+fn modeOfKind(kind: Io.File.Kind) u32 {
+    return switch (kind) {
+        .file => 0o100000,
+        .directory => 0o040000,
+        .sym_link => 0o120000,
+        .block_device => 0o060000,
+        .character_device => 0o020000,
+        .named_pipe => 0o010000,
+        .unix_domain_socket => 0o140000,
+        else => 0,
+    };
+}
+
+/// The mode's permission bits, as `std.Io` holds them.
+fn permissionsOfMode(mode: u32) Io.File.Permissions {
+    return if (Io.File.Permissions.has_executable_bit) .fromMode(@intCast(mode & 0o7777)) else .default_file;
+}
+
+/// A path's stat through a route: what `std.Io` reports, on the one volume
+/// a route's file system is, owned by no one.
+fn routedFull(stat: Io.File.Stat) Full {
+    const mode: u32 = if (Io.File.Permissions.has_executable_bit) modeOfKind(stat.kind) | @as(u32, @intCast(stat.permissions.toMode() & 0o7777)) else 0;
+    return .{
+        .kind = stat.kind,
+        .size = stat.size,
+        .mode = mode,
+        .permissions = stat.permissions,
+        .mtime = stat.mtime,
+        .ctime = stat.ctime,
+        .birth = null,
+        .inode = unsigned(stat.inode),
+        .device = routed_volume.raw(),
+        .uid = 0,
+        .gid = 0,
+        .attributes = 0,
+        .reparse_tag = 0,
+    };
+}
+
+/// The whole stat of what `sub_path` names relative to `dir`, following a
+/// symbolic link or not. A path that is not there is `FileNotFound` and a
+/// path through something that is not a directory `NotDir`, apart, as the
+/// platform tells them apart.
+pub fn statPath(io: Io, dir: Handle, sub_path: []const u8, follow: bool) StatPathError!Full {
+    if (is_windows) return statPathWindows(io, dir, sub_path, follow);
+    const path = try posix.toPosixPath(sub_path);
+    if (is_linux) {
+        var buf = std.mem.zeroes(linux.Statx);
+        const flags: u32 = if (follow) 0 else linux.AT.SYMLINK_NOFOLLOW;
+        const e = switch (try retrying(io, .stat, sub_path, statxFullRaw, .{ dir, &path, flags, &buf })) {
+            .code => |c| c,
+            .route => |route| return routedFull(try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+        };
+        if (e != .SUCCESS) return statPathFailure(e);
+        return .{
+            .kind = kindOfMode(buf.mode),
+            .size = buf.size,
+            .mode = buf.mode,
+            .permissions = permissionsOfMode(buf.mode),
+            .mtime = nanoseconds(buf.mtime.sec, buf.mtime.nsec),
+            .ctime = nanoseconds(buf.ctime.sec, buf.ctime.nsec),
+            .birth = if (buf.mask.BTIME) nanoseconds(buf.btime.sec, buf.btime.nsec) else null,
+            .inode = buf.ino,
+            .device = linuxDevice(buf.dev_major, buf.dev_minor),
+            .uid = buf.uid,
+            .gid = buf.gid,
+            .attributes = 0,
+            .reparse_tag = 0,
+        };
+    }
+    var buf = std.mem.zeroes(posix.Stat);
+    const flags: u32 = if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW;
+    const e = switch (try retrying(io, .stat, sub_path, fstatatRaw, .{ dir, &path, &buf, flags })) {
+        .code => |c| c,
+        .route => |route| return routedFull(try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+    };
+    if (e != .SUCCESS) return statPathFailure(e);
+    const mtime = buf.mtime();
+    const ctime = buf.ctime();
+    const mode: u32 = @intCast(buf.mode);
+    return .{
+        .kind = kindOfMode(mode),
+        .size = @intCast(@max(buf.size, 0)),
+        .mode = mode,
+        .permissions = permissionsOfMode(mode),
+        .mtime = nanoseconds(mtime.sec, mtime.nsec),
+        .ctime = nanoseconds(ctime.sec, ctime.nsec),
+        .birth = if (@hasDecl(posix.Stat, "birthtime")) birth: {
+            const b = buf.birthtime();
+            break :birth nanoseconds(b.sec, b.nsec);
+        } else null,
+        .inode = unsigned(buf.ino),
+        .device = unsigned(buf.dev),
+        .uid = @intCast(buf.uid),
+        .gid = @intCast(buf.gid),
+        .attributes = 0,
+        .reparse_tag = 0,
+    };
+}
+
+/// What a volume is, as the platform describes it.
+pub const VolumeInfo = struct {
+    remote: bool,
+    /// The file system's type name, as many bytes of it as fit.
+    name: [32]u8 = @splat(0),
+    name_len: u8 = 0,
+
+    fn setName(v: *VolumeInfo, text: []const u8) void {
+        const n = @min(text.len, v.name.len);
+        @memcpy(v.name[0..n], text[0..n]);
+        v.name_len = @intCast(n);
+    }
+};
+
+pub const VolumeError = Io.File.StatError || error{InputOutput};
+
+/// Darwin's `struct statfs` with 64-bit inodes, the one `fstatfs` fills
+/// on arm64 and `fstatfs$INODE64` on x86_64.
+const DarwinStatfs = extern struct {
+    bsize: u32,
+    iosize: i32,
+    blocks: u64,
+    bfree: u64,
+    bavail: u64,
+    files: u64,
+    ffree: u64,
+    fsid: [2]i32,
+    owner: u32,
+    type: u32,
+    flags: u32,
+    fssubtype: u32,
+    fstypename: [16]u8,
+    mntonname: [1024]u8,
+    mntfromname: [1024]u8,
+    flags_ext: u32,
+    reserved: [7]u32,
+};
+
+const darwin_statfs = struct {
+    extern "c" fn fstatfs(fd: posix.fd_t, buf: *DarwinStatfs) c_int;
+    extern "c" fn @"fstatfs$INODE64"(fd: posix.fd_t, buf: *DarwinStatfs) c_int;
+};
+
+fn darwinFstatfs(fd: posix.fd_t, buf: *DarwinStatfs) c_int {
+    return if (builtin.target.cpu.arch == .x86_64) darwin_statfs.@"fstatfs$INODE64"(fd, buf) else darwin_statfs.fstatfs(fd, buf);
+}
+
+/// Darwin's `MNT_LOCAL`: the volume is stored on this machine.
+const darwin_mnt_local = 0x1000;
+
+/// Linux's `struct statfs` as far as its type: a word on 64-bit targets
+/// but s390x's, where it is 32 bits, as it is in `statfs64` on 32-bit
+/// ones. The rest of the buffer is room for what the kernel writes.
+const LinuxStatfs = extern struct {
+    words: [16]u64 align(8),
+
+    fn magic(buf: *const LinuxStatfs) u64 {
+        const word_is_long = @sizeOf(usize) == 8 and builtin.target.cpu.arch != .s390x;
+        return if (word_is_long) buf.words[0] else std.mem.bytesAsValue(u32, std.mem.asBytes(&buf.words[0])[0..4]).*;
+    }
+};
+
+fn linuxFstatfs(fd: posix.fd_t, buf: *LinuxStatfs) usize {
+    const word: usize = @bitCast(@as(isize, fd)); // safe: a descriptor passes to the kernel as a word, its sign extended
+    const address = @intFromPtr(buf); // safe: the kernel writes the buffer through its address
+    if (@hasField(linux.SYS, "fstatfs64")) return linux.syscall3(.fstatfs64, word, @sizeOf(LinuxStatfs), address);
+    return linux.syscall2(.fstatfs, word, address);
+}
+
+/// The network file systems by their Linux magic numbers: NFS, SMB and
+/// CIFS, AFS and Coda, and FUSE, whose server may be anywhere. git's
+/// list (`compat/fsmonitor/fsm-path-utils-linux.c`), and its names for
+/// them where the mount table does not say.
+const linux_remote = [_]struct { magic: u64, name: []const u8 }{
+    .{ .magic = 0xff534d42, .name = "cifs" },
+    .{ .magic = 0x517b, .name = "smb" },
+    .{ .magic = 0xfe534d42, .name = "smb2" },
+    .{ .magic = 0x6969, .name = "nfs" },
+    .{ .magic = 0x5346414f, .name = "afs" },
+    .{ .magic = 0x73757245, .name = "coda" },
+    .{ .magic = 0x65735546, .name = "fuse" },
+};
+
+fn statxMountRaw(fd: posix.fd_t, buf: *linux.Statx) usize {
+    return linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .MNT_ID = true }, buf);
+}
+
+/// The type `/proc/self/mountinfo` gives mount `id`, or nothing when the
+/// table cannot be read or does not list it.
+fn linuxMountType(io: Io, id: u64, out: *VolumeInfo) void {
+    const file = Io.Dir.openFileAbsolute(io, "/proc/self/mountinfo", .{}) catch return;
+    defer file.close(io);
+    var buffer: [4096]u8 = undefined;
+    var reader = file.readerStreaming(io, &buffer);
+    while (true) {
+        // A line longer than the buffer (a mount's options can be) is
+        // passed over; its mount is not the one.
+        const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
+            error.StreamTooLong => {
+                _ = reader.interface.discardDelimiterInclusive('\n') catch return;
+                continue;
+            },
+            else => return,
+        };
+        // `id parent major:minor root point options [tags] - type source super`
+        var fields = std.mem.tokenizeScalar(u8, std.mem.trimEnd(u8, line, "\n"), ' ');
+        const first = fields.next() orelse continue;
+        if ((std.fmt.parseInt(u64, first, 10) catch continue) != id) continue;
+        while (fields.next()) |field| if (std.mem.eql(u8, field, "-")) {
+            out.setName(fields.next() orelse return);
+            return;
+        };
+        return;
+    }
+}
+
+/// What the volume `dir` is on is: whether it is remote and its file
+/// system's type name.
+pub fn volumeOf(io: Io, dir: Handle) VolumeError!VolumeInfo {
+    if (is_windows) return volumeWindows(io, dir);
+    if (is_linux) {
+        var buf: LinuxStatfs = .{ .words = @splat(0) };
+        const e = switch (try retrying(io, .statfs, null, linuxFstatfs, .{ dir, &buf })) {
+            .code => |c| c,
+            .route => return .{ .remote = false },
+        };
+        if (e != .SUCCESS) return statFailure(e);
+        const magic = buf.magic();
+        var info: VolumeInfo = .{ .remote = false };
+        for (linux_remote) |r| if (r.magic == magic) {
+            info.remote = true;
+            info.setName(r.name);
+        };
+        var mount = std.mem.zeroes(linux.Statx);
+        if (linux.errno(statxMountRaw(dir, &mount)) == .SUCCESS and mount.mask.MNT_ID) linuxMountType(io, mount.mnt_id, &info);
+        return info;
+    }
+    if (!is_darwin) return error.Unexpected;
+    var buf: DarwinStatfs = undefined;
+    const e = switch (try retrying(io, .statfs, null, darwinFstatfs, .{ dir, &buf })) {
+        .code => |c| c,
+        .route => return .{ .remote = false },
+    };
+    if (e != .SUCCESS) return statFailure(e);
+    var info: VolumeInfo = .{ .remote = buf.flags & darwin_mnt_local == 0 };
+    info.setName(std.mem.sliceTo(&buf.fstypename, 0));
+    return info;
+}
+
 /// Whether a name exists in `dir`, by `fstatat` without following links.
 pub fn exists(io: Io, dir: Handle, name: []const u8) StatPathError!bool {
     _ = statIdPath(io, dir, name, false) catch |err| switch (err) {
@@ -1474,6 +1782,104 @@ fn statIdPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow:
     if (status != .SUCCESS) return openFailureNt(status);
     defer release(io, handle);
     return statIdWindows(io, handle);
+}
+
+fn statPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow: bool) StatPathError!Full {
+    const access: windows.ACCESS_MASK = .{
+        .STANDARD = .{ .SYNCHRONIZE = true },
+        .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true } },
+    };
+    var handle: windows.HANDLE = undefined;
+    const status = switch (try retryingNt(io, .stat, sub_path, ntCreate, .{
+        &handle,                                  access,
+        root,                                     sub_path,
+        windows.FILE.ATTRIBUTE{ .NORMAL = true }, windows.FILE.SHARE.VALID_FLAGS,
+        windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = !follow },
+    })) {
+        .code => |c| c,
+        .route => |route| return routedFull(try dirOf(root).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+    };
+    if (status != .SUCCESS) return openFailureNt(status);
+    defer release(io, handle);
+
+    var info: windows.FILE.ALL_INFORMATION = undefined;
+    switch (ntQueryInfo(handle, std.mem.asBytes(&info), .All)) {
+        // More than the buffer holds is the name, which this does not use.
+        .SUCCESS, .BUFFER_OVERFLOW => {},
+        else => |s| return statFailureNt(s),
+    }
+    const attributes = info.BasicInformation.FileAttributes;
+    var tag: u32 = 0;
+    if (attributes.REPARSE_POINT) {
+        var tag_info: windows.FILE.ATTRIBUTE_TAG_INFO = undefined;
+        switch (ntQueryInfo(handle, std.mem.asBytes(&tag_info), .AttributeTag)) {
+            .SUCCESS => {},
+            else => |s| return statFailureNt(s),
+        }
+        tag = @bitCast(tag_info.ReparseTag);
+    }
+    var volume: extern struct {
+        info: windows.FILE.FS_VOLUME_INFORMATION,
+        label: [64]windows.WCHAR,
+    } = undefined;
+    switch (ntQueryVolume(handle, std.mem.asBytes(&volume))) {
+        .SUCCESS, .BUFFER_OVERFLOW => {},
+        else => |s| return statFailureNt(s),
+    }
+    // A link is a symbolic link's tag or a junction's, the two that name
+    // another path; any other reparse point (a cloud placeholder, a
+    // deduplicated file) is the file or directory its attributes say.
+    const is_link = tag == @as(u32, @bitCast(windows.IO_REPARSE_TAG.SYMLINK)) or tag == @as(u32, @bitCast(windows.IO_REPARSE_TAG.MOUNT_POINT));
+    return .{
+        .kind = if (is_link) .sym_link else if (attributes.DIRECTORY) .directory else .file,
+        .size = @bitCast(info.StandardInformation.EndOfFile),
+        .mode = 0,
+        .permissions = @fromBackingInt(@as(u32, @bitCast(attributes))),
+        .mtime = windows.fromSysTime(info.BasicInformation.LastWriteTime),
+        .ctime = windows.fromSysTime(info.BasicInformation.ChangeTime),
+        .birth = windows.fromSysTime(info.BasicInformation.CreationTime),
+        .inode = @bitCast(info.InternalInformation.IndexNumber),
+        .device = volume.info.VolumeSerialNumber,
+        .uid = 0,
+        .gid = 0,
+        .attributes = @bitCast(attributes),
+        .reparse_tag = tag,
+    };
+}
+
+/// `FILE_REMOTE_DEVICE`: the device is another machine's.
+const windows_remote_device = 0x10;
+
+fn ntQueryVolumeClass(handle: windows.HANDLE, buf: []u8, class: windows.FS_INFORMATION_CLASS) windows.NTSTATUS {
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    return windows.ntdll.NtQueryVolumeInformationFile(handle, &iosb, buf.ptr, @intCast(buf.len), class);
+}
+
+fn volumeWindows(io: Io, handle: windows.HANDLE) VolumeError!VolumeInfo {
+    var device: extern struct { device_type: u32, characteristics: u32 } = undefined;
+    const status = switch (try retryingNt(io, .statfs, null, ntQueryVolumeClass, .{ handle, std.mem.asBytes(&device), .Device })) {
+        .code => |c| c,
+        .route => return .{ .remote = false },
+    };
+    if (status != .SUCCESS) return statFailureNt(status);
+    var info: VolumeInfo = .{ .remote = device.characteristics & windows_remote_device != 0 };
+    var attribute: extern struct { attributes: u32, max_component: i32, name_bytes: u32, name: [32]u16 } = undefined;
+    switch (ntQueryVolumeClass(handle, std.mem.asBytes(&attribute), .Attribute)) {
+        .SUCCESS, .BUFFER_OVERFLOW => {},
+        else => |s| return statFailureNt(s),
+    }
+    const units = @min(attribute.name_bytes / 2, attribute.name.len);
+    var name: [32]u8 = undefined;
+    var n: usize = 0;
+    // File system names are ASCII ("NTFS", "ReFS", "FAT32"); anything else
+    // is kept as a question mark.
+    for (attribute.name[0..units]) |unit| {
+        if (n == name.len) break;
+        name[n] = if (unit < 0x80) @intCast(unit) else '?';
+        n += 1;
+    }
+    info.setName(name[0..n]);
+    return info;
 }
 
 /// Windows: a 64-bit hash of the volume's NT device name

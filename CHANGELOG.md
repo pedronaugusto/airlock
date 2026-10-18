@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `airlock.testing.Call` gains `stat` and `statfs`, the raw calls of the two below.
+
+### Added
+
+- `airlock.stat(io, dir, sub_path, .{ .follow_symlinks })`: one platform stat of a path (`statx`, `fstatat`; on Windows an open for its attributes) with what `std.Io.File.Stat` leaves out: the device, the owner and group, the mode's bits, a creation time where kept, and on Windows the attributes and a reparse point's tag (`Stat`). `FileNotFound` and `NotDir` are apart, where std's macOS stat reads ENOTDIR as `FileNotFound`. Over a simulation it is the `Io`'s stat.
+- `airlock.Volume.of(io, dir)`: whether a directory's volume is another machine's (Darwin's `MNT_LOCAL`; on Linux the network file systems' magic numbers and FUSE; a Windows remote device) and its file system's type name (`f_fstypename`, the mount table's type, Windows' file system name).
+
 ### Fixed
 
 - A batch orders slots that share a device and file by `Index.compare`, aegis's

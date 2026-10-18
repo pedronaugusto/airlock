@@ -63,6 +63,12 @@ pub const Call = enum(u8) {
     make_dir,
     /// A new symbolic link: `symlinkat`.
     symlink,
+    /// A path's whole stat: `statx`, `fstatat`; on Windows the open for
+    /// its attributes, whose queries follow it.
+    stat,
+    /// What volume a directory is on: `fstatfs`; on Windows the volume's
+    /// device query, the attribute query following it.
+    statfs,
 };
 
 /// An errno on POSIX, an NTSTATUS on Windows.

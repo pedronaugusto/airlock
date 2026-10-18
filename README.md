@@ -3,8 +3,9 @@
 airlock makes files durable in Zig. It syncs a file or a directory at a level
 you choose and tells you what was reached, publishes a file atomically (replace,
 create or keep) and a symbolic link too, creates directories durably, puts many
-files under the fewest barriers, removes the temps a crash left behind, and
-tells files apart by identity rather than by path.
+files under the fewest barriers, removes the temps a crash left behind,
+tells files apart by identity rather than by path, stats a path whole and says
+what volume a directory is on.
 
 ## Install
 
@@ -160,6 +161,14 @@ turns it into the caller's own entry, or `error.OutOfBounds`.
 without opening it. On Windows, two volumes cloned from one image keep both
 the serial and the file ids, so a batch tells volumes apart by the NT device
 name as well.
+
+`stat` is one platform stat of a path with what `std.Io.File.Stat` leaves
+out: the device, owner and group, the mode's bits and a creation time, and on
+Windows the attributes and a reparse point's tag. A path that is not there is
+`FileNotFound` and one through a file `NotDir`, apart (std's macOS stat
+reads both as `FileNotFound`). `Volume.of` says whether a directory's volume
+is another machine's and names its file system, for a program about to put
+something there that not every volume holds, such as a Unix socket.
 
 Every raw call goes through one file, `src/sys.zig`, behind a test seam: when
 the `Io` a call is given carries a test's hook, the hook decides the call

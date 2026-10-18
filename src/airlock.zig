@@ -1,7 +1,8 @@
 //! Durable files: sync a file or a directory at a chosen level and learn
 //! what was reached, publish a file or a symbolic link atomically, create
 //! directories durably, put many files under one barrier, remove the temps
-//! a crash left, and tell files apart by identity.
+//! a crash left, tell files apart by identity, stat a path whole, and ask
+//! what volume a directory is on.
 //!
 //! Every call that may block takes `io: Io` first and never stores it;
 //! nothing allocates; buffers and slot storage belong to the caller.
@@ -100,6 +101,19 @@ pub const Batch = @import("Batch.zig");
 /// Which file a handle or path is, by volume and file number.
 pub const FileId = @import("FileId.zig");
 
+const stat_mod = @import("stat.zig");
+/// What one stat of a path reports, as the platform reports it.
+pub const Stat = stat_mod.Stat;
+/// Whether `stat` follows a symbolic link.
+pub const StatOptions = stat_mod.Options;
+/// What `stat` can fail with: `FileNotFound` and `NotDir` apart.
+pub const StatError = stat_mod.Error;
+/// The whole stat of a path, in one call.
+pub const stat = stat_mod.stat;
+
+/// What volume a directory is on: remote or not, and its type's name.
+pub const Volume = @import("Volume.zig");
+
 test {
     _ = level;
     _ = platform;
@@ -107,4 +121,6 @@ test {
     _ = Pending;
     _ = Batch;
     _ = FileId;
+    _ = stat_mod;
+    _ = Volume;
 }
