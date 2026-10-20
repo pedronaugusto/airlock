@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-21
+
 ### Changed
 
 - Over a simulation, a stat (`airlock.stat`, `scan`) carries the device, owner and group the simulated disk keeps for the file (shakedown's `Sim.Fs.ownership`), where it said the routed volume and no owner: the seam's route asks its file system through an `ownership` callback beside `flush`. A file the disk does not know still says the routed volume and no owner.
