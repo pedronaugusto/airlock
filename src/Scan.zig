@@ -406,10 +406,10 @@ test "a scan of an empty directory gives nothing, and stays finished" {
     try testing.expectEqual(null, try scan.next(io));
 }
 
-test "over a simulation a scan reads and stats through the Io" {
+test "over a simulation a scan reads and stats through the Io, with the device, owner and group the disk keeps" {
     const shakedown = @import("shakedown");
     const seam = @import("airlock.testing");
-    const sim = try shakedown.Sim.init(testing.allocator, .{});
+    const sim = try shakedown.Sim.init(testing.allocator, .{ .fs = .{ .device = 0x0803, .uid = 501, .gid = 20 } });
     defer sim.deinit();
     const fs = sim.fs();
     try fs.mkdir("d");
@@ -430,7 +430,9 @@ test "over a simulation a scan reads and stats through the Io" {
             while (try scan.next(io)) |entry| {
                 sizes += entry.stat.size;
                 kinds += @intFromBool(entry.stat.kind == .directory);
-                try testing.expectEqual(@as(u64, 0), entry.stat.device);
+                try testing.expectEqual(@as(u64, 0x0803), entry.stat.device);
+                try testing.expectEqual(@as(u32, 501), entry.stat.uid);
+                try testing.expectEqual(@as(u32, 20), entry.stat.gid);
             }
             try testing.expectEqual(@as(u64, 4), sizes);
             try testing.expectEqual(@as(u32, 1), kinds);

@@ -920,10 +920,12 @@ pub fn permissionsOfMode(mode: u32) Io.File.Permissions {
     return if (Io.File.Permissions.has_executable_bit) .fromMode(@intCast(mode & 0o7777)) else .default_file;
 }
 
-/// A path's stat through a route: what `std.Io` reports, on the one volume
-/// a route's file system is, owned by no one.
-fn routedFull(stat: Io.File.Stat) Full {
+/// A path's stat through a route: what `std.Io` reports, with the device,
+/// owner and group the route's file system keeps; for a file it does not
+/// know, the routed volume and no owner.
+fn routedFull(route: *const Route, stat: Io.File.Stat) Full {
     const mode: u32 = if (Io.File.Permissions.has_executable_bit) modeOfKind(stat.kind) | @as(u32, @intCast(stat.permissions.toMode() & 0o7777)) else 0;
+    const owner: seam.Ownership = route.ownership(route.ctx, stat.inode) orelse .{ .device = routed_volume.raw(), .uid = 0, .gid = 0 };
     return .{
         .kind = stat.kind,
         .size = stat.size,
@@ -933,9 +935,9 @@ fn routedFull(stat: Io.File.Stat) Full {
         .ctime = stat.ctime,
         .birth = null,
         .inode = unsigned(stat.inode),
-        .device = routed_volume.raw(),
-        .uid = 0,
-        .gid = 0,
+        .device = owner.device,
+        .uid = owner.uid,
+        .gid = owner.gid,
         .attributes = 0,
         .reparse_tag = 0,
     };
@@ -953,7 +955,7 @@ pub fn statPath(io: Io, dir: Handle, sub_path: []const u8, follow: bool) StatPat
         const flags: u32 = if (follow) 0 else linux.AT.SYMLINK_NOFOLLOW;
         const e = switch (try retrying(io, .stat, sub_path, statxFullRaw, .{ dir, &path, flags, &buf })) {
             .code => |c| c,
-            .route => |route| return routedFull(try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+            .route => |route| return routedFull(route, try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
         };
         if (e != .SUCCESS) return statPathFailure(e);
         return .{
@@ -976,7 +978,7 @@ pub fn statPath(io: Io, dir: Handle, sub_path: []const u8, follow: bool) StatPat
     const flags: u32 = if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW;
     const e = switch (try retrying(io, .stat, sub_path, fstatatRaw, .{ dir, &path, &buf, flags })) {
         .code => |c| c,
-        .route => |route| return routedFull(try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+        .route => |route| return routedFull(route, try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
     };
     if (e != .SUCCESS) return statPathFailure(e);
     const mtime = buf.mtime();
@@ -1895,7 +1897,7 @@ fn statPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow: b
         windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = !follow },
     })) {
         .code => |c| c,
-        .route => |route| return routedFull(try dirOf(root).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+        .route => |route| return routedFull(route, try dirOf(root).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
     };
     if (status != .SUCCESS) return openFailureNt(status);
     defer release(io, handle);

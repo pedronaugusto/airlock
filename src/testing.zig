@@ -152,7 +152,7 @@ pub const Seam = struct {
         s.hook = .{ .ctx = s, .call = decide, .base = fio.io() };
         // A simulation's handles are not the system's: airlock's calls go
         // through the Io under the FaultIo, its syncs onto its disk.
-        if (shakedown.Sim.fsOf(fio.base)) |fs| s.hook.route = .{ .io = fio.base, .ctx = fs, .flush = simulatedFlush };
+        if (shakedown.Sim.fsOf(fio.base)) |fs| s.hook.route = .{ .io = fio.base, .ctx = fs, .flush = simulatedFlush, .ownership = simulatedOwnership };
         s.hooked = .init(fio.io(), .{ .hook = &s.hook });
         return s;
     }
@@ -291,6 +291,13 @@ fn simulatedFlush(ctx: *anyopaque, handle: Io.File.Handle, kind: seam.Flush) Cod
         else => io_error,
     };
     return .SUCCESS;
+}
+
+/// The device, owner and group the simulated disk keeps for `inode`.
+fn simulatedOwnership(ctx: *anyopaque, inode: Io.File.INode) ?seam.Ownership {
+    const fs: *shakedown.Sim.Fs = @ptrCast(@alignCast(ctx)); // safe: `over` makes the route with the simulation's disk as ctx
+    const owner = fs.ownership(inode) orelse return null;
+    return .{ .device = owner.device, .uid = owner.uid, .gid = owner.gid };
 }
 
 /// How many descriptors this process has open (POSIX; 0 elsewhere).

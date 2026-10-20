@@ -94,17 +94,26 @@ pub const Result = union(enum) {
 /// data or full sync makes it durable (the data alone, or with metadata).
 pub const Flush = enum { writeout, barrier, data, full };
 
+/// What a stat carries that `std.Io`'s does not: the device of the file's
+/// volume, as a stat's `dev` holds it, and its owner and group.
+pub const Ownership = struct { device: u64, uid: u32, gid: u32 };
+
 /// A file system behind an `Io`, a simulated one, where the calls a hook
 /// lets through are made instead of on the system: every open, create,
 /// rename, link, remove, stat and close through `io`, every sync through
-/// `flush`. Each call is still decided by the hook first, one for one with
-/// the raw call it stands for.
+/// `flush`, and what a stat holds beyond `std.Io`'s through `ownership`.
+/// Each call is still decided by the hook first, one for one with the raw
+/// call it stands for.
 pub const Route = struct {
     io: Io,
     ctx: *anyopaque,
     /// A sync of `handle`, a file or a directory, at `kind`: the code the
     /// platform's call would return.
     flush: *const fn (ctx: *anyopaque, handle: Io.File.Handle, kind: Flush) Code,
+    /// The device, owner and group of the file `inode` names, or null for
+    /// one the file system does not know: its stat then says the routed
+    /// volume and no owner.
+    ownership: *const fn (ctx: *anyopaque, inode: Io.File.INode) ?Ownership,
 };
 
 /// Routes airlock's raw calls to a test. `base` is the `Io` a std-level

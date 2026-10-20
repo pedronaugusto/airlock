@@ -6,8 +6,8 @@
 //! apart, as the platform tells them apart: `FileNotFound` and `NotDir`.
 //!
 //! A raw call like airlock's others: a test's seam decides it, and over a
-//! simulation it is the `Io`'s own stat, on the one volume the simulation
-//! is, with no owner.
+//! simulation it is the `Io`'s own stat, with the device, owner and group
+//! the simulated disk keeps (`seam.Route.ownership`).
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
