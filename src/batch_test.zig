@@ -9,7 +9,6 @@ const harness = @import("testing/harness.zig");
 const seam = @import("airlock.testing");
 const Seam = seam.Seam;
 const Call = seam.Call;
-const expectCalls = harness.expectCalls;
 
 const os = builtin.target.os.tag;
 const is_windows = os == .windows;
