@@ -1189,9 +1189,19 @@ fn statxMountRaw(fd: posix.fd_t, buf: *linux.Statx) usize {
     return linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .MNT_ID = true }, buf);
 }
 
-/// The type `/proc/self/mountinfo` gives mount `id`, or nothing when the
-/// table cannot be read or does not list it.
-fn linuxMountType(io: Io, id: u64, out: *VolumeInfo) void {
+/// How a mount is found in `/proc/self/mountinfo`: by its id where `statx`
+/// gives one (Linux 5.8 on), else by the device its file system is on (an
+/// older kernel, or an emulator's `statx` that passes no mount id: QEMU's
+/// user mode says it gave one and gives 0, which names no mount), which a
+/// bind of the same file system shares and names alike.
+const MountKey = union(enum) {
+    id: u64,
+    device: struct { major: u32, minor: u32 },
+};
+
+/// The type `/proc/self/mountinfo` gives the mount `key` finds, or nothing
+/// when the table cannot be read or does not list it.
+fn linuxMountType(io: Io, key: MountKey, out: *VolumeInfo) void {
     const file = Io.Dir.openFileAbsolute(io, "/proc/self/mountinfo", .{}) catch return;
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
@@ -1209,7 +1219,17 @@ fn linuxMountType(io: Io, id: u64, out: *VolumeInfo) void {
         // `id parent major:minor root point options [tags] - type source super`
         var fields = std.mem.tokenizeScalar(u8, std.mem.trimEnd(u8, line, "\n"), ' ');
         const first = fields.next() orelse continue;
-        if ((std.fmt.parseInt(u64, first, 10) catch continue) != id) continue;
+        _ = fields.next() orelse continue;
+        const device = fields.next() orelse continue;
+        switch (key) {
+            .id => |id| if ((std.fmt.parseInt(u64, first, 10) catch continue) != id) continue,
+            .device => |d| {
+                const colon = std.mem.findScalar(u8, device, ':') orelse continue;
+                const major = std.fmt.parseInt(u32, device[0..colon], 10) catch continue;
+                const minor = std.fmt.parseInt(u32, device[colon + 1 ..], 10) catch continue;
+                if (major != d.major or minor != d.minor) continue;
+            },
+        }
         while (fields.next()) |field| if (std.mem.eql(u8, field, "-")) {
             out.setName(fields.next() orelse return);
             return;
@@ -1236,7 +1256,10 @@ pub fn volumeOf(io: Io, dir: Handle) VolumeError!VolumeInfo {
             info.setName(r.name);
         };
         var mount = std.mem.zeroes(linux.Statx);
-        if (linux.errno(statxMountRaw(dir, &mount)) == .SUCCESS and mount.mask.MNT_ID) linuxMountType(io, mount.mnt_id, &info);
+        if (linux.errno(statxMountRaw(dir, &mount)) == .SUCCESS) linuxMountType(io, if (mount.mask.MNT_ID and mount.mnt_id != 0)
+            .{ .id = mount.mnt_id }
+        else
+            .{ .device = .{ .major = mount.dev_major, .minor = mount.dev_minor } }, &info);
         return info;
     }
     if (!is_darwin) return error.Unexpected;

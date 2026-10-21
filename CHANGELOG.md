@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `Volume.name` was empty on Linux where `statx` gives no usable mount id (a kernel before 5.8; QEMU's user mode, which sets `STATX_MNT_ID` and gives 0, the riscv64 leg's red since 2026-10-18): the mount is then found in `/proc/self/mountinfo` by the device its file system is on.
+- The scan test expected seven entries on Windows, where its fixture makes no symbolic link and holds six (its red on every Windows leg since 2026-10-18); it expects each platform's count.
+
 ## [0.5.1] - 2026-10-21
 
 ### Changed

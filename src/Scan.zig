@@ -287,6 +287,9 @@ fn expectSameStat(want: sys.Full, got: sys.Full) !void {
 }
 
 /// A directory of every kind a test can make, and a long name.
+/// The entries `fill` makes: seven, or six on Windows, where it makes no link.
+const filled: usize = if (builtin.target.os.tag == .windows) 6 else 7;
+
 fn fill(io: Io, dir: Io.Dir) !void {
     try dir.writeFile(io, .{ .sub_path = "plain.txt", .data = "some bytes\n" });
     try dir.writeFile(io, .{ .sub_path = ".hidden", .data = "dot\n" });
@@ -327,7 +330,7 @@ test "a scan gives every entry with the stat airlock.stat gives it" {
     const n = try expectScanMatchesStat(io, tmp.dir, &scan);
     var plain = initPlain(tmp.dir, &buffer);
     try testing.expectEqual(n, try expectScanMatchesStat(io, tmp.dir, &plain));
-    try testing.expect(n >= 7);
+    try testing.expectEqual(filled, n);
     try testing.expectEqual(batch_supported, scan.isBatched());
 }
 
@@ -344,7 +347,7 @@ test "a volume without the batch call is read the ordinary way, from the start" 
     var scan = init(tmp.dir, &buffer);
     const n = try expectScanMatchesStat(h.io(), tmp.dir, &scan);
     try testing.expect(!scan.isBatched());
-    try testing.expect(n >= 7);
+    try testing.expectEqual(filled, n);
     try testing.expectEqual(@as(u32, 1), h.count(.scan));
 }
 
