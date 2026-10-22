@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-22
+
 ### Fixed
 
 - On Linux with a C library linked, airlock opened and closed descriptors with the kernel's own calls, past the library. ThreadSanitizer keeps a record per descriptor and forgets it only at a close it sees, so a descriptor airlock closed and another thread then got under the same number read as a data race "in close" (every report in relic's ThreadSanitizer job on 2026-10-22, 15 of them). Opens and closes now go through the C library wherever one is linked, as std's do; without one they stay the kernel's calls.
