@@ -25,6 +25,13 @@ const is_windows = native_os == .windows;
 const is_linux = native_os == .linux;
 const is_darwin = native_os.isDarwin();
 
+/// Whether descriptors are opened and closed with Linux's own calls. Where a C
+/// library is linked they go through it instead, as std's do, so that what
+/// keeps a record of each descriptor there sees every open and close:
+/// ThreadSanitizer forgets a descriptor only at a close it sees, and one
+/// closed past it and reused by another thread reads as a race.
+const raw_descriptors = is_linux and !builtin.link_libc;
+
 const Blocking = @import("Blocking.zig");
 
 const seam = @import("seam");
@@ -86,7 +93,7 @@ pub const SyncError = Io.File.SyncError || Refused;
 
 /// The errno of a raw call's return value.
 fn errnoOf(rc: anytype) posix.E {
-    return if (is_linux) linux.errno(rc) else std.c.errno(rc);
+    return if (@TypeOf(rc) == usize) linux.errno(rc) else std.c.errno(rc);
 }
 
 /// Runs `f` until it is not interrupted, honouring a cancel between tries.
@@ -304,7 +311,7 @@ pub fn close(io: Io, handle: Handle, path: ?[]const u8) Io.File.SyncError!void {
             fileOf(handle).close(route.io);
             return;
         },
-        .system => if (is_linux)
+        .system => if (raw_descriptors)
             linux.errno(linux.close(handle))
         else
             std.c.errno(std.c.close(handle)),
@@ -324,7 +331,7 @@ fn closeRouted(io: Io, handle: Handle) void {
     if (seam.hookOf(io)) |hook| if (hook.route) |route| return fileOf(handle).close(route.io);
     if (is_windows) {
         _ = windows.ntdll.NtClose(handle);
-    } else if (is_linux) {
+    } else if (raw_descriptors) {
         _ = linux.close(handle);
     } else {
         _ = std.c.close(handle);
@@ -338,8 +345,9 @@ pub fn release(io: Io, handle: Handle) void {
     close(io, handle, null) catch {};
 }
 
-fn openatRaw(dir: posix.fd_t, path: [*:0]const u8, flags: posix.O, mode: posix.mode_t) if (is_linux) usize else c_int {
-    if (is_linux) return linux.openat(dir, path, flags, mode);
+fn openatRaw(dir: posix.fd_t, path: [*:0]const u8, flags: posix.O, mode: posix.mode_t) if (raw_descriptors) usize else c_int {
+    if (raw_descriptors) return linux.openat(dir, path, flags, mode);
+    if (is_linux and posix.lfs64_abi) return std.c.openat64(dir, path, flags, mode);
     return std.c.openat(dir, path, flags, mode);
 }
 
