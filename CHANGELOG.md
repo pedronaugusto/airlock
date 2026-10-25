@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-10-25
+
 ### Added
 
 - `Temp.in_place`: no temp. The file is created exclusively under its own name (`O_EXCL`, so a link there is never followed and a taken name is `error.PathAlreadyExists`), and its commit renames nothing. The name holds a partial file while it is written and after a crash, so it is for `level = .none` only: a commit or batch at another level stops as a caller's bug. For an extraction that asked for no crash guarantee, where the rename was the largest cost (hold's many small files).
