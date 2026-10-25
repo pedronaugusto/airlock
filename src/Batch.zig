@@ -240,6 +240,9 @@ pub fn commitOrRefuse(b: *Batch, io: Io, options: Options) CommitOrRefuseError!R
 }
 
 fn commitAs(b: *Batch, comptime fallback: Fallback, io: Io, options: Options) ErrorOf(fallback)!Reached {
+    for (b.slots[0..b.len]) |s| if (s.pending) |p| {
+        assert.pre(!p.in_place or options.level == .none, "Batch.commit: an in-place file commits at level .none only");
+    };
     b.failed = null;
     var run: Run(fallback) = .{ .batch = b, .options = options, .io = io };
     const reached = run.go() catch |err| {

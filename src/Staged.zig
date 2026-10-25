@@ -45,6 +45,8 @@ temp_buffer: [64]u8,
 temp_len: u8,
 /// An exact temp name, borrowed.
 exact: []const u8,
+/// `Temp.in_place`: the file is under its own name, and nothing renames it.
+in_place: bool = false,
 /// Where the temp is (see `State`).
 state: State = .open,
 /// Whether `file`'s handle is open.
@@ -102,6 +104,14 @@ pub const Temp = union(enum) {
     /// lock file ("main.lock" for "refs/heads/main"). Taken means
     /// `error.PathAlreadyExists`. Borrowed until commit or discard.
     exact: []const u8,
+    /// No temp: the file is created under the destination's own name,
+    /// exclusively (`O_EXCL`, so a link there is never followed, and a
+    /// taken name is `error.PathAlreadyExists`), and the commit renames
+    /// nothing. The name holds a partial file while it is written, and
+    /// after a crash. For `level = .none` only, where the caller asked for
+    /// no crash guarantee and pays no temp, no rename: a commit or batch
+    /// at another level is a bug, and stops. `discard` removes the file.
+    in_place,
 };
 
 pub const Mode = union(enum) {
@@ -189,6 +199,12 @@ pub fn parentPath(path: []const u8, base_start: usize) []const u8 {
 
 fn createTemp(p: *Staged, io: Io, options: CreateOptions, mode: Io.File.Permissions) CreateError!sys.Handle {
     switch (options.temp) {
+        .in_place => {
+            // The temp's name is the destination's: a discard removes it.
+            p.exact = p.baseName();
+            p.in_place = true;
+            return sys.createTemp(io, p.parent.handle, p.exact, mode, options.read);
+        },
         .exact => |name| {
             if (name.len == 0 or baseStart(name) != 0) return error.BadPathName;
             p.exact = name;
@@ -258,6 +274,8 @@ fn applyMode(p: *Staged, io: Io, mode: Mode) CreateError!void {
         .default => {},
         .exact => |perm| try sys.setMode(io, p.file.handle, perm),
         .inherit => {
+            // An exclusive create in place had no file to inherit from.
+            if (p.in_place) return;
             const stat = p.parent.statFile(io, p.baseName(), .{}) catch |err| switch (err) {
                 error.FileNotFound => return,
                 else => |e| return e,
@@ -425,6 +443,7 @@ fn CommitErrorOf(comptime fallback: Fallback) type {
 /// `Pending.commit` and `Pending.commitOrRefuse` document.
 pub fn commit(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOptions) CommitErrorOf(fallback)!Committed {
     assert.pre(p.state != .published and p.state != .kept and p.state != .discarded, "Pending.commit: the pending already ended");
+    assert.pre(!p.in_place or options.level == .none, "Pending.commit: an in-place file commits at level .none only");
     switch (p.state) {
         .poisoned => return error.Poisoned,
         .published, .kept, .discarded => unreachable, // unreachable: the contract above stops a pending that ended
@@ -591,6 +610,8 @@ const Renamed = enum { renamed, taken };
 
 /// Step 6: the rename, as `options.publish` asks.
 fn rename(p: *Staged, io: Io, options: CommitOptions) CommitError!Renamed {
+    // Already under its name, created exclusively.
+    if (p.in_place) return .renamed;
     if (is_windows) return p.renameWindows(io, options);
     const parent = p.parent.handle;
     if (options.publish == .replace) {

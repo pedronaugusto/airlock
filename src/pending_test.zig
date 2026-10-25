@@ -590,3 +590,44 @@ test "a gate stands a task at the first create of a name until the test lets it 
     var again = try airlock.create(h.io(), s.dir(), "main", .{ .temp = .{ .exact = "main.lock" } });
     again.discard(h.io());
 }
+
+test "in place: created under its own name, committed at none with no rename and no sync" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const h = try Seam.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    const io = h.io();
+    var p = try airlock.create(io, s.dir(), "a", .{ .temp = .in_place });
+    defer p.discard(io);
+    try p.file().writePositionalAll(io, "0123", 0);
+    // Under its name from the start: a reader sees it partial.
+    try expectContents(&s, "a", "0123");
+    const done = try p.commit(io, .{ .level = .none });
+    try testing.expectEqual(airlock.Reached.none, done.reached);
+    try testing.expectEqual(@as(u32, 1), h.count(.create_temp));
+    try testing.expectEqual(@as(u32, 0), h.count(.rename) + h.count(.rename_noreplace) + h.count(.win_rename_ex));
+    try testing.expectEqual(@as(u32, 0), h.count(temp_sync) + h.count(.sync_dir));
+    try expectContents(&s, "a", "0123");
+    try expectNoTemps(&s);
+}
+
+test "in place: a taken name, or a link at it, is PathAlreadyExists; discard removes the file" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const io = testing.io;
+    try s.write("taken", "old");
+    try testing.expectError(error.PathAlreadyExists, airlock.create(io, s.dir(), "taken", .{ .temp = .in_place }));
+    try expectContents(&s, "taken", "old");
+    if (!is_windows) {
+        // The link is never followed: its target is not made.
+        try s.dir().symLink(io, "target", "link", .{});
+        try testing.expectError(error.PathAlreadyExists, airlock.create(io, s.dir(), "link", .{ .temp = .in_place }));
+        try expectContents(&s, "target", null);
+    }
+    var p = try airlock.create(io, s.dir(), "gone", .{ .temp = .in_place, .mode = .{ .exact = .default_file } });
+    p.discard(io);
+    p.discard(io);
+    try expectContents(&s, "gone", null);
+}

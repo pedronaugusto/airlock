@@ -550,3 +550,27 @@ fn expectReadOnly(dir: Io.Dir, name: []const u8) !void {
     file.close(testing.io);
     return error.TestExpectedReadOnly;
 }
+
+test "in place: a batch at none publishes files with no rename" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const h = try Seam.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    const io = h.io();
+    var ps: [3]airlock.Pending = undefined;
+    for (&ps, [_][]const u8{ "a", "b", "c" }) |*p, name| {
+        p.* = try airlock.create(io, s.dir(), name, .{ .temp = .in_place });
+        try p.file().writePositionalAll(io, name, 0);
+    }
+    defer for (&ps) |*p| p.discard(io);
+    var slots: [8]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    for (&ps) |*p| try batch.addPending(io, p, .replace);
+    h.reset();
+    const reached = try batch.commit(io, .{ .level = .none, .parallel = 1 });
+    try testing.expectEqual(airlock.Reached.none, reached);
+    for ([_][]const u8{ "a", "b", "c" }) |name| try expectContents(&s, name, name);
+    try testing.expectEqual(@as(u32, 0), h.count(.rename) + h.count(.rename_noreplace) + h.count(.win_rename_ex));
+}
