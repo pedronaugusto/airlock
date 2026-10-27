@@ -25,7 +25,7 @@ const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rena
 /// The simulated disk's names, as this platform's file systems compare them.
 const names: @FieldType(shakedown.Sim.Fs.Options, "names") = if (os.isDarwin()) .darwin else if (os == .windows) .windows else .posix;
 
-const Operation = struct {
+pub const Operation = struct {
     kind: Kind,
     plan: []const seam.Plan.Entry = &.{},
     barrier: bool = true,
@@ -118,7 +118,7 @@ const Operation = struct {
         for (s.dests()) |d| {
             pendings[count] = try airlock.create(io, dir, d, .{});
             count += 1;
-            try pendings[count - 1].file().writePositionalAll(io, "new", 0);
+            try pendings[count - 1].file().get().writePositionalAll(io, "new", 0);
         }
         var slots: [8]airlock.Batch.Slot = undefined;
         var batch: airlock.Batch = .init(&slots);

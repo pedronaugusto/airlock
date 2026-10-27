@@ -27,7 +27,7 @@ test "Darwin batch schedules each writeout and falls back when concurrency is un
             const name = try std.mem.print(buf, "f{d}", .{i});
             p.* = try airlock.create(io, scratch.dir(), name, .{});
             made += 1;
-            try p.file().writePositionalAll(io, "data", 0);
+            try p.file().get().writePositionalAll(io, "data", 0);
             try batch.addPending(io, p, .replace);
         }
         try testing.expectEqual(airlock.Reached.full, try batch.commit(io, .{ .parallel = 4 }));
@@ -58,7 +58,7 @@ test "Darwin concurrent writeout failures belong to the first slot and publish n
         for (&ps, [_][]const u8{ "a", "b", "c" }, [_][]const u8{ "a.tmp", "b.tmp", "c.tmp" }) |*p, name, temp| {
             p.* = try airlock.create(io, scratch.dir(), name, .{ .temp = .{ .exact = temp } });
             made += 1;
-            try p.file().writePositionalAll(io, "data", 0);
+            try p.file().get().writePositionalAll(io, "data", 0);
             try batch.addPending(io, p, .replace);
         }
         if (cancel) try testing.expectError(error.Canceled, batch.commit(io, .{ .parallel = 4 })) else try testing.expectError(error.InputOutput, batch.commit(io, .{ .parallel = 4 }));
@@ -79,7 +79,7 @@ test "Darwin concurrent writeout refusal never upgrades an unsynced file" {
     const io = h.io();
     var p = try airlock.create(io, scratch.dir(), "file", .{});
     defer p.discard(io);
-    try p.file().writePositionalAll(io, "data", 0);
+    try p.file().get().writePositionalAll(io, "data", 0);
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);

@@ -12,23 +12,24 @@ const Executor = struct {
     calls: std.atomic.Value(u32) = .init(0),
     workers: std.atomic.Value(u32) = .init(0),
     cancel_at: u32 = 0,
+    blocking: airlock.Blocking = .{ .run = run },
 
-    fn hook(e: *Executor) airlock.Blocking {
-        return .{ .context = e, .run = run };
+    fn hook(e: *Executor) *airlock.Blocking {
+        return &e.blocking;
     }
 
-    fn run(io: Io, context: ?*anyopaque, function: *const fn (*anyopaque) void, argument: *anyopaque) Io.Cancelable!void {
-        const e: *Executor = @ptrCast(@alignCast(context.?)); // safe: hook() gives this Executor as context
+    fn run(self: *airlock.Blocking, io: Io, job: *airlock.Blocking.Job) Io.Cancelable!void {
+        const e: *Executor = @alignCast(@fieldParentPtr("blocking", self));
         try io.checkCancel();
         const n = e.calls.fetchAdd(1, .monotonic) + 1;
         if (n == e.cancel_at) return error.Canceled;
-        const thread = std.Thread.spawn(.{}, work, .{ e, std.Thread.getCurrentId(), function, argument }) catch @panic("test worker unavailable");
+        const thread = std.Thread.spawn(.{}, work, .{ e, std.Thread.getCurrentId(), job }) catch @panic("test worker unavailable");
         thread.join();
     }
 
-    fn work(e: *Executor, caller: std.Thread.Id, function: *const fn (*anyopaque) void, argument: *anyopaque) void {
+    fn work(e: *Executor, caller: std.Thread.Id, job: *airlock.Blocking.Job) void {
         std.debug.assert(caller != std.Thread.getCurrentId());
-        function(argument);
+        job.execute();
         _ = e.workers.fetchAdd(1, .monotonic);
     }
 };
@@ -62,7 +63,7 @@ test "blocking hook cancellation preserves prepublish and postpublish states" {
     var e: Executor = .{ .cancel_at = 1 };
     var p = try airlock.create(io, s.dir(), "dest", .{});
     defer p.discard(io);
-    try p.file().writePositionalAll(io, "new", 0);
+    try p.file().get().writePositionalAll(io, "new", 0);
     try testing.expectError(error.Canceled, p.commit(io, .{ .blocking = e.hook() }));
     try testing.expectEqual(airlock.Pending.State.open, p.state());
     var buffer: [16]u8 = undefined;
@@ -111,12 +112,12 @@ test "blocking hook reaches batch fences kept files and all name operations" {
     defer b.reset(io);
     var kept = try airlock.create(io, s.dir(), "kept", .{});
     defer kept.discard(io);
-    try kept.file().writePositionalAll(io, "same", 0);
+    try kept.file().get().writePositionalAll(io, "same", 0);
     try b.addPending(io, &kept, .keep_existing);
     try b.fence();
     var p = try airlock.create(io, s.dir(), "published", .{});
     defer p.discard(io);
-    try p.file().writePositionalAll(io, "new", 0);
+    try p.file().get().writePositionalAll(io, "new", 0);
     try b.addPending(io, &p, .replace);
     try testing.expect((try b.commitOrRefuse(io, .{ .blocking = e.hook() })).atLeast(.data));
     const sync: airlock.SyncOptions = .{ .blocking = e.hook() };

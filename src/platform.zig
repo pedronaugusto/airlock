@@ -58,6 +58,14 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const Blocking = @import("Blocking.zig");
 const sys = @import("sys.zig");
+const aegis = @import("aegis");
+
+/// A reading of the awake clock, which a backoff's deadline is on.
+const Awake = aegis.units.Instant(.awake, .nanosecond, i96);
+/// A span on it.
+const Span = aegis.units.Duration(.nanosecond, i96);
+/// The longest a backoff waits between tries.
+const longest_wait: Span = aegis.units.Duration(.millisecond, i64).fromRaw(100).convert(.nanosecond, i96, .exact);
 const level_mod = @import("level.zig");
 const Level = level_mod.Level;
 const Reached = level_mod.Reached;
@@ -75,7 +83,7 @@ pub const os: Os = if (is_linux) .linux else if (is_darwin) .darwin else if (is_
 
 /// The file sync `level` asks for, through its fallback chain, without the
 /// refuse check. `subject` names the file for the test seam.
-pub fn syncChain(io: Io, blocking: ?Blocking, handle: sys.Handle, level: Level, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
+pub fn syncChain(io: Io, blocking: ?*Blocking, handle: sys.Handle, level: Level, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (level == .none) return .none;
     return switch (os) {
         .linux => linuxChain(io, blocking, handle, level, subject),
@@ -85,7 +93,7 @@ pub fn syncChain(io: Io, blocking: ?Blocking, handle: sys.Handle, level: Level, 
     };
 }
 
-fn linuxChain(io: Io, blocking: ?Blocking, fd: sys.Handle, level: Level, subject: ?[]const u8) Io.File.SyncError!Reached {
+fn linuxChain(io: Io, blocking: ?*Blocking, fd: sys.Handle, level: Level, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (level != .full) {
         if (sys.dataFsync(io, blocking, fd, subject)) |_| return .data else |err| switch (err) {
             error.Refused => {},
@@ -100,7 +108,7 @@ fn linuxChain(io: Io, blocking: ?Blocking, fd: sys.Handle, level: Level, subject
     return .full;
 }
 
-fn darwinChain(io: Io, blocking: ?Blocking, fd: sys.Handle, level: Level, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
+fn darwinChain(io: Io, blocking: ?*Blocking, fd: sys.Handle, level: Level, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (level == .ordered and barrier) {
         if (sys.barrierFsync(io, blocking, fd, subject)) |_| return .ordered else |err| switch (err) {
             error.Refused => {},
@@ -111,7 +119,7 @@ fn darwinChain(io: Io, blocking: ?Blocking, fd: sys.Handle, level: Level, barrie
 }
 
 /// Darwin `F_FULLFSYNC` as `call`, then `fsync` on a refusal.
-fn full(io: Io, blocking: ?Blocking, fd: sys.Handle, call: sys.Call, subject: ?[]const u8) Io.File.SyncError!Reached {
+fn full(io: Io, blocking: ?*Blocking, fd: sys.Handle, call: sys.Call, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (sys.fullFsync(io, blocking, fd, call, subject)) |_| return .full else |err| switch (err) {
         error.Refused => {},
         else => |e| return e,
@@ -120,7 +128,7 @@ fn full(io: Io, blocking: ?Blocking, fd: sys.Handle, call: sys.Call, subject: ?[
 }
 
 /// Plain `fsync` as `call`, reaching `reached`; `.none` on a refusal.
-fn plain(io: Io, blocking: ?Blocking, fd: sys.Handle, call: sys.Call, subject: ?[]const u8, reached: Reached) Io.File.SyncError!Reached {
+fn plain(io: Io, blocking: ?*Blocking, fd: sys.Handle, call: sys.Call, subject: ?[]const u8, reached: Reached) Io.File.SyncError!Reached {
     sys.plainFsync(io, blocking, fd, call, subject) catch |err| return switch (err) {
         error.Refused => .none,
         else => |e| e,
@@ -128,7 +136,7 @@ fn plain(io: Io, blocking: ?Blocking, fd: sys.Handle, call: sys.Call, subject: ?
     return reached;
 }
 
-fn windowsChain(io: Io, blocking: ?Blocking, handle: sys.Handle, level: Level, subject: ?[]const u8) Io.File.SyncError!Reached {
+fn windowsChain(io: Io, blocking: ?*Blocking, handle: sys.Handle, level: Level, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (level != .full) {
         if (sys.flushExWindows(io, blocking, handle, .data_sync_only, subject)) |_| return .data else |err| switch (err) {
             error.Refused => {},
@@ -139,7 +147,7 @@ fn windowsChain(io: Io, blocking: ?Blocking, handle: sys.Handle, level: Level, s
 }
 
 /// Windows `NtFlushBuffersFile` as `call`; `.none` on a refusal.
-pub fn flushFull(io: Io, blocking: ?Blocking, handle: sys.Handle, call: sys.Call, subject: ?[]const u8) Io.File.SyncError!Reached {
+pub fn flushFull(io: Io, blocking: ?*Blocking, handle: sys.Handle, call: sys.Call, subject: ?[]const u8) Io.File.SyncError!Reached {
     sys.flushWindows(io, blocking, handle, call, subject) catch |err| return switch (err) {
         error.Refused => .none,
         else => |e| e,
@@ -150,7 +158,7 @@ pub fn flushFull(io: Io, blocking: ?Blocking, handle: sys.Handle, call: sys.Call
 /// A writeout without a device flush, for a batch: Darwin `fsync`, Windows
 /// `NO_SYNC`. `.written`, or `.full` where Windows refused `NO_SYNC` and a
 /// full flush stood in; `.none` if that was refused too.
-pub fn writeout(io: Io, blocking: ?Blocking, handle: sys.Handle, subject: ?[]const u8) Io.File.SyncError!Reached {
+pub fn writeout(io: Io, blocking: ?*Blocking, handle: sys.Handle, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (is_windows) {
         if (sys.flushExWindows(io, blocking, handle, .no_sync, subject)) |_| return .written else |err| switch (err) {
             error.Refused => {},
@@ -163,7 +171,7 @@ pub fn writeout(io: Io, blocking: ?Blocking, handle: sys.Handle, subject: ?[]con
 
 /// One device flush on the volume `handle` is on: Darwin `F_FULLFSYNC`,
 /// Windows `NtFlushBuffersFile`.
-pub fn volumeFlush(io: Io, blocking: ?Blocking, handle: sys.Handle, subject: ?[]const u8) Io.File.SyncError!Reached {
+pub fn volumeFlush(io: Io, blocking: ?*Blocking, handle: sys.Handle, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (is_windows) return flushFull(io, blocking, handle, .sync_full, subject);
     return full(io, blocking, handle, .sync_full, subject);
 }
@@ -171,7 +179,7 @@ pub fn volumeFlush(io: Io, blocking: ?Blocking, handle: sys.Handle, subject: ?[]
 /// One barrier on the volume `handle` is on: Darwin `F_BARRIERFSYNC`, or a
 /// full flush where there is no barrier or it is refused. Returns
 /// `.ordered`, `.full`, `.written` or `.none`.
-pub fn volumeBarrier(io: Io, blocking: ?Blocking, handle: sys.Handle, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
+pub fn volumeBarrier(io: Io, blocking: ?*Blocking, handle: sys.Handle, barrier: bool, subject: ?[]const u8) Io.File.SyncError!Reached {
     if (is_darwin and barrier) {
         if (sys.barrierFsync(io, blocking, handle, subject)) |_| return .ordered else |err| switch (err) {
             error.Refused => {},
@@ -212,7 +220,7 @@ pub fn syncDir(io: Io, dir: Io.Dir, options: SyncOptions) DirSyncError!Reached {
 }
 
 /// The directory sync of `handle`, at `data` or `full` (they are one call).
-pub fn dirSync(io: Io, blocking: ?Blocking, handle: sys.Handle, busy: Io.Duration, subject: ?[]const u8) DirSyncError!DirOutcome {
+pub fn dirSync(io: Io, blocking: ?*Blocking, handle: sys.Handle, busy: Io.Duration, subject: ?[]const u8) DirSyncError!DirOutcome {
     if (is_windows) {
         const flush = try openDirFlush(io, handle, busy);
         defer sys.release(io, flush);
@@ -235,7 +243,7 @@ pub fn dirSync(io: Io, blocking: ?Blocking, handle: sys.Handle, busy: Io.Duratio
 }
 
 /// `dirSync` of `"."` reopened relative to `handle`, once.
-fn reopened(io: Io, blocking: ?Blocking, handle: sys.Handle, subject: ?[]const u8) DirSyncError!DirOutcome {
+fn reopened(io: Io, blocking: ?*Blocking, handle: sys.Handle, subject: ?[]const u8) DirSyncError!DirOutcome {
     const fresh = try sys.openDir(io, handle, ".");
     defer sys.release(io, fresh);
     if (fresh == sys.at_fdcwd) return error.Unexpected;
@@ -256,7 +264,7 @@ pub fn openDirFlush(io: Io, handle: sys.Handle, busy: Io.Duration) sys.OpenDirEr
 }
 
 /// Windows: flush a handle `openDirFlush` returned.
-pub fn flushDir(io: Io, blocking: ?Blocking, flush: sys.Handle, subject: ?[]const u8) Io.File.SyncError!DirOutcome {
+pub fn flushDir(io: Io, blocking: ?*Blocking, flush: sys.Handle, subject: ?[]const u8) Io.File.SyncError!DirOutcome {
     const reached = try flushFull(io, blocking, flush, .sync_dir, subject);
     return .{ .reached = reached, .refused = reached == .none };
 }
@@ -275,15 +283,20 @@ pub const Backoff = struct {
     /// Sleeps before the next try and returns true, or returns false once
     /// the deadline has passed.
     pub fn wait(b: *Backoff, io: Io) Io.Cancelable!bool {
-        const now = Io.Timestamp.now(io, .awake);
-        if (now.nanoseconds >= b.deadline.nanoseconds) return false;
+        const now: Awake = .fromTimestamp(Io.Timestamp.now(io, .awake), .exact);
+        const deadline: Awake = .fromTimestamp(b.deadline, .exact);
+        if (now.compare(deadline) != .lt) return false;
         var bytes: [2]u8 = undefined;
         io.random(&bytes);
-        const jitter = 500 + @as(i64, std.mem.readInt(u16, &bytes, .little) % 1000);
-        const left = b.deadline.nanoseconds - now.nanoseconds;
-        const nap = @min(@divTrunc(b.next.nanoseconds * jitter, 1000), left);
-        try io.sleep(.fromNanoseconds(nap), .awake);
-        b.next = .fromNanoseconds(@min(b.next.nanoseconds * 2, std.time.ns_per_ms * 100));
+        // Per mille of the next wait: 500 to 1499.
+        const jitter = 500 + @as(i96, std.mem.readInt(u16, &bytes, .little) % 1000);
+        const next: Span = .fromIoDuration(b.next, .exact);
+        const scaled = next.saturatingMul(jitter).divTrunc(1000) catch unreachable; // unreachable: a positive divisor
+        const left = now.saturatingDurationTo(deadline);
+        const nap = if (scaled.compare(left) == .lt) scaled else left;
+        try io.sleep(nap.toIoDuration(), .awake);
+        const doubled = next.saturatingMul(2);
+        b.next = (if (doubled.compare(longest_wait) == .lt) doubled else longest_wait).toIoDuration();
         return true;
     }
 };

@@ -332,7 +332,7 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
 
 /// The sync that makes a new link durable before its rename: `.ordered`
 /// when it did, what it reached when the filesystem refused it.
-fn linkSync(comptime fallback: Fallback, io: Io, blocking: ?Blocking, dir: Io.Dir) LinkError(fallback)!Reached {
+fn linkSync(comptime fallback: Fallback, io: Io, blocking: ?*Blocking, dir: Io.Dir) LinkError(fallback)!Reached {
     const outcome = try platform.dirSync(io, blocking, dir.handle, platform.default_busy_deadline, null);
     if (outcome.refused) {
         if (fallback == .refuse) return error.LevelUnavailable;
@@ -401,7 +401,7 @@ const Parent = struct {
 
 /// One directory's sync after a name changed in it: a refusal leaves the
 /// change `.ordered`.
-fn syncOne(io: Io, blocking: ?Blocking, dir: Io.Dir, busy: Io.Duration) platform.DirSyncError!Reached {
+fn syncOne(io: Io, blocking: ?*Blocking, dir: Io.Dir, busy: Io.Duration) platform.DirSyncError!Reached {
     const outcome = try platform.dirSync(io, blocking, dir.handle, busy, null);
     return if (outcome.refused) .ordered else outcome.reached;
 }

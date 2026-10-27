@@ -182,7 +182,7 @@ const Fields = struct {
     fn time(f: *Fields) ?Io.Timestamp {
         const sec = f.take(i64) orelse return null;
         const nsec = f.take(i64) orelse return null;
-        return .{ .nanoseconds = @as(i96, sec) * std.time.ns_per_s + nsec };
+        return sys.timestamp(sec, nsec);
     }
 };
 
@@ -274,8 +274,8 @@ fn expectSameStat(want: sys.Full, got: sys.Full) !void {
     try testing.expectEqual(want.kind, got.kind);
     try testing.expectEqual(want.mode, got.mode);
     try testing.expectEqual(want.size, got.size);
-    try testing.expectEqual(want.mtime.nanoseconds, got.mtime.nanoseconds);
-    try testing.expectEqual(want.ctime.nanoseconds, got.ctime.nanoseconds);
+    try testing.expectEqual(want.mtime, got.mtime);
+    try testing.expectEqual(want.ctime, got.ctime);
     try testing.expectEqual(want.inode, got.inode);
     try testing.expectEqual(want.device, got.device);
     try testing.expectEqual(want.uid, got.uid);
@@ -283,7 +283,7 @@ fn expectSameStat(want: sys.Full, got: sys.Full) !void {
     try testing.expectEqual(want.attributes, got.attributes);
     try testing.expectEqual(want.reparse_tag, got.reparse_tag);
     if (want.birth != null and got.birth != null)
-        try testing.expectEqual(want.birth.?.nanoseconds, got.birth.?.nanoseconds);
+        try testing.expectEqual(want.birth.?, got.birth.?);
 }
 
 /// A directory of every kind a test can make, and a long name.

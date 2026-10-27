@@ -98,7 +98,7 @@ pub const SyncOptions = struct {
     /// provide".
     barrier: bool = true,
     /// Optional executor for raw syncs; null runs inline. Borrowed for this call.
-    blocking: ?Blocking = null,
+    blocking: ?*Blocking = null,
 };
 
 test "levels compare by their promise" {

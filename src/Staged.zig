@@ -403,7 +403,7 @@ pub const CommitOptions = struct {
     /// flushes the device once, at the directory.
     barrier: bool = true,
     /// Optional executor for raw syncs; null runs inline. Borrowed for this call.
-    blocking: ?Blocking = null,
+    blocking: ?*Blocking = null,
 };
 
 /// `kept`: the name already existed and was left alone. `reached` is then

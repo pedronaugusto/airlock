@@ -294,23 +294,24 @@ fn micros(ns: u64) f64 {
 
 // Rows.
 
-fn rowBlocking(row: *const Row) ?airlock.Blocking {
-    return if (row.offload) .{ .run = execute } else null;
-}
-
 /// A benchmark adapter over Threaded's pool, not a runtime supplied by airlock.
-fn perform(function: *const fn (*anyopaque) void, argument: *anyopaque) void {
-    function(argument);
+var offload: airlock.Blocking = .{ .run = execute };
+
+fn rowBlocking(row: *const Row) ?*airlock.Blocking {
+    return if (row.offload) &offload else null;
 }
 
-fn execute(io: Io, context: ?*anyopaque, function: *const fn (*anyopaque) void, argument: *anyopaque) Io.Cancelable!void {
-    _ = context;
+fn perform(job: *airlock.Blocking.Job) void {
+    job.execute();
+}
+
+fn execute(_: *airlock.Blocking, io: Io, job: *airlock.Blocking.Job) Io.Cancelable!void {
     try io.checkCancel();
-    var job = io.concurrent(perform, .{ function, argument }) catch {
-        function(argument);
+    var task = io.concurrent(perform, .{job}) catch {
+        job.execute();
         return;
     };
-    job.await(io);
+    task.await(io);
 }
 
 fn probeSync(ctx: *Context, row: *const Row, i: u64) anyerror!void {
@@ -344,7 +345,7 @@ fn batch(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     if (row.renames) {
         for (ctx.pendings[0..row.n], 0..) |*p, n| {
             p.* = try airlock.create(io, ctx.dir, ctx.names[n][0..7], .{});
-            try p.file().writePositionalAll(io, bytes, 0);
+            try p.file().get().writePositionalAll(io, bytes, 0);
             try b.addPending(io, p, .replace);
         }
     } else if (row.paths) {

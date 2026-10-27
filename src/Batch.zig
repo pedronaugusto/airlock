@@ -183,7 +183,7 @@ pub const Options = struct {
     /// As `SyncOptions.barrier`.
     barrier: bool = true,
     /// Optional executor for raw syncs; null runs inline. Borrowed for this call.
-    blocking: ?Blocking = null,
+    blocking: ?*Blocking = null,
 };
 
 pub const Error = Pending.CommitError || platform.SyncPathError || platform.DirSyncError || sys.StatIdError || error{BatchFull};
