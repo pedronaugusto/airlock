@@ -27,8 +27,8 @@
         },
 
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=aegis-0.2#025359450ee09d04b05d7a300b54aad7df4ae8f1",
-            .hash = "preflight-0.18.1-LX1ZwqCmEwADnlYlEZT-Tia_jKOL6fb92Epi5NIlTKak",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.18.2#ec1324e593a0d09a9e6ec66cdf037e9a3b63a014",
+            .hash = "preflight-0.18.2-LX1ZwvamEwC6vQI0Y6KJcTB3CWZY1bws92ObpDBiZPAq",
         },
     },
 }
