@@ -15,6 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Under the aegis pack on aegis 0.2.1: a file's times are read as aegis instants on the real clock; the contention backoff measures its deadline and waits as aegis instants and spans; std's `Io` userdata, which the hooked layer's sync is handed, and the system's declarations carry their contract where they are.
 
+- The walks over a caller's path (where its base starts, its parent, the components `makePath` creates) are in one place, `paths.zig`, and fuzzed: three shakedown properties, seeded in `zig build test` and searched by the hardened gate's `--fuzz` campaign, hold that any path gives indexes and slices inside it and the names a plain split would.
+
 ## [0.5.5] - 2026-10-25
 
 ### Added

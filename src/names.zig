@@ -9,6 +9,7 @@ const sys = @import("sys.zig");
 const platform = @import("platform.zig");
 const level_mod = @import("level.zig");
 const Staged = @import("Staged.zig");
+const paths = @import("paths.zig");
 const Level = level_mod.Level;
 const Reached = level_mod.Reached;
 const SyncOptions = level_mod.SyncOptions;
@@ -182,26 +183,19 @@ pub fn makePath(io: Io, dir: Io.Dir, sub_path: []const u8, options: MakePathOpti
 /// exists, then each missing one under it. `FileNotFound` means a
 /// directory vanished on the way, and the caller starts again.
 fn makeMissing(io: Io, dir: Io.Dir, sub_path: []const u8, options: MakePathOptions, made: *Made, synced: *bool) MakePathError!void {
-    var end = sub_path.len;
-    while (end > 0 and isSeparator(sub_path[end - 1])) end -= 1;
+    const end = paths.trimmedEnd(sub_path);
     // The deepest prefix that exists, from the whole path back.
     var start = end;
     const deepest: ?sys.Handle = while (start > 0) {
         if (sys.openDir(io, dir.handle, sub_path[0..start])) |handle| break handle else |err| switch (err) {
-            error.FileNotFound => start = previousSeparator(sub_path, start),
+            error.FileNotFound => start = paths.previousSeparator(sub_path, start),
             else => |e| return e,
         }
     } else null;
     var parent: Parent = if (deepest) |handle| .{ .dir = .{ .handle = handle }, .owned = true } else .{ .dir = dir, .owned = false };
     defer parent.close(io);
-    var i = start;
-    while (i < end) {
-        while (i < end and isSeparator(sub_path[i])) i += 1;
-        var j = i;
-        while (j < end and !isSeparator(sub_path[j])) j += 1;
-        const name = sub_path[i..j];
-        i = j;
-        if (name.len == 0 or std.mem.eql(u8, name, ".")) continue;
+    var components: paths.Components = .{ .path = sub_path, .at = start, .end = end };
+    while (components.next()) |name| {
         const created = if (sys.makeDir(io, parent.dir.handle, name)) true else |err| switch (err) {
             error.PathAlreadyExists => false,
             else => |e| return e,
@@ -221,18 +215,6 @@ fn makeMissing(io: Io, dir: Io.Dir, sub_path: []const u8, options: MakePathOptio
         parent.close(io);
         parent = .{ .dir = .{ .handle = child }, .owned = true };
     }
-}
-
-fn isSeparator(c: u8) bool {
-    return c == '/' or (is_windows and c == '\\');
-}
-
-/// Where the separator before `end` is in `path`, or 0.
-fn previousSeparator(path: []const u8, end: usize) usize {
-    var i = end;
-    while (i > 0 and !isSeparator(path[i - 1])) i -= 1;
-    while (i > 0 and isSeparator(path[i - 1])) i -= 1;
-    return i;
 }
 
 // ---------------------------------------------------------------------
@@ -286,10 +268,10 @@ fn LinkError(comptime fallback: Fallback) type {
 
 fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, sub_path: []const u8, options: SymLinkOptions) LinkError(fallback)!Reached {
     if (is_windows) return error.OperationUnsupported;
-    const base_start = Staged.baseStart(sub_path);
+    const base_start = paths.baseStart(sub_path);
     const base = sub_path[base_start..];
     if (base.len == 0 or std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, "..")) return error.BadPathName;
-    if (options.temp_prefix.len > Staged.max_prefix or Staged.baseStart(options.temp_prefix) != 0) return error.BadPathName;
+    if (options.temp_prefix.len > Staged.max_prefix or paths.baseStart(options.temp_prefix) != 0) return error.BadPathName;
     var parent = try Parent.open(io, dir, sub_path);
     defer parent.close(io);
     var buffer: [64]u8 = undefined;
@@ -359,7 +341,7 @@ pub const PruneError = Io.Dir.Iterator.Error || sys.StatPathError || sys.UnlinkE
 /// went. `dir` must be open for iteration. The removals are not synced: a
 /// temp that comes back after a crash goes on the next prune.
 pub fn pruneTemps(io: Io, dir: Io.Dir, prefix: []const u8, options: PruneOptions) PruneError!u32 {
-    if (prefix.len > Staged.max_prefix or Staged.baseStart(prefix) != 0) return error.BadPathName;
+    if (prefix.len > Staged.max_prefix or paths.baseStart(prefix) != 0) return error.BadPathName;
     const now = Io.Timestamp.now(io, .real);
     var removed: u32 = 0;
     var it = dir.iterate();
@@ -388,9 +370,9 @@ const Parent = struct {
     owned: bool,
 
     fn open(io: Io, dir: Io.Dir, sub_path: []const u8) sys.OpenDirError!Parent {
-        const base_start = Staged.baseStart(sub_path);
+        const base_start = paths.baseStart(sub_path);
         if (base_start == 0) return .{ .dir = dir, .owned = false };
-        return .{ .dir = .{ .handle = try sys.openDir(io, dir.handle, Staged.parentPath(sub_path, base_start)) }, .owned = true };
+        return .{ .dir = .{ .handle = try sys.openDir(io, dir.handle, paths.parentPath(sub_path, base_start)) }, .owned = true };
     }
 
     fn close(p: *Parent, io: Io) void {
@@ -412,11 +394,4 @@ fn sameDirectory(io: Io, a: Io.Dir, b: Io.Dir) sys.StatIdError!bool {
     const x = try sys.statId(io, a.handle);
     const y = try sys.statId(io, b.handle);
     return x.volume == y.volume and x.file == y.file;
-}
-
-test "a path's components are found from the end" {
-    try std.testing.expectEqual(@as(usize, 1), previousSeparator("a/b", 3));
-    try std.testing.expectEqual(@as(usize, 0), previousSeparator("a/b", 1));
-    try std.testing.expectEqual(@as(usize, 1), previousSeparator("a//b", 4));
-    try std.testing.expectEqual(@as(usize, 0), previousSeparator("abc", 3));
 }

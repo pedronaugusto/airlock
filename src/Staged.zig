@@ -10,6 +10,7 @@ const assert = @import("aegis").assert;
 const builtin = @import("builtin");
 const Io = std.Io;
 const sys = @import("sys.zig");
+const paths = @import("paths.zig");
 const platform = @import("platform.zig");
 const level_mod = @import("level.zig");
 const Level = level_mod.Level;
@@ -149,7 +150,7 @@ const max_draws = 4;
 /// Creates the temp for `dest_sub_path`, relative to `dir`, as
 /// `Pending.create` documents.
 pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOptions) CreateError!Staged {
-    const base_start = baseStart(dest_sub_path);
+    const base_start = paths.baseStart(dest_sub_path);
     const base = dest_sub_path[base_start..];
     if (base.len == 0 or std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, "..")) return error.BadPathName;
     var p: Staged = .{
@@ -166,7 +167,7 @@ pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOpt
         .writer_state = undefined,
     };
     if (base_start != 0) {
-        p.parent = .{ .handle = try sys.openDir(io, dir.handle, parentPath(dest_sub_path, base_start)) };
+        p.parent = .{ .handle = try sys.openDir(io, dir.handle, paths.parentPath(dest_sub_path, base_start)) };
         p.owns_parent = true;
     }
     errdefer if (p.owns_parent) sys.release(io, p.parent.handle);
@@ -181,22 +182,6 @@ pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOpt
     return p;
 }
 
-/// Where the base name of `path` starts: after its last separator.
-pub fn baseStart(path: []const u8) usize {
-    var i = path.len;
-    while (i > 0) : (i -= 1) {
-        const c = path[i - 1];
-        if (c == '/' or (is_windows and c == '\\')) return i;
-    }
-    return 0;
-}
-
-/// The directory part of `path`, given where its base starts: "/" for a
-/// name at the root.
-pub fn parentPath(path: []const u8, base_start: usize) []const u8 {
-    return if (base_start == 1) path[0..1] else path[0 .. base_start - 1];
-}
-
 fn createTemp(p: *Staged, io: Io, options: CreateOptions, mode: Io.File.Permissions) CreateError!sys.Handle {
     switch (options.temp) {
         .in_place => {
@@ -206,12 +191,12 @@ fn createTemp(p: *Staged, io: Io, options: CreateOptions, mode: Io.File.Permissi
             return sys.createTemp(io, p.parent.handle, p.exact, mode, options.read);
         },
         .exact => |name| {
-            if (name.len == 0 or baseStart(name) != 0) return error.BadPathName;
+            if (name.len == 0 or paths.baseStart(name) != 0) return error.BadPathName;
             p.exact = name;
             return sys.createTemp(io, p.parent.handle, name, mode, options.read);
         },
         .random => |prefix| {
-            if (prefix.len > max_prefix or baseStart(prefix) != 0) return error.BadPathName;
+            if (prefix.len > max_prefix or paths.baseStart(prefix) != 0) return error.BadPathName;
             var draws: u32 = 0;
             while (true) {
                 p.temp_len = drawName(io, prefix, &p.temp_buffer);
@@ -300,7 +285,7 @@ pub fn baseName(p: *const Staged) []const u8 {
 /// for a destination directly in it.
 pub fn parentSubPath(p: *const Staged) ?[]const u8 {
     if (p.base_start == 0) return null;
-    return parentPath(p.dest, p.base_start);
+    return paths.parentPath(p.dest, p.base_start);
 }
 
 // ---------------------------------------------------------------------
@@ -791,8 +776,8 @@ test "a random name is the prefix and 26 base32 characters, nothing else" {
 }
 
 test "a destination splits into its directory and its base" {
-    try std.testing.expectEqual(@as(usize, 0), baseStart("HEAD"));
-    try std.testing.expectEqual(@as(usize, 11), baseStart("refs/heads/main"));
-    try std.testing.expectEqualStrings("refs/heads", parentPath("refs/heads/main", 11));
-    try std.testing.expectEqualStrings("/", parentPath("/x", 1));
+    try std.testing.expectEqual(@as(usize, 0), paths.baseStart("HEAD"));
+    try std.testing.expectEqual(@as(usize, 11), paths.baseStart("refs/heads/main"));
+    try std.testing.expectEqualStrings("refs/heads", paths.parentPath("refs/heads/main", 11));
+    try std.testing.expectEqualStrings("/", paths.parentPath("/x", 1));
 }
