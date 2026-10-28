@@ -40,10 +40,10 @@ root: Io.Dir,
 dest: []const u8,
 /// Where the base name starts in `dest`.
 base_start: usize,
-/// A random temp name, inline.
-temp_buffer: [64]u8,
+/// A random temp name, or the destination's name and a suffix, inline.
+temp_buffer: [max_temp_name]u8,
 /// The temp name's length in `temp_buffer`; 0 for an exact name.
-temp_len: u8,
+temp_len: u16,
 /// An exact temp name, borrowed.
 exact: []const u8,
 /// `Temp.in_place`: the file is under its own name, and nothing renames it.
@@ -105,6 +105,11 @@ pub const Temp = union(enum) {
     /// lock file ("main.lock" for "refs/heads/main"). Taken means
     /// `error.PathAlreadyExists`. Borrowed until commit or discard.
     exact: []const u8,
+    /// The destination's base name followed by this suffix (no separator),
+    /// such as ".lock" for git's lock of "refs/heads/main", "main.lock".
+    /// Taken means `error.PathAlreadyExists`; a name longer than a name
+    /// may be is `error.NameTooLong`.
+    suffix: []const u8,
     /// No temp: the file is created under the destination's own name,
     /// exclusively (`O_EXCL`, so a link there is never followed, and a
     /// taken name is `error.PathAlreadyExists`), and the commit renames
@@ -195,11 +200,20 @@ fn createTemp(p: *Staged, io: Io, options: CreateOptions, mode: Io.File.Permissi
             p.exact = name;
             return sys.createTemp(io, p.parent.handle, name, mode, options.read);
         },
+        .suffix => |suffix| {
+            if (suffix.len == 0 or paths.baseStart(suffix) != 0) return error.BadPathName;
+            const base = p.baseName();
+            if (suffix.len > p.temp_buffer.len - base.len) return error.NameTooLong;
+            @memcpy(p.temp_buffer[0..base.len], base);
+            @memcpy(p.temp_buffer[base.len..][0..suffix.len], suffix);
+            p.temp_len = @intCast(base.len + suffix.len); // safe: at most max_temp_name, checked above
+            return sys.createTemp(io, p.parent.handle, p.tempName(), mode, options.read);
+        },
         .random => |prefix| {
             if (prefix.len > max_prefix or paths.baseStart(prefix) != 0) return error.BadPathName;
             var draws: u32 = 0;
             while (true) {
-                p.temp_len = drawName(io, prefix, &p.temp_buffer);
+                p.temp_len = drawName(io, prefix, p.temp_buffer[0..64]);
                 return sys.createTemp(io, p.parent.handle, p.tempName(), mode, options.read) catch |err| switch (err) {
                     error.PathAlreadyExists, error.Busy => {
                         draws += 1;
@@ -215,6 +229,9 @@ fn createTemp(p: *Staged, io: Io, options: CreateOptions, mode: Io.File.Permissi
 
 /// The longest prefix a random temp name takes.
 pub const max_prefix = 32;
+/// The longest temp name held inline: a name as long as the platform
+/// allows, for a suffixed one.
+pub const max_temp_name = @max(64, std.fs.max_name_bytes);
 /// How many base32 characters follow the prefix.
 pub const random_len = 26;
 

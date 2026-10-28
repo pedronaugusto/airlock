@@ -2080,3 +2080,9 @@ test "blocking hook captures Darwin errno before leaving its worker" {
     try testing.expectEqual(posix.E.BADF, code);
     try testing.expectEqual(1, h.syncs());
 }
+
+/// This process's id, as a lock's holder file names it.
+pub fn processId() u32 {
+    if (native_os == .windows) return std.os.windows.GetCurrentProcessId();
+    return @bitCast(std.posix.system.getpid()); // safe: a process id is positive, so its bits are the same number unsigned
+}

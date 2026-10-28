@@ -98,6 +98,16 @@ pub const pruneTemps = names.pruneTemps;
 /// Many files, publishes and directories under the fewest barriers.
 pub const Batch = @import("Batch.zig");
 
+/// git's lock-file protocol: `<path>.lock` taken exclusively, with git's
+/// backoff and holder file, committed as the new `<path>` or released.
+pub const Lock = @import("Lock.zig");
+pub const LockOptions = Lock.Options;
+pub const LockError = Lock.Error;
+/// Takes `<path>.lock` in `dir`.
+pub const lock = Lock.take;
+/// What a held `<path>.lock` says of its holder; null when it is not held.
+pub const lockHolder = Lock.heldBy;
+
 /// Which file a handle or path is, by volume and file number.
 pub const FileId = @import("FileId.zig");
 
@@ -126,6 +136,7 @@ test {
     _ = names;
     _ = Pending;
     _ = Batch;
+    _ = Lock;
     _ = FileId;
     _ = stat_mod;
     _ = Volume;

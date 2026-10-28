@@ -7,6 +7,7 @@ test {
     _ = @import("sync_test.zig");
     _ = @import("blocking_test.zig");
     _ = @import("pending_test.zig");
+    _ = @import("lock_test.zig");
     _ = @import("batch_test.zig");
     _ = @import("batch_darwin_test.zig");
     _ = @import("names_test.zig");
