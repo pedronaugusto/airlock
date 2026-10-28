@@ -70,7 +70,7 @@ pub fn take(io: Io, dir: Io.Dir, path: []const u8, options: Options) Error!Lock 
 }
 
 /// The lock, written to while it is held, as `Pending.file` says.
-pub fn file(l: *const Lock) aegis.own.Lent(Io.File) {
+pub fn file(l: *const Lock) Io.File {
     return l.pending.file();
 }
 

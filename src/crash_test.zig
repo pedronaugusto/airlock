@@ -118,7 +118,7 @@ pub const Operation = struct {
         for (s.dests()) |d| {
             pendings[count] = try airlock.create(io, dir, d, .{});
             count += 1;
-            try pendings[count - 1].file().get().writePositionalAll(io, "new", 0);
+            try pendings[count - 1].file().writePositionalAll(io, "new", 0);
         }
         var slots: [8]airlock.Batch.Slot = undefined;
         var batch: airlock.Batch = .init(&slots);

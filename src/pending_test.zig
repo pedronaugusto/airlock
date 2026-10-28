@@ -181,7 +181,7 @@ test "a failed sync poisons: the temp is gone, the destination untouched, no ren
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "HEAD", .{});
     defer p.discard(h.io());
-    try p.file().get().writePositionalAll(h.io(), "new", 0);
+    try p.file().writePositionalAll(h.io(), "new", 0);
     try testing.expectError(error.InputOutput, p.commit(h.io(), .{}));
     try testing.expectEqual(airlock.Pending.State.poisoned, p.state());
     try testing.expectEqual(@as(?anyerror, error.InputOutput), p.cause());
@@ -218,7 +218,7 @@ test "a directory sync that fails after the rename is PublishedNotDurable, with 
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
-    try p.file().get().writePositionalAll(h.io(), "new", 0);
+    try p.file().writePositionalAll(h.io(), "new", 0);
     try testing.expectError(error.PublishedNotDurable, p.commit(h.io(), .{}));
     try testing.expectEqual(@as(?anyerror, error.InputOutput), p.cause());
     try testing.expectEqual(airlock.Pending.State.published, p.state());
@@ -307,7 +307,7 @@ test "refuse on Darwin decides before the rename: a refused flush publishes noth
     defer h.destroy();
     var p = try airlock.create(h.io(), s.dir(), "a", .{});
     defer p.discard(h.io());
-    try p.file().get().writePositionalAll(h.io(), "new", 0);
+    try p.file().writePositionalAll(h.io(), "new", 0);
     try testing.expectError(error.LevelUnavailable, p.commitOrRefuse(h.io(), .{}));
     try testing.expectEqual(@as(u32, 0), h.count(.rename));
     p.discard(h.io());
@@ -357,7 +357,7 @@ test "an exact name is a lock: taken is PathAlreadyExists, and it publishes" {
     defer lock.discard(io);
     try testing.expectError(error.PathAlreadyExists, airlock.create(io, s.dir(), "refs/heads/main", .{ .temp = .{ .exact = "main.lock" } }));
     try testing.expectError(error.BadPathName, airlock.create(io, s.dir(), "refs/heads/main", .{ .temp = .{ .exact = "a/main.lock" } }));
-    try lock.file().get().writePositionalAll(io, "0123", 0);
+    try lock.file().writePositionalAll(io, "0123", 0);
     // relic's lock commit at ordered: one file sync, no directory sync.
     const h = try Seam.create(testing.allocator, io, .{});
     defer h.destroy();
@@ -576,7 +576,7 @@ test "a gate stands a task at the first create of a name until the test lets it 
             other.discard(io);
             var lock = try airlock.create(io, dir, "main", .{ .temp = .{ .exact = "main.lock" } });
             defer lock.discard(io);
-            try lock.file().get().writePositionalAll(io, "held\n", 0);
+            try lock.file().writePositionalAll(io, "held\n", 0);
         }
     };
     var task = try testing.io.concurrent(Task.run, .{ h.io(), s.dir() });
@@ -600,7 +600,7 @@ test "in place: created under its own name, committed at none with no rename and
     const io = h.io();
     var p = try airlock.create(io, s.dir(), "a", .{ .temp = .in_place });
     defer p.discard(io);
-    try p.file().get().writePositionalAll(io, "0123", 0);
+    try p.file().writePositionalAll(io, "0123", 0);
     // Under its name from the start: a reader sees it partial.
     try expectContents(&s, "a", "0123");
     const done = try p.commit(io, .{ .level = .none });

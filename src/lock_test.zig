@@ -22,7 +22,7 @@ test "a lock is committed as the new file, and leaves nothing beside it" {
     // git's names: `<path>.lock`, and `<path>~pid.lock` beside it.
     try testing.expect(contents(io, tmp.dir, "refs/heads/main.lock", &buffer) != null);
     try testing.expect(contents(io, tmp.dir, "refs/heads/main~pid.lock", &buffer) != null);
-    try lock.file().get().writePositionalAll(io, "new\n", 0);
+    try lock.file().writePositionalAll(io, "new\n", 0);
     _ = try lock.commit(io, .{ .level = .data });
     try testing.expectEqualStrings("new\n", contents(io, tmp.dir, "refs/heads/main", &buffer).?);
     try testing.expect(contents(io, tmp.dir, "refs/heads/main.lock", &buffer) == null);
@@ -35,7 +35,7 @@ test "a released lock leaves the file as it was" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "old\n" });
     var lock = try airlock.lock(io, tmp.dir, "config", .{});
-    try lock.file().get().writePositionalAll(io, "half", 0);
+    try lock.file().writePositionalAll(io, "half", 0);
     lock.release(io);
     var buffer: [64]u8 = undefined;
     try testing.expectEqualStrings("old\n", contents(io, tmp.dir, "config", &buffer).?);
@@ -50,7 +50,7 @@ test "a held lock is LockHeld, at once or after waiting, and taken once released
     try testing.expectError(error.LockHeld, airlock.lock(io, tmp.dir, "index", .{}));
     try testing.expectError(error.LockHeld, airlock.lock(io, tmp.dir, "index", .{ .contention = .{ .wait = .fromMilliseconds(20) } }));
     // Nothing a refused taker did touched the holder's lock.
-    try first.file().get().writePositionalAll(io, "mine", 0);
+    try first.file().writePositionalAll(io, "mine", 0);
     first.release(io);
     var second = try airlock.lock(io, tmp.dir, "index", .{});
     second.release(io);

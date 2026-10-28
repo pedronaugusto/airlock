@@ -63,7 +63,7 @@ test "blocking hook cancellation preserves prepublish and postpublish states" {
     var e: Executor = .{ .cancel_at = 1 };
     var p = try airlock.create(io, s.dir(), "dest", .{});
     defer p.discard(io);
-    try p.file().get().writePositionalAll(io, "new", 0);
+    try p.file().writePositionalAll(io, "new", 0);
     try testing.expectError(error.Canceled, p.commit(io, .{ .blocking = e.hook() }));
     try testing.expectEqual(airlock.Pending.State.open, p.state());
     var buffer: [16]u8 = undefined;
@@ -112,12 +112,12 @@ test "blocking hook reaches batch fences kept files and all name operations" {
     defer b.reset(io);
     var kept = try airlock.create(io, s.dir(), "kept", .{});
     defer kept.discard(io);
-    try kept.file().get().writePositionalAll(io, "same", 0);
+    try kept.file().writePositionalAll(io, "same", 0);
     try b.addPending(io, &kept, .keep_existing);
     try b.fence();
     var p = try airlock.create(io, s.dir(), "published", .{});
     defer p.discard(io);
-    try p.file().get().writePositionalAll(io, "new", 0);
+    try p.file().writePositionalAll(io, "new", 0);
     try b.addPending(io, &p, .replace);
     try testing.expect((try b.commitOrRefuse(io, .{ .blocking = e.hook() })).atLeast(.data));
     const sync: airlock.SyncOptions = .{ .blocking = e.hook() };

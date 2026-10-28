@@ -350,7 +350,7 @@ fn batch(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     if (row.renames) {
         for (ctx.pendings[0..row.n], 0..) |*p, n| {
             p.* = try airlock.create(io, ctx.dir, ctx.names[n][0..7], .{});
-            try p.file().get().writePositionalAll(io, bytes, 0);
+            try p.file().writePositionalAll(io, bytes, 0);
             try b.addPending(io, p, .replace);
         }
     } else if (row.paths) {
@@ -388,7 +388,7 @@ fn lockRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     _ = i;
     var lock = try airlock.lock(ctx.io, ctx.dir, "locked", .{});
     defer lock.release(ctx.io);
-    try lock.file().get().writePositionalAll(ctx.io, &ctx.page, 0);
+    try lock.file().writePositionalAll(ctx.io, &ctx.page, 0);
     _ = try lock.commit(ctx.io, .{ .level = row.level });
 }
 

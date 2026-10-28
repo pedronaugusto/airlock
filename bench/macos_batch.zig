@@ -156,7 +156,7 @@ fn measure(a: std.mem.Allocator, io: Io, dir: Io.Dir, other: ?Io.Dir, strategy: 
         if (strategy == .pending) {
             ps[j] = try airlock.create(io, target_dir, name, .{});
             made += 1;
-            try ps[j].file().get().writePositionalAll(io, data, 0);
+            try ps[j].file().writePositionalAll(io, data, 0);
             try batch.addPending(io, &ps[j], .replace);
         } else {
             file.* = try target_dir.createFile(io, name, .{});
@@ -169,7 +169,7 @@ fn measure(a: std.mem.Allocator, io: Io, dir: Io.Dir, other: ?Io.Dir, strategy: 
     var volume: ?u64 = null;
     // Every contract baseline identifies each writing handle's volume.
     if (strategy != .batch and strategy != .paths and strategy != .pending and strategy != .writes) for (files, 0..) |file, j| {
-        const id = try airlock.FileId.of(io, if (strategy == .pending) ps[j].file().get() else file);
+        const id = try airlock.FileId.of(io, if (strategy == .pending) ps[j].file() else file);
         if (volume) |v| {
             if (v != id.volume) return error.MixedVolume;
         } else volume = id.volume;

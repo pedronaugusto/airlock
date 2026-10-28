@@ -238,7 +238,7 @@ pub const random_len = 26;
 /// Writes the prefix, then 26 lowercase base32 characters of 128 random
 /// bits, into `out`, and returns the name's length.
 pub fn drawName(io: Io, prefix: []const u8, out: *[64]u8) u8 {
-    assert.pre(prefix.len <= max_prefix, "drawName: the prefix is longer than max_prefix");
+    assert.invariant(prefix.len <= max_prefix, "drawName: the prefix is longer than max_prefix");
     var random: [16]u8 = undefined;
     io.random(&random);
     @memcpy(out[0..prefix.len], prefix);
@@ -375,7 +375,7 @@ pub const Writer = struct {
 
 /// A buffered writer onto the temp, as `Pending.writer` documents.
 pub fn writer(p: *Staged, io: Io, buffer: []u8) *Io.Writer {
-    assert.pre(p.state == .open, "Pending.writer: the temp is no longer open for writing");
+    assert.invariant(p.state == .open, "Pending.writer: the temp is no longer open for writing");
     p.writer_state.io = io;
     p.writer_state.interface = .{ .vtable = &Writer.vtable, .buffer = buffer };
     p.writer_active = true;
@@ -444,8 +444,8 @@ fn CommitErrorOf(comptime fallback: Fallback) type {
 /// Syncs the temp, publishes it and syncs its directory, as
 /// `Pending.commit` and `Pending.commitOrRefuse` document.
 pub fn commit(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOptions) CommitErrorOf(fallback)!Committed {
-    assert.pre(p.state != .published and p.state != .kept and p.state != .discarded, "Pending.commit: the pending already ended");
-    assert.pre(!p.in_place or options.level == .none, "Pending.commit: an in-place file commits at level .none only");
+    assert.invariant(p.state != .published and p.state != .kept and p.state != .discarded, "Pending.commit: the pending already ended");
+    assert.invariant(!p.in_place or options.level == .none, "Pending.commit: an in-place file commits at level .none only");
     switch (p.state) {
         .poisoned => return error.Poisoned,
         .published, .kept, .discarded => unreachable, // unreachable: the contract above stops a pending that ended
@@ -554,9 +554,9 @@ fn removeTemp(p: *Staged, io: Io) void {
 /// temp, which keeps its name: a random temp only. A refusal changes
 /// nothing; a failure leaves the temp a temp, for `discard` to remove.
 pub fn cloneFrom(p: *Staged, io: Io, src: sys.Handle, mode: Io.File.Permissions) (sys.CloneError || sys.RenameError || sys.SetModeError)!sys.Cloned {
-    assert.pre(p.state == .open and !p.writer_active and !p.in_place, "Staged.cloneFrom: the temp is open, unwritten and not in place");
+    assert.invariant(p.state == .open and !p.writer_active and !p.in_place, "Staged.cloneFrom: the temp is open, unwritten and not in place");
     if (!is_darwin) return sys.cloneInto(io, p.file.handle, src);
-    assert.pre(p.temp_len >= random_len and p.exact.len == 0, "Staged.cloneFrom: Darwin clones a random temp only");
+    assert.invariant(p.temp_len >= random_len and p.exact.len == 0, "Staged.cloneFrom: Darwin clones a random temp only");
     const prefix = p.tempName()[0 .. p.temp_len - random_len];
     var buffer: [64]u8 = undefined;
     var draws: u32 = 0;

@@ -73,11 +73,11 @@ const interrupted: Code = if (is_windows) .CANCELLED else .INTR;
 
 /// `Io.File` and `Io.Dir` of a raw handle, for a call made through a route:
 /// lent, the handle staying its holder's.
-fn fileOf(handle: Handle) aegis.own.Lent(Io.File) {
-    return .{ .data = .{ .handle = handle, .flags = .{ .nonblocking = false } } };
+fn fileOf(handle: Handle) Io.File {
+    return .{ .handle = handle, .flags = .{ .nonblocking = false } };
 }
-fn dirOf(handle: Handle) aegis.own.Lent(Io.Dir) {
-    return .{ .data = .{ .handle = handle } };
+fn dirOf(handle: Handle) Io.Dir {
+    return .{ .handle = handle };
 }
 
 /// Closes a raw handle its holder lets go of, through a route's `io`.
@@ -377,7 +377,7 @@ pub fn openDir(io: Io, dir: Handle, sub_path: []const u8) OpenDirError!Handle {
                 if (code == .INTR) continue;
                 return openDirFailure(code);
             },
-            .route => |route| return (try dirOf(dir).get().openDir(route.io, sub_path, .{})).handle,
+            .route => |route| return (try dirOf(dir).openDir(route.io, sub_path, .{})).handle,
         }
         const rc = openatRaw(dir, &path, flags, 0);
         const e = errnoOf(rc);
@@ -424,7 +424,7 @@ pub fn openFile(io: Io, dir: Handle, sub_path: []const u8) OpenFileError!Handle 
                 if (code == .INTR) continue;
                 return openFileFailure(code);
             },
-            .route => |route| return (try dirOf(dir).get().openFile(route.io, sub_path, .{})).handle,
+            .route => |route| return (try dirOf(dir).openFile(route.io, sub_path, .{})).handle,
         }
         const rc = openatRaw(dir, &path, flags, 0);
         const e = errnoOf(rc);
@@ -494,7 +494,7 @@ pub fn createTemp(io: Io, dir: Handle, name: []const u8, mode: Io.File.Permissio
 
 /// `createTemp` through a route: an exclusive create.
 fn createTempRouted(route: *const Route, dir: Handle, name: []const u8, mode: Io.File.Permissions, read: bool) CreateTempError!Handle {
-    const file = try dirOf(dir).get().createFile(route.io, name, .{ .read = read, .exclusive = true, .truncate = false, .permissions = mode });
+    const file = try dirOf(dir).createFile(route.io, name, .{ .read = read, .exclusive = true, .truncate = false, .permissions = mode });
     return file.handle;
 }
 
@@ -505,7 +505,7 @@ pub fn setMode(io: Io, handle: Handle, mode: Io.File.Permissions) SetModeError!v
     const fchmod = if (is_linux) linux.fchmod else std.c.fchmod;
     const e = switch (try retrying(io, .set_mode, null, fchmod, .{ handle, mode.toMode() })) {
         .code => |c| c,
-        .route => |route| return fileOf(handle).get().setPermissions(route.io, mode),
+        .route => |route| return fileOf(handle).setPermissions(route.io, mode),
     };
     return switch (e) {
         .SUCCESS => {},
@@ -539,7 +539,7 @@ pub fn rename(io: Io, old_dir: Handle, old: []const u8, new_dir: Handle, new: []
     const new_z = try posix.toPosixPath(new);
     const e = switch (try retrying(io, .rename, new, renameatRaw, .{ old_dir, &old_z, new_dir, &new_z })) {
         .code => |c| c,
-        .route => |route| return dirOf(old_dir).get().rename(old, dirOf(new_dir).get(), new, route.io),
+        .route => |route| return dirOf(old_dir).rename(old, dirOf(new_dir), new, route.io),
     };
     if (e != .SUCCESS) return renameFailure(e);
 }
@@ -593,7 +593,7 @@ pub fn renameNoReplace(io: Io, old_dir: Handle, old: []const u8, new_dir: Handle
 
 /// `renameNoReplace` through a route: std's rename that never replaces.
 fn renamePreserveRouted(route: *const Route, old_dir: Handle, old: []const u8, new_dir: Handle, new: []const u8) (RenameError || Refused || error{AlreadyExists})!void {
-    return dirOf(old_dir).get().renamePreserve(old, dirOf(new_dir).get(), new, route.io) catch |err| switch (err) {
+    return dirOf(old_dir).renamePreserve(old, dirOf(new_dir), new, route.io) catch |err| switch (err) {
         error.PathAlreadyExists => error.AlreadyExists,
         error.OperationUnsupported => error.Refused,
         else => |e| e,
@@ -624,7 +624,7 @@ pub fn link(io: Io, old_dir: Handle, old: []const u8, new_dir: Handle, new: []co
 
 /// `link` through a route: std's hard link.
 fn linkRouted(route: *const Route, old_dir: Handle, old: []const u8, new_dir: Handle, new: []const u8) (RenameError || Refused || error{AlreadyExists})!void {
-    return dirOf(old_dir).get().hardLink(old, dirOf(new_dir).get(), new, route.io, .{}) catch |err| switch (err) {
+    return dirOf(old_dir).hardLink(old, dirOf(new_dir), new, route.io, .{}) catch |err| switch (err) {
         error.PathAlreadyExists => error.AlreadyExists,
         error.OperationUnsupported => error.Refused,
         else => |e| e,
@@ -644,7 +644,7 @@ pub fn unlink(io: Io, dir: Handle, name: []const u8) UnlinkError!void {
     const path = try posix.toPosixPath(name);
     const e = switch (try retrying(io, .unlink, name, unlinkatRaw, .{ dir, &path })) {
         .code => |c| c,
-        .route => |route| return dirOf(dir).get().deleteFile(route.io, name),
+        .route => |route| return dirOf(dir).deleteFile(route.io, name),
     };
     return switch (e) {
         .SUCCESS => {},
@@ -677,7 +677,7 @@ pub fn makeDir(io: Io, dir: Handle, name: []const u8) MakeDirError!void {
     const path = try posix.toPosixPath(name);
     const e = switch (try retrying(io, .make_dir, name, mkdiratRaw, .{ dir, &path, 0o777 })) {
         .code => |c| c,
-        .route => |route| return dirOf(dir).get().createDir(route.io, name, .default_dir),
+        .route => |route| return dirOf(dir).createDir(route.io, name, .default_dir),
     };
     return switch (e) {
         .SUCCESS => {},
@@ -714,7 +714,7 @@ pub fn symLink(io: Io, target: []const u8, dir: Handle, name: []const u8) SymLin
     const path = try posix.toPosixPath(name);
     const e = switch (try retrying(io, .symlink, name, symlinkatRaw, .{ &target_z, dir, &path })) {
         .code => |c| c,
-        .route => |route| return dirOf(dir).get().symLink(route.io, target, name, .{}),
+        .route => |route| return dirOf(dir).symLink(route.io, target, name, .{}),
     };
     return switch (e) {
         .SUCCESS => {},
@@ -787,7 +787,7 @@ pub fn statId(io: Io, handle: Handle) StatIdError!Id {
         var buf = std.mem.zeroes(linux.Statx);
         const e = switch (try retrying(io, .stat_id, null, statxRaw, .{ handle, "", linux.AT.EMPTY_PATH, &buf })) {
             .code => |c| c,
-            .route => |route| return routedId(try fileOf(handle).get().stat(route.io)),
+            .route => |route| return routedId(try fileOf(handle).stat(route.io)),
         };
         if (e != .SUCCESS) return statFailure(e);
         if (!buf.mask.INO) return error.Unexpected;
@@ -796,7 +796,7 @@ pub fn statId(io: Io, handle: Handle) StatIdError!Id {
     var buf = std.mem.zeroes(posix.Stat);
     const e = switch (try retrying(io, .stat_id, null, fstatRaw, .{ handle, &buf })) {
         .code => |c| c,
-        .route => |route| return routedId(try fileOf(handle).get().stat(route.io)),
+        .route => |route| return routedId(try fileOf(handle).stat(route.io)),
     };
     if (e != .SUCCESS) return statFailure(e);
     return .{ .volume = .fromRaw(unsigned(buf.dev)), .file = unsigned(buf.ino) };
@@ -831,7 +831,7 @@ pub fn statIdPath(io: Io, dir: Handle, sub_path: []const u8, follow: bool) StatP
         const flags: u32 = if (follow) 0 else linux.AT.SYMLINK_NOFOLLOW;
         const e = switch (try retrying(io, .stat_id, sub_path, statxRaw, .{ dir, &path, flags, &buf })) {
             .code => |c| c,
-            .route => |route| return routedId(try dirOf(dir).get().statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+            .route => |route| return routedId(try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
         };
         if (e != .SUCCESS) return statPathFailure(e);
         if (!buf.mask.INO) return error.Unexpected;
@@ -841,7 +841,7 @@ pub fn statIdPath(io: Io, dir: Handle, sub_path: []const u8, follow: bool) StatP
     const flags: u32 = if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW;
     const e = switch (try retrying(io, .stat_id, sub_path, fstatatRaw, .{ dir, &path, &buf, flags })) {
         .code => |c| c,
-        .route => |route| return routedId(try dirOf(dir).get().statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+        .route => |route| return routedId(try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
     };
     if (e != .SUCCESS) return statPathFailure(e);
     return .{ .volume = .fromRaw(unsigned(buf.dev)), .file = unsigned(buf.ino) };
@@ -975,7 +975,7 @@ pub fn statPath(io: Io, dir: Handle, sub_path: []const u8, follow: bool) StatPat
         const flags: u32 = if (follow) 0 else linux.AT.SYMLINK_NOFOLLOW;
         const e = switch (try retrying(io, .stat, sub_path, statxFullRaw, .{ dir, &path, flags, &buf })) {
             .code => |c| c,
-            .route => |route| return routedFull(route, try dirOf(dir).get().statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+            .route => |route| return routedFull(route, try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
         };
         if (e != .SUCCESS) return statPathFailure(e);
         return .{
@@ -998,7 +998,7 @@ pub fn statPath(io: Io, dir: Handle, sub_path: []const u8, follow: bool) StatPat
     const flags: u32 = if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW;
     const e = switch (try retrying(io, .stat, sub_path, fstatatRaw, .{ dir, &path, &buf, flags })) {
         .code => |c| c,
-        .route => |route| return routedFull(route, try dirOf(dir).get().statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+        .route => |route| return routedFull(route, try dirOf(dir).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
     };
     if (e != .SUCCESS) return statPathFailure(e);
     const mtime = buf.mtime();
@@ -1470,7 +1470,7 @@ pub fn openDirWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, flush_
         windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
     })) {
         .code => |c| c,
-        .route => |route| return (try dirOf(root).get().openDir(route.io, if (sub_path.len == 0) "." else sub_path, .{})).handle,
+        .route => |route| return (try dirOf(root).openDir(route.io, if (sub_path.len == 0) "." else sub_path, .{})).handle,
     };
     return switch (status) {
         .SUCCESS => handle,
@@ -1501,7 +1501,7 @@ fn makeDirWindows(io: Io, root: windows.HANDLE, name: []const u8) MakeDirError!v
         windows.FILE.CREATE_DISPOSITION.CREATE,   windows.FILE.MODE{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
     })) {
         .code => |c| c,
-        .route => |route| return dirOf(root).get().createDir(route.io, name, .default_dir),
+        .route => |route| return dirOf(root).createDir(route.io, name, .default_dir),
     };
     switch (status) {
         .SUCCESS => release(io, handle),
@@ -1583,7 +1583,7 @@ fn openAttributes(io: Io, root: windows.HANDLE, name: []const u8) OpenFileError!
         windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true },
     })) {
         .code => |c| c,
-        .route => |route| return (try dirOf(root).get().openFile(route.io, name, .{ .path_only = true, .follow_symlinks = false })).handle,
+        .route => |route| return (try dirOf(root).openFile(route.io, name, .{ .path_only = true, .follow_symlinks = false })).handle,
     };
     if (status != .SUCCESS) return openFailureNt(status);
     return handle;
@@ -1609,7 +1609,7 @@ fn setAttributes(io: Io, handle: windows.HANDLE, attributes: windows.FILE.ATTRIB
     return switch (try retryingNt(io, .set_mode, null, ntSetInfo, .{ handle, std.mem.asBytes(&info), .Basic })) {
         .code => |c| c,
         .route => |route| {
-            fileOf(handle).get().setPermissions(route.io, windowsPermissions(attributes.READONLY)) catch return .ACCESS_DENIED;
+            fileOf(handle).setPermissions(route.io, windowsPermissions(attributes.READONLY)) catch return .ACCESS_DENIED;
             return .SUCCESS;
         },
     };
@@ -1631,7 +1631,7 @@ fn openByName(io: Io, root: windows.HANDLE, sub_path: []const u8, purpose: OpenF
         .code => |c| c,
         // A routed sync needs no write access, and a routed rename or
         // delete goes by name: a handle on the file is all either needs.
-        .route => |route| return (try dirOf(root).get().openFile(route.io, sub_path, .{
+        .route => |route| return (try dirOf(root).openFile(route.io, sub_path, .{
             .allow_directory = purpose != .sync,
             .path_only = purpose != .sync,
             .follow_symlinks = purpose == .sync,
@@ -1698,7 +1698,7 @@ fn setReadOnlyWindows(io: Io, handle: windows.HANDLE, read_only: bool) SetModeEr
     };
     const status = switch (try retryingNt(io, .set_mode, null, ntSetInfo, .{ handle, std.mem.asBytes(&info), .Basic })) {
         .code => |c| c,
-        .route => |route| return fileOf(handle).get().setPermissions(route.io, windowsPermissions(true)),
+        .route => |route| return fileOf(handle).setPermissions(route.io, windowsPermissions(true)),
     };
     return switch (status) {
         .SUCCESS => {},
@@ -1780,9 +1780,9 @@ pub fn renameByHandle(io: Io, handle: windows.HANDLE, from_dir: windows.HANDLE, 
 /// `renameByHandle` reports, from std's errors.
 fn renameRouted(route: *const Route, from_dir: windows.HANDLE, from: []const u8, root: windows.HANDLE, name: []const u8, replace: bool) RenameError!RenameOutcome {
     const renamed = if (replace)
-        dirOf(from_dir).get().rename(from, dirOf(root).get(), name, route.io)
+        dirOf(from_dir).rename(from, dirOf(root), name, route.io)
     else
-        dirOf(from_dir).get().renamePreserve(from, dirOf(root).get(), name, route.io) catch |err| switch (err) {
+        dirOf(from_dir).renamePreserve(from, dirOf(root), name, route.io) catch |err| switch (err) {
             error.PathAlreadyExists => return .collision,
             error.OperationUnsupported => return error.Unexpected,
             else => |e| e,
@@ -1807,7 +1807,7 @@ pub fn dispose(io: Io, handle: windows.HANDLE, dir: windows.HANDLE, name: []cons
     } };
     var status = switch (try retryingNt(io, .dispose, name, ntSetInfo, .{ handle, std.mem.asBytes(&flags), .DispositionEx })) {
         .code => |c| c,
-        .route => |route| return dirOf(dir).get().deleteFile(route.io, name),
+        .route => |route| return dirOf(dir).deleteFile(route.io, name),
     };
     if (status == .INVALID_PARAMETER or status == .INVALID_INFO_CLASS or status == .NOT_SUPPORTED) {
         var legacy: windows.FILE.DISPOSITION.INFORMATION = .{ .DeleteFile = .TRUE };
@@ -1874,7 +1874,7 @@ fn statIdWindows(io: Io, handle: windows.HANDLE) StatIdError!Id {
         .code => |c| c,
         // The process's current directory is a handle of its own to a
         // simulation, which names it as a directory, not as a file.
-        .route => |route| return routedId(if (handle == Io.Dir.cwd().handle) try dirOf(handle).get().stat(route.io) else try fileOf(handle).get().stat(route.io)),
+        .route => |route| return routedId(if (handle == Io.Dir.cwd().handle) try dirOf(handle).stat(route.io) else try fileOf(handle).stat(route.io)),
     };
     switch (status) {
         .SUCCESS => return .{
@@ -1922,7 +1922,7 @@ fn statIdPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow:
     })) {
         .code => |c| c,
         .route => |route| blk: {
-            handle = (try dirOf(root).get().openFile(route.io, sub_path, .{ .path_only = true, .follow_symlinks = follow })).handle;
+            handle = (try dirOf(root).openFile(route.io, sub_path, .{ .path_only = true, .follow_symlinks = follow })).handle;
             break :blk .SUCCESS;
         },
     };
@@ -1944,7 +1944,7 @@ fn statPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow: b
         windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = !follow },
     })) {
         .code => |c| c,
-        .route => |route| return routedFull(route, try dirOf(root).get().statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
+        .route => |route| return routedFull(route, try dirOf(root).statFile(route.io, sub_path, .{ .follow_symlinks = follow })),
     };
     if (status != .SUCCESS) return openFailureNt(status);
     defer release(io, handle);

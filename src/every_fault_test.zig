@@ -137,7 +137,7 @@ pub const Operation = struct {
             .lock => {
                 var lock = try airlock.lock(io, dir, "a", .{ .holder = .pid_file });
                 defer lock.release(io);
-                try lock.file().get().writePositionalAll(io, "new", 0);
+                try lock.file().writePositionalAll(io, "new", 0);
                 s.reached = (try lock.commit(io, .{})).reached;
             },
         }
@@ -153,7 +153,7 @@ pub const Operation = struct {
         for (s.dests()) |d| {
             pendings[count] = try airlock.create(io, dir, d, .{});
             count += 1;
-            try pendings[count - 1].file().get().writePositionalAll(io, "new", 0);
+            try pendings[count - 1].file().writePositionalAll(io, "new", 0);
         }
         var slots: [8]airlock.Batch.Slot = undefined;
         var batch: airlock.Batch = .init(&slots);

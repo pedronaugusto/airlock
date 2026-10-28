@@ -54,10 +54,11 @@ pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOpt
 /// sync has been made (`synced`, as after a commit that failed at the rename)
 /// the temp is closed on POSIX and its descriptor number may belong to another
 /// file; asking for it then, or after the pending ended, stops the program
-/// in every build rather than write to the wrong file.
-pub fn file(p: *const Pending) aegis.own.Lent(Io.File) {
-    assert.pre(p.staged.state == .open, "Pending.file: the temp is no longer open for writing");
-    return .{ .data = p.staged.file };
+/// in every build rather than write to the wrong file. Lent: the pending
+/// closes it, never the holder.
+pub fn file(p: *const Pending) Io.File {
+    assert.invariant(p.staged.state == .open, "Pending.file: the temp is no longer open for writing");
+    return p.staged.file;
 }
 
 /// The error behind `error.PublishedNotDurable` or `error.Poisoned`.
@@ -131,7 +132,7 @@ pub const WriteFileOrRefuseError = WriteFileError || CommitOrRefuseError;
 pub fn writeFile(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8, options: WriteFileOptions) WriteFileError!Committed {
     var p = try create(io, dir, sub_path, options.create);
     defer p.discard(io);
-    try p.file().get().writePositionalAll(io, bytes, 0);
+    try p.file().writePositionalAll(io, bytes, 0);
     return p.commit(io, options.commit);
 }
 
@@ -141,7 +142,7 @@ pub fn writeFile(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8, o
 pub fn writeFileOrRefuse(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8, options: WriteFileOptions) WriteFileOrRefuseError!Committed {
     var p = try create(io, dir, sub_path, options.create);
     defer p.discard(io);
-    try p.file().get().writePositionalAll(io, bytes, 0);
+    try p.file().writePositionalAll(io, bytes, 0);
     return p.commitOrRefuse(io, options.commit);
 }
 
@@ -200,7 +201,7 @@ pub fn copyFile(io: Io, src_dir: Io.Dir, src_path: []const u8, dst_dir: Io.Dir, 
     if (by == .copy) {
         var reader = src.reader(io, &.{});
         var buffer: [16 * 1024]u8 = undefined;
-        var out = p.file().get().writer(io, &buffer);
+        var out = p.file().writer(io, &buffer);
         _ = out.interface.sendFileAll(&reader, .unlimited) catch |err| return switch (err) {
             error.ReadFailed => reader.err.?,
             error.WriteFailed => out.err.?,

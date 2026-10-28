@@ -177,7 +177,7 @@ pub const Seam = struct {
     /// Replaces the plan, its counts starting again: for faults planned
     /// once a fixture is set up. Not while calls are in flight.
     pub fn setPlan(s: *Seam, entries: []const Plan.Entry) void {
-        assert.pre(entries.len <= s.counters.len, "Seam.setPlan: a plan holds at most 16 entries");
+        assert.invariant(entries.len <= s.counters.len, "Seam.setPlan: a plan holds at most 16 entries");
         s.plan = .init(entries, .{ .steps = s.fio.steps(), .counters = &s.counters, .fired = &s.fired });
     }
 

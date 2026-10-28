@@ -32,7 +32,7 @@ fn expectContents(s: *harness.Scratch, name: []const u8, expected: ?[]const u8) 
 fn pending(io: Io, dir: Io.Dir, name: []const u8, bytes: []const u8) !airlock.Pending {
     var p = try airlock.create(io, dir, name, .{});
     errdefer p.discard(io);
-    try p.file().get().writePositionalAll(io, bytes, 0);
+    try p.file().writePositionalAll(io, bytes, 0);
     return p;
 }
 
@@ -561,7 +561,7 @@ test "in place: a batch at none publishes files with no rename" {
     var ps: [3]airlock.Pending = undefined;
     for (&ps, [_][]const u8{ "a", "b", "c" }) |*p, name| {
         p.* = try airlock.create(io, s.dir(), name, .{ .temp = .in_place });
-        try p.file().get().writePositionalAll(io, name, 0);
+        try p.file().writePositionalAll(io, name, 0);
     }
     defer for (&ps) |*p| p.discard(io);
     var slots: [8]airlock.Batch.Slot = undefined;

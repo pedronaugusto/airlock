@@ -116,7 +116,7 @@ pub const Slot = struct {
 };
 
 pub fn init(storage: []Slot) Batch {
-    assert.pre(storage.len <= std.math.maxInt(u32), "Batch.init: more slots than a slot index can name");
+    assert.invariant(storage.len <= std.math.maxInt(u32), "Batch.init: more slots than a slot index can name");
     return .{ .slots = storage };
 }
 
@@ -153,7 +153,7 @@ pub fn addPath(b: *Batch, dir: Io.Dir, sub_path: []const u8) AddError!void {
 /// what that first sync reached is its part of the batch.
 pub fn addPending(b: *Batch, io: Io, p: *Pending, publish: Pending.Publish) AddError!void {
     const staged = &p.staged;
-    assert.pre(staged.state == .open or staged.state == .synced, "Batch.addPending: the pending already ended or failed");
+    assert.invariant(staged.state == .open or staged.state == .synced, "Batch.addPending: the pending already ended or failed");
     try b.push(.{ .kind = .pending, .pending = staged, .publish = publish });
     staged.dropParent(io);
 }
@@ -241,7 +241,7 @@ pub fn commitOrRefuse(b: *Batch, io: Io, options: Options) CommitOrRefuseError!R
 
 fn commitAs(b: *Batch, comptime fallback: Fallback, io: Io, options: Options) ErrorOf(fallback)!Reached {
     for (b.slots[0..b.len]) |s| if (s.pending) |p| {
-        assert.pre(!p.in_place or options.level == .none, "Batch.commit: an in-place file commits at level .none only");
+        assert.invariant(!p.in_place or options.level == .none, "Batch.commit: an in-place file commits at level .none only");
     };
     b.failed = null;
     var run: Run(fallback) = .{ .batch = b, .options = options, .io = io };
