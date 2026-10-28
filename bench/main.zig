@@ -63,6 +63,8 @@ const Row = struct {
     paths: bool = false,
     parallel: u8 = 1,
     barrier: bool = true,
+    /// `copyFile`: a clone where the filesystem makes one, or the bytes.
+    clone: bool = true,
     primitive: ?primitives.Kind = null,
     directory: bool = false,
     include_dir: bool = false,
@@ -156,6 +158,9 @@ const op_rows = [_]Row{
     .{ .name = "ops/create-new", .ops = 200, .op = createNewRow },
     .{ .name = "ops/keep-existing", .ops = 200, .op = keepExistingRow },
     .{ .name = "ops/prune/100", .ops = 10, .op = pruneRow, .n = 100 },
+    .{ .name = "ops/copy-1m/clone", .ops = 100, .op = copyRow, .size = 1 << 20 },
+    .{ .name = "ops/copy-1m/copy", .ops = 100, .op = copyRow, .size = 1 << 20, .clone = false },
+    .{ .name = "ops/lock-commit", .ops = 200, .op = lockRow },
 };
 
 const ab_rows = [_]Row{
@@ -372,6 +377,21 @@ fn syncPathRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
 }
 
 /// One rename of a pair of names back and forth, at `data`.
+/// A durable copy of a `size` source, cloned or copied as the row says.
+fn copyRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    if (i == 0) try ctx.dir.writeFile(ctx.io, .{ .sub_path = "copy-source", .data = ctx.big[0..row.size] });
+    _ = try airlock.copyFile(ctx.io, ctx.dir, "copy-source", ctx.dir, "copy", .{ .clone = if (row.clone) .auto else .never, .commit = .{ .level = row.level } });
+}
+
+/// A lock taken, a page written to it, committed: git's update of a ref.
+fn lockRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    _ = i;
+    var lock = try airlock.lock(ctx.io, ctx.dir, "locked", .{});
+    defer lock.release(ctx.io);
+    try lock.file().get().writePositionalAll(ctx.io, &ctx.page, 0);
+    _ = try lock.commit(ctx.io, .{ .level = row.level });
+}
+
 fn renameRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     _ = row;
     if (i == 0) try ctx.dir.writeFile(ctx.io, .{ .sub_path = "ping", .data = &ctx.page });
