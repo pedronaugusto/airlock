@@ -24,7 +24,7 @@ const is_linux = os == .linux;
 const is_darwin = os.isDarwin();
 const is_tested_os = is_linux or is_darwin or is_windows;
 
-const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs, sym_link, make_path };
+const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs, sym_link, make_path, copy, lock };
 
 /// The error classes tried at each of airlock's calls: a refusal where the
 /// call has one, a failure, a full disk, an interruption, a cancel, and on
@@ -56,6 +56,8 @@ fn faultClasses(call: Call) []const shakedown.IoFault {
         .create_temp => &.{ .{ .fail = error.ACCES }, .{ .fail = error.NOSPC }, .{ .fail = error.INTR }, .{ .fail = error.Canceled } },
         .open_dir, .open_file, .unlink => &.{ .{ .fail = error.ACCES }, .{ .fail = error.INTR }, .{ .fail = error.Canceled } },
         .stat_id, .getfl => &.{ .{ .fail = error.ACCES }, .{ .fail = error.INTR } },
+        // Two filesystems: the copy is made another way.
+        .clone => &(common ++ [_]F{.{ .fail = error.XDEV }}),
         .close => &.{ .{ .fail = error.IO }, .{ .fail = error.INTR } },
         else => &common,
     };
@@ -85,7 +87,7 @@ pub const Operation = struct {
         if (s.kind != .create_new and s.kind != .keep_existing) {
             for (s.dests()) |d| try s.scratch.write(d, "old");
         }
-        if (s.kind == .rename) try s.scratch.write("src", "new");
+        if (s.kind == .rename or s.kind == .copy) try s.scratch.write("src", "new");
         if (s.kind == .sym_link) {
             // "a" is a link to "old-target"; the run points it at
             // "new-target". Reading through it says which.
@@ -131,6 +133,13 @@ pub const Operation = struct {
             .sym_link => s.reached = try airlock.symLink(io, dir, "new-target", "a", .{}),
             .make_path => s.reached = (try airlock.makePath(io, dir, "sub/x/y", .{})).reached,
             .batch, .batch_two_dirs => try s.runBatch(io),
+            .copy => s.reached = (try airlock.copyFile(io, dir, "src", dir, "a", .{})).committed.reached,
+            .lock => {
+                var lock = try airlock.lock(io, dir, "a", .{ .holder = .pid_file });
+                defer lock.release(io);
+                try lock.file().get().writePositionalAll(io, "new", 0);
+                s.reached = (try lock.commit(io, .{})).reached;
+            },
         }
         s.published = true;
     }
@@ -208,6 +217,8 @@ pub const Operation = struct {
     fn checkNoTemps(s: *Operation, err: ?anyerror) !void {
         _ = err;
         try testing.expectEqual(@as(usize, 0), (try s.scratch.entries(".")).prefixed);
+        // A lock ends with its call, committed or released, whatever failed.
+        if (s.kind == .lock) try testing.expectError(error.FileNotFound, s.scratch.dir().access(testing.io, "a.lock", .{}));
         var sub = try s.scratch.dir().openDir(testing.io, "sub", .{ .iterate = true });
         defer sub.close(testing.io);
         var it = sub.iterate();
@@ -251,7 +262,9 @@ pub const Operation = struct {
     }
 
     fn checkModel(s: *Operation, err: ?anyerror) !void {
-        if (s.kind == .batch_two_dirs or s.kind == .rename or s.kind == .remove or s.kind == .sync_file or s.kind == .make_path) return;
+        // A clone writes the copy's temp in one call the model does not
+        // replay as a write: never torn is checked above, at every fault.
+        if (s.kind == .batch_two_dirs or s.kind == .rename or s.kind == .remove or s.kind == .sync_file or s.kind == .make_path or s.kind == .copy) return;
         var m: model_mod.Model = .init(model_mod.native());
         // The batch's fence comes after its first two renames.
         if (s.kind == .batch) m.fenceAt(2);
@@ -335,6 +348,14 @@ test "every fault: a batch over two directories" {
 test "every fault: a symbolic link swap" {
     if (is_windows) return error.SkipZigTest;
     try everyFault(.sym_link);
+}
+
+test "every fault: copyFile" {
+    try everyFault(.copy);
+}
+
+test "every fault: a lock committed" {
+    try everyFault(.lock);
 }
 
 test "every fault: makePath" {

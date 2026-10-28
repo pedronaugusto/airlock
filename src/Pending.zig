@@ -10,6 +10,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Staged = @import("Staged.zig");
+const sys = @import("sys.zig");
 const aegis = @import("aegis");
 const assert = aegis.assert;
 
@@ -142,4 +143,69 @@ pub fn writeFileOrRefuse(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []con
     defer p.discard(io);
     try p.file().get().writePositionalAll(io, bytes, 0);
     return p.commitOrRefuse(io, options.commit);
+}
+
+/// How a durable copy is made.
+pub const CopyOptions = struct {
+    /// Whether the copy is a copy-on-write clone of the source.
+    clone: enum {
+        /// A clone where the filesystem makes one, else a copy.
+        auto,
+        /// A clone, or `error.CloneUnsupported` with nothing published.
+        always,
+        /// A copy of the bytes.
+        never,
+    } = .auto,
+    /// The copy's permissions: the source's, or these.
+    mode: union(enum) { source, exact: Io.File.Permissions } = .source,
+    /// The random temp's prefix, as `Temp.random` takes it.
+    temp: []const u8 = ".",
+    commit: CommitOptions = .{},
+};
+
+/// What a copy came to.
+pub const Copied = struct {
+    committed: Committed,
+    /// A clone shares the source's blocks until either is written; a copy
+    /// went through std's file writer, which copies in the kernel where it
+    /// can (`copy_file_range`, `fcopyfile`).
+    by: enum { clone, copy },
+};
+
+pub const CopyError = CreateError || CommitError || sys.CloneError || sys.RenameError || Io.File.OpenError || Io.File.StatError || Io.File.Reader.Error || Io.File.Writer.Error || error{
+    /// `CopyOptions.clone = .always` on a filesystem that cannot clone this
+    /// file there. Nothing was published.
+    CloneUnsupported,
+};
+
+/// A durable copy of `src_path` in `src_dir` at `dst_path` in `dst_dir`: a
+/// temp next to the destination, a clone of the source or a copy of its
+/// bytes, synced at `options.commit.level`, renamed over the destination
+/// and its directory synced, as `commit` does. A clone's metadata still
+/// takes the sync its level asks. Nothing is under the destination's name
+/// until the whole copy is.
+pub fn copyFile(io: Io, src_dir: Io.Dir, src_path: []const u8, dst_dir: Io.Dir, dst_path: []const u8, options: CopyOptions) CopyError!Copied {
+    const src = try src_dir.openFile(io, src_path, .{});
+    defer src.close(io);
+    const mode = switch (options.mode) {
+        .source => (try src.stat(io)).permissions,
+        .exact => |perm| perm,
+    };
+    var p = try create(io, dst_dir, dst_path, .{ .temp = .{ .random = options.temp }, .mode = .{ .exact = mode } });
+    defer p.discard(io);
+    const by: @FieldType(Copied, "by") = if (options.clone == .never) .copy else switch (try p.staged.cloneFrom(io, src.handle, mode)) {
+        .cloned => .clone,
+        .refused => if (options.clone == .always) return error.CloneUnsupported else .copy,
+    };
+    if (by == .copy) {
+        var reader = src.reader(io, &.{});
+        var buffer: [16 * 1024]u8 = undefined;
+        var out = p.file().get().writer(io, &buffer);
+        _ = out.interface.sendFileAll(&reader, .unlimited) catch |err| return switch (err) {
+            error.ReadFailed => reader.err.?,
+            error.WriteFailed => out.err.?,
+        };
+        out.interface.flush() catch return out.err.?;
+    }
+    return .{ .committed = try p.commit(io, options.commit), .by = by };
 }

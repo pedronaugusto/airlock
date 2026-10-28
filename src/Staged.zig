@@ -547,6 +547,51 @@ fn removeTemp(p: *Staged, io: Io) void {
     sys.unlink(io, dir, name orelse return) catch {};
 }
 
+/// Makes the open temp, still empty, a copy-on-write clone of `src` where
+/// the filesystem can, its permissions then `mode`. Linux clones into the
+/// temp's own descriptor. Darwin clones under a new random name beside it
+/// (`fclonefileat` makes its own file) and renames the clone over the empty
+/// temp, which keeps its name: a random temp only. A refusal changes
+/// nothing; a failure leaves the temp a temp, for `discard` to remove.
+pub fn cloneFrom(p: *Staged, io: Io, src: sys.Handle, mode: Io.File.Permissions) (sys.CloneError || sys.RenameError || sys.SetModeError)!sys.Cloned {
+    assert.pre(p.state == .open and !p.writer_active and !p.in_place, "Staged.cloneFrom: the temp is open, unwritten and not in place");
+    if (!is_darwin) return sys.cloneInto(io, p.file.handle, src);
+    assert.pre(p.temp_len >= random_len and p.exact.len == 0, "Staged.cloneFrom: Darwin clones a random temp only");
+    const prefix = p.tempName()[0 .. p.temp_len - random_len];
+    var buffer: [64]u8 = undefined;
+    var draws: u32 = 0;
+    const name = while (true) {
+        const n = drawName(io, prefix, &buffer);
+        const cloned = sys.cloneAt(io, src, p.parent.handle, buffer[0..n]) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                draws += 1;
+                if (draws < max_draws) continue;
+                return err;
+            },
+            else => |e| return e,
+        };
+        switch (cloned) {
+            .refused => return .refused,
+            .cloned => break buffer[0..n],
+        }
+    };
+    sys.rename(io, p.parent.handle, name, p.parent.handle, p.tempName()) catch |err| {
+        // glint-ignore: Z026 -- cleanup after a failure the caller already gets
+        sys.unlink(io, p.parent.handle, name) catch {};
+        return err;
+    };
+    // The temp's name is the clone's from here; its old handle, the empty
+    // file's, goes once the clone's is open.
+    const clone = try sys.openFile(io, p.parent.handle, p.tempName());
+    sys.setMode(io, clone, mode) catch |err| {
+        sys.release(io, clone);
+        return err;
+    };
+    sys.release(io, p.file.handle);
+    p.file = .{ .handle = clone, .flags = .{ .nonblocking = false } };
+    return .cloned;
+}
+
 fn releaseParent(p: *Staged, io: Io) void {
     if (p.owns_parent and p.parent_open) sys.release(io, p.parent.handle);
     p.parent_open = false;

@@ -72,6 +72,9 @@ pub const Call = enum(u8) {
     /// A batch of a directory's entries with their attributes: Darwin
     /// `getattrlistbulk`.
     scan,
+    /// A copy-on-write clone: Linux `FICLONE` into the temp, Darwin
+    /// `fclonefileat` under a temp's name.
+    clone,
 };
 
 /// An errno on POSIX, an NTSTATUS on Windows.

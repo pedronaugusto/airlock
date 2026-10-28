@@ -213,12 +213,18 @@ fallbacks and fences, goes through it.
 
 ## Scope
 
-- No locks or lock protocols. `Temp.exact` is the exclusive create a lock file
-  needs; the protocol (pid, staleness, backoff) belongs to its user, and
-  advisory locks are in `std.Io.File.Lock`.
+- One lock protocol, git's: `lock` takes `<path>.lock` exclusively, waits
+  with git's backoff, names its holder as `core.lockfilePid` does, and is
+  committed as the new file or released. A lock airlock did not take is
+  reported (`lockHolder`), never broken: pids are reused, and a lock on a
+  network filesystem may be another host's. No leases broken on a timer,
+  and advisory locks are `std.Io.File.Lock`'s.
 - No write-ahead log, group commit or record framing: airlock syncs, it does
   not decide when.
-- No `O_TMPFILE`, no copy-on-write clones, and no `msync`. A replace keeps
+- No `O_TMPFILE` and no `msync`. A copy-on-write clone is made only as
+  the fast path of a durable copy (`copyFile`), never on its own: a clone
+  that is never synced and published is not durable. Windows copies; its
+  block cloning (ReFS, Dev Drive) is not asked for yet. A replace keeps
   the permissions it replaces, not extended attributes, ACLs or ownership.
 - A replace or a link swap replaces the name, a symbolic link included; it
   does not write through it.

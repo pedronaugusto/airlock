@@ -56,6 +56,13 @@ pub const WriteFileError = Pending.WriteFileError;
 /// What `writeFileOrRefuse` can fail with.
 pub const WriteFileOrRefuseError = Pending.WriteFileOrRefuseError;
 
+/// A durable copy: a clone where the filesystem makes one, else a copy,
+/// published as `commit` publishes.
+pub const copyFile = Pending.copyFile;
+pub const CopyOptions = Pending.CopyOptions;
+pub const CopyError = Pending.CopyError;
+pub const Copied = Pending.Copied;
+
 /// Where a call puts the error behind `error.PublishedNotDurable`.
 pub const Diagnostics = names.Diagnostics;
 /// The errors a sync after a name changed can fail with.

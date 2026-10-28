@@ -25,6 +25,9 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/Pending.zig",
         "src/names.zig",
     } },
+    .{ .name = "lock files", .patterns = &.{
+        "src/Lock.zig",
+    } },
     .{ .name = "batch", .patterns = &.{
         "src/Batch.zig",
     } },

@@ -98,12 +98,14 @@ pub fn release(l: *Lock, io: Io) void {
     l.pending.discard(io);
 }
 
+const Span = aegis.units.Duration(.nanosecond, i96);
+
 fn create(io: Io, dir: Io.Dir, path: []const u8, options: Options) Error!Pending {
-    const deadline_ms: u64 = switch (options.contention) {
-        .fail => 0,
-        .wait => |d| if (d.nanoseconds <= 0) 0 else @intCast(@divTrunc(d.nanoseconds, std.time.ns_per_ms)), // safe: a positive i96 of nanoseconds over a million fits a u64
+    const deadline: Span = switch (options.contention) {
+        .fail => .fromRaw(0),
+        .wait => |d| .fromIoDuration(d, .exact),
     };
-    var waited: u64 = 0;
+    var waited: Span = .fromRaw(0);
     var attempt: u32 = 0;
     while (true) {
         if (Pending.create(io, dir, path, .{ .temp = .{ .suffix = ".lock" }, .mode = options.mode, .read = options.read })) |pending| {
@@ -118,12 +120,13 @@ fn create(io: Io, dir: Io.Dir, path: []const u8, options: Options) Error!Pending
             error.AccessDenied, error.PermissionDenied => if (builtin.target.os.tag != .windows) return err,
             else => |e| return e,
         }
-        if (waited >= deadline_ms) return error.LockHeld;
+        if (waited.compare(deadline) != .lt) return error.LockHeld;
         var jitter: [2]u8 = undefined;
         io.random(&jitter);
         const delay = backoff(attempt, std.mem.readInt(u16, &jitter, .little));
         try Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(@intCast(delay)), .clock = .awake } }, io); // safe: a backoff is at most 1249 ms
-        waited +|= delay;
+        const step = aegis.units.Duration(.millisecond, i64).fromRaw(@intCast(delay)).convert(.nanosecond, i96, .exact); // safe: a backoff is at most 1249 ms
+        waited = waited.add(step) catch return error.LockHeld;
         attempt +|= 1;
     }
 }
@@ -178,6 +181,7 @@ fn unmark(l: *Lock, io: Io) void {
     const staged = &l.pending.staged;
     var buffer: [Staged.max_temp_name]u8 = undefined;
     const name = holderName(staged.baseName(), &buffer) catch return;
+    // glint-ignore: Z026 -- a holder file left behind is read only beside a held lock, and the next lock writes or removes it
     staged.parent.deleteFile(io, name) catch {};
 }
 

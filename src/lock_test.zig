@@ -63,6 +63,7 @@ test "a waiting lock is taken when its holder lets go" {
     var first = try airlock.lock(io, tmp.dir, "packed-refs", .{});
     const releaser = try std.Thread.spawn(.{}, struct {
         fn run(l: *airlock.Lock, i: Io) void {
+            // glint-ignore: Z026 -- a sleep cut short only releases sooner
             Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(30), .clock = .awake } }, i) catch {};
             l.release(i);
         }

@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `lock` (`Lock`, `LockOptions`, `LockError`): git's lock-file protocol, from `lockfile.c`.
+  - `<path>.lock` is taken exclusively. `Contention.wait` tries again with git's backoff: the attempt squared in milliseconds, capped at a second, a quarter either way at random. Each wait is a cancellation point, and `error.LockHeld` comes once the wait is spent.
+  - `Holder.pid_file` is `core.lockfilePid`'s `<path>~pid.lock`, saying `pid <n>` byte for byte as git writes it. A holder file a crash left is the new lock's to replace, or to remove under `Holder.none`.
+  - A lock is a `Pending`: `commit` replaces `<path>` with what was written to it, at its level, and `release` leaves `<path>` as it was.
+  - A lock this process did not take is never removed. `lockHolder` reads what a held lock names (`Lock.Held.pid`), git's lock included; whether that process still runs is the caller's to ask.
+- `copyFile` (`CopyOptions`, `CopyError`, `Copied`): a durable copy.
+  - It goes into a temp next to the destination: a copy-on-write clone of the source where the filesystem makes one (Linux `FICLONE`, Darwin `fclonefileat`), else std's file writer, which copies in the kernel where it can.
+  - The copy is synced at its level, renamed over the destination and its directory synced, as `commit` does, so nothing is under the name until the whole copy is.
+  - `clone = .always` is `error.CloneUnsupported` with nothing published, and `.never` copies the bytes. `Copied.by` says which happened.
+  - The copy takes the source's permissions, or those asked. Windows copies; its block cloning is not yet asked for.
+- `Temp.suffix`: the destination's name with a suffix, such as `.lock`, held inline (a name as long as the platform allows).
+
 ## [0.6.0] - 2026-10-27
 
 ### Breaking

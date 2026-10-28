@@ -2086,3 +2086,55 @@ pub fn processId() u32 {
     if (native_os == .windows) return std.os.windows.GetCurrentProcessId();
     return @bitCast(std.posix.system.getpid()); // safe: a process id is positive, so its bits are the same number unsigned
 }
+
+/// What a clone came to: made, or refused by a filesystem (or a pair of
+/// them, or a kind of file) that cannot clone. A refusal changed nothing.
+pub const Cloned = enum { cloned, refused };
+
+/// A clone that failed for a reason other than a refusal.
+pub const CloneError = OpenFileError || Io.Cancelable;
+
+/// Linux `FICLONE`: `dst`, an empty file, becomes a copy-on-write clone of
+/// `src`, whole. Elsewhere, and through a route, refused.
+pub fn cloneInto(io: Io, dst: Handle, src: Handle) CloneError!Cloned {
+    if (!is_linux) return .refused;
+    const e = switch (try retrying(io, .clone, null, linux.ioctl, .{ dst, ficlone, @as(usize, @bitCast(@as(isize, src))) })) { // safe: a descriptor is a non-negative int
+        .code => |c| c,
+        .route => return .refused,
+    };
+    return cloneOutcome(e);
+}
+
+/// `_IOW(0x94, 9, int)`.
+const ficlone: u32 = 0x40049409;
+
+/// Darwin `fclonefileat`: `name` in `dir`, which must not exist, made a
+/// copy-on-write clone of `src`, without following a link or copying its
+/// owner. Elsewhere, and through a route, refused.
+pub fn cloneAt(io: Io, src: Handle, dir: Handle, name: []const u8) CloneError!Cloned {
+    if (!is_darwin) return .refused;
+    const path = try posix.toPosixPath(name);
+    const e = switch (try retrying(io, .clone, name, fclonefileat, .{ src, dir, &path, clone_nofollow | clone_noownercopy })) {
+        .code => |c| c,
+        .route => return .refused,
+    };
+    return cloneOutcome(e);
+}
+
+const clone_nofollow: u32 = 0x0001;
+const clone_noownercopy: u32 = 0x0002;
+
+// aegis: boundary: libc's fclonefileat, declared as the system documents it, called only from this file
+extern "c" fn fclonefileat(srcfd: c_int, dst_dirfd: c_int, dst: [*:0]const u8, flags: u32) c_int;
+
+fn cloneOutcome(e: posix.E) CloneError!Cloned {
+    if (e == .SUCCESS) return .cloned;
+    // The codes that say the filesystem cannot be asked: no clones there,
+    // two filesystems, a kind of file or a range it does not clone, no such
+    // request.
+    const refusals = [_][]const u8{ "OPNOTSUPP", "NOTSUP", "XDEV", "INVAL", "NOTTY", "NOSYS" };
+    inline for (refusals) |name| {
+        if (@hasField(posix.E, name) and e == @field(posix.E, name)) return .refused;
+    }
+    return openFileFailure(e);
+}
