@@ -1,12 +1,14 @@
 //! Fuzz targets for what airlock takes apart: a caller's path. Every name
 //! airlock makes durable is found in one (its base, its parent, the
 //! directories `makePath` walks), so the walk over its bytes is a parser.
+//! And for what it copies: a file of any size, with holes anywhere.
 //!
-//! Each target holds the same contract: any path gives indexes inside it
-//! and slices of it, never a read past either end, and the parts it gives
-//! are the parts a plain split would. They are shakedown `check`
-//! properties: `zig build test` runs seeded cases, and `zig build test
-//! --fuzz` searches.
+//! Each path target holds the same contract: any path gives indexes inside
+//! it and slices of it, never a read past either end, and the parts it
+//! gives are the parts a plain split would. The copy target holds that a
+//! copy, cloned or not, is the source byte for byte. They are shakedown
+//! `check` properties: `zig build test` runs seeded cases, and `zig build
+//! test --fuzz` searches.
 
 const std = @import("std");
 const testing = std.testing;
@@ -15,6 +17,7 @@ const gen = shakedown.gen;
 const Case = shakedown.Case;
 const Source = shakedown.Source;
 const paths = @import("paths.zig");
+const airlock = @import("airlock.zig");
 
 /// A path whose bytes lean to the ones that matter: separators, dots,
 /// a name's letter, and now and then anything at all, so the walks meet
@@ -111,4 +114,44 @@ fn fuzzComponents(_: void, c: *Case) !void {
         try testing.expectEqualStrings(expected[seen], name);
     }
     try testing.expectEqual(n, seen);
+}
+
+test "a copy is its source byte for byte, at any size and with holes anywhere" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try shakedown.check(testing.allocator, tmp.dir, fuzzCopy, .{ .cases = 64 });
+}
+
+/// The largest source a case makes: a few of its 64 KiB clone granules,
+/// past one copy buffer.
+const max_copy = 256 * 1024;
+
+fn fuzzCopy(dir: std.Io.Dir, c: *Case) !void {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    const len = gen.intRange(c.source, usize, 0, max_copy);
+    // What the source reads as: zeros where no extent was written.
+    const expected = try gpa.alloc(u8, len);
+    defer gpa.free(expected);
+    @memset(expected, 0);
+    {
+        const src = try dir.createFile(io, "src", .{ .truncate = true });
+        defer src.close(io);
+        // The length first: what no extent writes is a hole.
+        try src.setLength(io, len);
+        for (0..gen.intRange(c.source, usize, 0, 4)) |_| {
+            if (len == 0) break;
+            const at = gen.intRange(c.source, usize, 0, len - 1);
+            const extent = expected[at..][0..gen.intRange(c.source, usize, 1, len - at)];
+            _ = gen.bytesInto(c.source, extent);
+            try src.writePositionalAll(io, extent, at);
+        }
+    }
+    const how = gen.oneOf(c.source, @FieldType(airlock.CopyOptions, "clone"), &.{ .auto, .never });
+    // The bytes are the property; durability is the crash model's.
+    const copied = try airlock.copyFile(io, dir, "src", dir, "dst", .{ .clone = how, .commit = .{ .level = .none } });
+    if (how == .never) try testing.expectEqual(.copy, copied.by);
+    const got = try dir.readFileAlloc(io, "dst", gpa, .unlimited);
+    defer gpa.free(got);
+    try testing.expectEqualSlices(u8, expected, got);
 }

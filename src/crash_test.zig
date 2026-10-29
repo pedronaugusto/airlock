@@ -3,7 +3,8 @@
 //! every state the disk could come back in after it. Each state is checked
 //! for what the operation promises: a destination is old or new and never
 //! torn; once the operation returned at `data`, it is new in every state;
-//! a batch's fence holds whenever its renames do.
+//! a batch's fence holds whenever its renames do; a lock the run committed
+//! is gone, and one a crash left is held, by a holder file that reads.
 //!
 //! The disk's rules are the platform's (`Sim.Fs`), checked against ext4,
 //! xfs and btrfs by shakedown's crash replay; airlock's calls are the
@@ -20,7 +21,7 @@ const Seam = seam.Seam;
 const os = builtin.target.os.tag;
 const is_tested_os = os == .linux or os.isDarwin() or os == .windows;
 
-const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs, sym_link, make_path };
+const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs, sym_link, make_path, copy, clone, lock };
 
 /// The simulated disk's names, as this platform's file systems compare them.
 const names: @FieldType(shakedown.Sim.Fs.Options, "names") = if (os.isDarwin()) .darwin else if (os == .windows) .windows else .posix;
@@ -56,7 +57,7 @@ pub const Operation = struct {
         if (s.existedBefore()) {
             for (s.dests()) |d| try fs.write(d, "old");
         }
-        if (s.kind == .rename) try fs.write("src", "new");
+        if (s.kind == .rename or s.kind == .copy or s.kind == .clone) try fs.write("src", "new");
         s.h = try Seam.create(testing.allocator, sim.io(), .{ .plan = s.plan, .trace = .off });
         s.reached = .none;
         s.returned = false;
@@ -106,6 +107,17 @@ pub const Operation = struct {
             .sym_link => s.reached = try airlock.symLink(io, dir, "new-target", "a", .{}),
             .make_path => s.reached = (try airlock.makePath(io, dir, "sub/x/y", .{})).reached,
             .batch, .batch_two_dirs => try s.runBatch(io),
+            // A clone where the disk makes one, else the copy it falls to.
+            .copy, .clone => {
+                const how: @FieldType(airlock.CopyOptions, "clone") = if (s.kind == .copy) .never else .auto;
+                s.reached = (try airlock.copyFile(io, dir, "src", dir, "a", .{ .clone = how, .commit = commit })).committed.reached;
+            },
+            .lock => {
+                var lock = try airlock.lock(io, dir, "a", .{ .holder = .pid_file });
+                defer lock.release(io);
+                try lock.file().writePositionalAll(io, "new", 0);
+                s.reached = (try lock.commit(io, commit)).reached;
+            },
         }
         s.returned = true;
     }
@@ -150,6 +162,7 @@ pub const Operation = struct {
         if (!s.ready) return;
         const durable = s.returned and s.reached.atLeast(.data);
         const cwd = Io.Dir.cwd();
+        if (s.kind == .lock) try checkLock(io, durable);
         switch (s.kind) {
             .sync_file => if (durable) try expectContents(io, "a", "new"),
             .remove => if (durable) try testing.expectError(error.FileNotFound, cwd.statFile(io, "a", .{})),
@@ -179,6 +192,20 @@ pub const Operation = struct {
         }
     }
 };
+
+/// A committed lock is gone; one a crash left stays, as git leaves it
+/// (airlock never removes a lock it did not take): it reads as held,
+/// whatever its holder file came back as, and no second lock is taken.
+fn checkLock(io: Io, committed: bool) !void {
+    const cwd = Io.Dir.cwd();
+    const held = try airlock.lockHolder(io, cwd, "a") orelse return;
+    if (committed) return error.LockLeft;
+    if (held.pid) |pid| try testing.expect(pid != 0);
+    // airlock's own calls onto the recovered disk, as `recover` makes them.
+    const h = try Seam.create(testing.allocator, io, .{ .trace = .off });
+    defer h.destroy();
+    try testing.expectError(error.LockHeld, airlock.lock(h.io(), cwd, "a", .{}));
+}
 
 /// No temp survives the recovery's prune.
 fn expectNoTemps(io: Io) !void {
@@ -260,6 +287,18 @@ test "every crash: a batch over two directories" {
 test "every crash: a symbolic link swap" {
     if (os == .windows) return error.SkipZigTest;
     try crashes(.sym_link);
+}
+
+test "every crash: copyFile, the bytes copied" {
+    try crashes(.copy);
+}
+
+test "every crash: copyFile, a clone where the disk makes one" {
+    try crashes(.clone);
+}
+
+test "every crash: a lock committed" {
+    try crashes(.lock);
 }
 
 test "every crash: makePath" {
