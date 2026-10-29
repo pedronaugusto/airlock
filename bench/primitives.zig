@@ -35,8 +35,9 @@ pub fn sync(handle: Io.File.Handle, kind: Kind) Error!void {
         }) else std.c.errno(switch (kind) {
             .fsync => std.c.fsync(handle),
             .fdatasync => std.c.fdatasync(handle),
-            .full => std.c.fcntl(handle, std.c.F.FULLFSYNC, @as(c_int, 0)),
-            .barrier => std.c.fcntl(handle, std.c.F.BARRIERFSYNC, @as(c_int, 0)),
+            // Darwin's rows alone ask for these.
+            .full => if (comptime builtin.os.tag.isDarwin()) std.c.fcntl(handle, std.c.F.FULLFSYNC, @as(c_int, 0)) else unreachable,
+            .barrier => if (comptime builtin.os.tag.isDarwin()) std.c.fcntl(handle, std.c.F.BARRIERFSYNC, @as(c_int, 0)) else unreachable,
             else => unreachable,
         });
         switch (code) {
