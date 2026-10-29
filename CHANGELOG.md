@@ -26,6 +26,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The copy takes the source's permissions, or those asked. Windows copies; its block cloning is not yet asked for.
 - `Temp.suffix`: the destination's name with a suffix, such as `.lock`, held inline (a name as long as the platform allows).
 
+### Fixed
+
+- `Volume.of` on Linux returns `error.Canceled` for a cancel while it opens or reads `/proc/self/mountinfo`, where it ended the query and named no file system.
+
 ## [0.6.0] - 2026-10-27
 
 ### Breaking
