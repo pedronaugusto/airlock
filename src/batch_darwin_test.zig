@@ -28,7 +28,7 @@ test "Darwin batch schedules each writeout and falls back when concurrency is un
             p.* = try airlock.create(io, scratch.dir(), name, .{});
             made += 1;
             try p.file().writePositionalAll(io, "data", 0);
-            try batch.addPending(io, p, .replace);
+            batch.addPending(io, p, .replace);
         }
         try testing.expectEqual(airlock.Reached.full, try batch.commit(io, .{ .parallel = 4 }));
         try testing.expectEqual(@as(u64, 9), h.fio.count(.groupConcurrent));
@@ -59,7 +59,7 @@ test "Darwin concurrent writeout failures belong to the first slot and publish n
             p.* = try airlock.create(io, scratch.dir(), name, .{ .temp = .{ .exact = temp } });
             made += 1;
             try p.file().writePositionalAll(io, "data", 0);
-            try batch.addPending(io, p, .replace);
+            batch.addPending(io, p, .replace);
         }
         if (cancel) try testing.expectError(error.Canceled, batch.commit(io, .{ .parallel = 4 })) else try testing.expectError(error.InputOutput, batch.commit(io, .{ .parallel = 4 }));
         try testing.expectEqual(try airlock.Batch.SlotIndex.from(1, slots.len), batch.failure().?.slot);
@@ -83,7 +83,7 @@ test "Darwin concurrent writeout refusal never upgrades an unsynced file" {
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &p, .replace);
+    batch.addPending(io, &p, .replace);
     try testing.expectEqual(airlock.Reached.none, try batch.commit(io, .{ .parallel = 4 }));
     try testing.expectEqual(airlock.Pending.State.published, p.state());
 }

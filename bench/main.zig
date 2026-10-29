@@ -351,22 +351,22 @@ fn batch(ctx: *Context, row: *const Row, i: u64) anyerror!void {
         for (ctx.pendings[0..row.n], 0..) |*p, n| {
             p.* = try airlock.create(io, ctx.dir, ctx.names[n][0..7], .{});
             try p.file().writePositionalAll(io, bytes, 0);
-            try b.addPending(io, p, .replace);
+            b.addPending(io, p, .replace);
         }
     } else if (row.paths) {
         for (ctx.names[0..row.n]) |*name| {
             try ctx.dir.writeFile(io, .{ .sub_path = name[0..7], .data = bytes });
-            try b.addPath(ctx.dir, name[0..7]);
+            b.addPath(ctx.dir, name[0..7]);
         }
     } else {
         for (ctx.files[0..row.n], 0..) |*f, n| {
             f.* = try ctx.dir.createFile(io, ctx.names[n][0..7], .{ .read = true });
             try f.writePositionalAll(io, bytes, 0);
-            try b.addFile(f.*);
+            b.addFile(f.*);
         }
     }
     defer if (!row.renames and !row.paths) for (ctx.files[0..row.n]) |f| f.close(io);
-    if (row.include_dir) try b.addDir(ctx.dir);
+    if (row.include_dir) b.addDir(ctx.dir);
     _ = try b.commit(io, .{ .level = row.level, .parallel = row.parallel, .blocking = rowBlocking(row) });
 }
 

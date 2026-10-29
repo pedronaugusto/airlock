@@ -8,6 +8,7 @@ const Blocking = @import("Blocking.zig");
 const sys = @import("sys.zig");
 const platform = @import("platform.zig");
 const level_mod = @import("level.zig");
+const assert = @import("aegis").assert;
 const Staged = @import("Staged.zig");
 const paths = @import("paths.zig");
 const Level = level_mod.Level;
@@ -49,15 +50,21 @@ pub const RenameError = Io.Dir.RenameError || error{
 /// leave both names or neither. Any error after the rename is
 /// `error.PublishedNotDurable`, so a caller can tell "not renamed" from
 /// "renamed, not yet durable". A directory sync the filesystem refuses
-/// leaves the rename `.ordered`.
+/// leaves the rename `.ordered`. The level is `.data` or `.full`: a rename
+/// that syncs nothing is `renameUnsynced`, which has no sync to fail.
 pub fn rename(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new: []const u8, options: RenameOptions) RenameError!Reached {
-    if (is_windows) {
-        try renameWindows(io, old_dir, old, new_dir, new, options.busy_deadline);
-    } else {
-        try sys.rename(io, old_dir.handle, old, new_dir.handle, new);
-    }
-    if (@backingInt(options.sync.level) < @backingInt(Level.data)) return .none;
+    assert.invariant(@backingInt(options.sync.level) >= @backingInt(Level.data), "airlock.rename: a rename that syncs nothing is renameUnsynced");
+    try renameUnsynced(io, old_dir, old, new_dir, new, options.busy_deadline);
     return syncRenamed(io, old_dir, old, new_dir, new, options) catch |err| return notDurable(options.diagnostics, err);
+}
+
+/// The rename `rename` makes, with no sync after it: `old` (relative to
+/// `old_dir`) to `new` (relative to `new_dir`), replacing `new`, atomic for
+/// the name but not durable, as git renames. On Windows it is retried for
+/// up to `busy_deadline` while a scanner or indexer holds either name.
+pub fn renameUnsynced(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new: []const u8, busy_deadline: Io.Duration) Io.Dir.RenameError!void {
+    if (is_windows) return renameWindows(io, old_dir, old, new_dir, new, busy_deadline);
+    return sys.rename(io, old_dir.handle, old, new_dir.handle, new);
 }
 
 fn syncRenamed(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new: []const u8, options: RenameOptions) SyncAfterError!Reached {

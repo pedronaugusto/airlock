@@ -157,7 +157,7 @@ fn measure(a: std.mem.Allocator, io: Io, dir: Io.Dir, other: ?Io.Dir, strategy: 
             ps[j] = try airlock.create(io, target_dir, name, .{});
             made += 1;
             try ps[j].file().writePositionalAll(io, data, 0);
-            try batch.addPending(io, &ps[j], .replace);
+            batch.addPending(io, &ps[j], .replace);
         } else {
             file.* = try target_dir.createFile(io, name, .{});
             made += 1;
@@ -181,10 +181,10 @@ fn measure(a: std.mem.Allocator, io: Io, dir: Io.Dir, other: ?Io.Dir, strategy: 
     var dir_ns: u64 = 0;
     if (strategy == .batch or strategy == .paths or strategy == .pending) {
         if (strategy != .pending) for (files, names, 0..) |file, *buf, j| {
-            if (strategy == .batch) try batch.addFile(file) else try batch.addPath(if (other != null and j % 2 == 1) other.? else dir, buf[0..9]);
+            if (strategy == .batch) batch.addFile(file) else batch.addPath(if (other != null and j % 2 == 1) other.? else dir, buf[0..9]);
         };
-        try batch.addDir(dir);
-        if (other) |d| try batch.addDir(d);
+        batch.addDir(dir);
+        if (other) |d| batch.addDir(d);
         if (try batch.commit(io, .{ .level = .full, .parallel = config.parallel }) != .full) return error.NotDurable;
         @memset(jobs, .{ .io = io, .file = undefined, .kind = .full });
     } else {

@@ -113,12 +113,12 @@ test "blocking hook reaches batch fences kept files and all name operations" {
     var kept = try airlock.create(io, s.dir(), "kept", .{});
     defer kept.discard(io);
     try kept.file().writePositionalAll(io, "same", 0);
-    try b.addPending(io, &kept, .keep_existing);
-    try b.fence();
+    b.addPending(io, &kept, .keep_existing);
+    b.fence();
     var p = try airlock.create(io, s.dir(), "published", .{});
     defer p.discard(io);
     try p.file().writePositionalAll(io, "new", 0);
-    try b.addPending(io, &p, .replace);
+    b.addPending(io, &p, .replace);
     try testing.expect((try b.commitOrRefuse(io, .{ .blocking = e.hook() })).atLeast(.data));
     const sync: airlock.SyncOptions = .{ .blocking = e.hook() };
     _ = try airlock.rename(io, s.dir(), "published", s.dir(), "renamed", .{ .sync = sync });
@@ -147,7 +147,7 @@ test "blocking hook permits concurrent batch jobs and reads errno on the worker"
         f.* = try s.dir().createFile(io, try std.mem.print(&name, "f{d}", .{i}), .{});
         opened += 1;
         try f.writePositionalAll(io, "dirty", 0);
-        try b.addFile(f.*);
+        b.addFile(f.*);
     }
     try testing.expect((try b.commit(io, .{ .parallel = 16, .blocking = e.hook() })).atLeast(.data));
     try testing.expectEqual(h.syncs(), e.workers.load(.monotonic));

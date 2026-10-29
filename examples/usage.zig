@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     var slots: [8]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &object, .keep_existing);
+    batch.addPending(io, &object, .keep_existing);
     const reached = try batch.commit(io, .{ .level = .data });
     std.debug.assert(reached.atLeast(.data));
 

@@ -158,11 +158,11 @@ pub const Operation = struct {
         var slots: [8]airlock.Batch.Slot = undefined;
         var batch: airlock.Batch = .init(&slots);
         defer batch.reset(io);
-        try batch.addPending(io, &pendings[0], .replace);
-        try batch.addPending(io, &pendings[1], .replace);
-        try batch.fence();
-        try batch.addPending(io, &pendings[2], .replace);
-        try batch.addDir(dir);
+        batch.addPending(io, &pendings[0], .replace);
+        batch.addPending(io, &pendings[1], .replace);
+        batch.fence();
+        batch.addPending(io, &pendings[2], .replace);
+        batch.addDir(dir);
         s.reached = try batch.commit(io, .{ .parallel = 1 });
     }
 
@@ -411,10 +411,10 @@ test "the model proves a batch with a fence" {
     var slots: [4]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &ps[0], .replace);
-    try batch.addPending(io, &ps[1], .replace);
-    try batch.fence();
-    try batch.addPending(io, &ps[2], .replace);
+    batch.addPending(io, &ps[0], .replace);
+    batch.addPending(io, &ps[1], .replace);
+    batch.fence();
+    batch.addPending(io, &ps[2], .replace);
     _ = try batch.commit(io, .{ .parallel = 1 });
     var m: model_mod.Model = .init(model_mod.native());
     m.fenceAt(2);
@@ -436,7 +436,7 @@ test "the same batch without its fence breaks the fence's promise in the model" 
     var slots: [3]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    for (&ps) |*p| try batch.addPending(io, p, .replace);
+    for (&ps) |*p| batch.addPending(io, p, .replace);
     _ = try batch.commit(io, .{ .parallel = 1 });
     var m: model_mod.Model = .init(model_mod.native());
     m.fenceAt(2);

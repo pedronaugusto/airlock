@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `renameUnsynced(io, old_dir, old, new_dir, new, busy_deadline)` is the rename with no sync, git's (Windows' busy retry included), and fails only with `Io.Dir.RenameError`. `rename` is it followed by the directory syncs, and its level is `.data` or `.full`: one that syncs nothing stops the program, where it renamed and returned `.none` under a `RenameError` that still carried `PublishedNotDurable`, which no sync could raise. (relic's `fs.rename`, which held that error `unreachable`.)
+- A `Batch` add takes a slot it is given room for: `addFile`, `addPath`, `addPending`, `addDir`, `addDirPath` and `fence` return nothing, an add past the slots stops the program in every build, and `room()` says how many are left. `AddError` is gone, and so is `BatchFull` from `Batch.Error` (`commit`'s and `commitOrRefuse`'s sets), where no commit could raise it. Every caller sizes its own slots: one that fills a batch commits it when `room()` is 0. (relic's `fs.syncAll`, which held each add and the commit's `BatchFull` `unreachable`; chronicle's backup, which checked its count and carried `BatchFull` in its error set.)
 - On aegis 0.3.0, which has one way to lend (`borrow`): `Pending.file()` and `Lock.file()` return the `std.Io.File`, lent by value, where they returned `aegis.own.Lent(Io.File)`. The pending (or the lock) still closes it; glint's lending rule keeps a holder from closing it. Migration: drop `.get()`.
 
 ### Added

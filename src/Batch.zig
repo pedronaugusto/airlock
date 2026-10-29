@@ -21,8 +21,10 @@
 //! is not unique across cloned volumes). A false split costs one flush; a
 //! false merge would skip one, so keys never merge two volumes.
 //!
-//! airlock never allocates: the slots are the caller's. A full batch
-//! returns `error.BatchFull`; commit it and start the next one.
+//! airlock never allocates: the slots are the caller's, and an add takes
+//! one. `room` says how many are left; a batch with none is committed and
+//! the next one started. An add past the slots stops the program in every
+//! build, as a caller sizes its own storage.
 //!
 //! Descriptors: each pending holds its temp until its sync (POSIX) or its
 //! rename (Windows), and the batch opens each distinct parent only when it
@@ -120,11 +122,14 @@ pub fn init(storage: []Slot) Batch {
     return .{ .slots = storage };
 }
 
-pub const AddError = error{BatchFull};
+/// How many more adds the slots hold.
+pub fn room(b: *const Batch) usize {
+    return b.slots.len - b.len;
+}
 
-fn push(b: *Batch, slot: Slot) AddError!void {
+fn push(b: *Batch, slot: Slot) void {
     // A full batch is the one way the next index fails to name a slot.
-    const index = SlotIndex.from(b.len, b.slots.len) catch return error.BatchFull;
+    const index = SlotIndex.from(b.len, b.slots.len) catch assert.never("Batch: an add past its slots; commit a batch with no room first");
     var s = slot;
     s.index = index;
     b.slots[b.len] = s;
@@ -134,16 +139,16 @@ fn push(b: *Batch, slot: Slot) AddError!void {
 /// A file written in place, synced through the caller's handle (which
 /// sees its writeback errors). Borrowed until `commit` returns. On Windows
 /// the handle needs write access.
-pub fn addFile(b: *Batch, file: Io.File) AddError!void {
-    return b.push(.{ .kind = .file, .handle = file.handle, .open = true });
+pub fn addFile(b: *Batch, file: Io.File) void {
+    b.push(.{ .kind = .file, .handle = file.handle, .open = true });
 }
 
 /// A file opened by the batch at commit. A fresh descriptor can miss a
 /// writeback error another one already saw (see `syncPath`); this is for
 /// checkout-sized work, where keeping every writing handle open is not
 /// possible. `sub_path` is borrowed until `commit` returns.
-pub fn addPath(b: *Batch, dir: Io.Dir, sub_path: []const u8) AddError!void {
-    return b.push(.{ .kind = .path, .root = dir.handle, .path = sub_path });
+pub fn addPath(b: *Batch, dir: Io.Dir, sub_path: []const u8) void {
+    b.push(.{ .kind = .path, .root = dir.handle, .path = sub_path });
 }
 
 /// A pending publish: synced through its own handle, renamed in add order,
@@ -151,27 +156,27 @@ pub fn addPath(b: *Batch, dir: Io.Dir, sub_path: []const u8) AddError!void {
 /// reopened, once per distinct directory, at commit.
 /// A pending a failed rename left synced is renamed without a second sync;
 /// what that first sync reached is its part of the batch.
-pub fn addPending(b: *Batch, io: Io, p: *Pending, publish: Pending.Publish) AddError!void {
+pub fn addPending(b: *Batch, io: Io, p: *Pending, publish: Pending.Publish) void {
     const staged = &p.staged;
     assert.invariant(staged.state == .open or staged.state == .synced, "Batch.addPending: the pending already ended or failed");
-    try b.push(.{ .kind = .pending, .pending = staged, .publish = publish });
+    b.push(.{ .kind = .pending, .pending = staged, .publish = publish });
     staged.dropParent(io);
 }
 
 /// A directory whose names changed. Borrowed until `commit` returns.
-pub fn addDir(b: *Batch, dir: Io.Dir) AddError!void {
-    return b.push(.{ .kind = .dir, .handle = dir.handle, .open = true, .touched = true });
+pub fn addDir(b: *Batch, dir: Io.Dir) void {
+    b.push(.{ .kind = .dir, .handle = dir.handle, .open = true, .touched = true });
 }
 
 /// A directory, opened at commit. `sub_path` is borrowed until `commit`
 /// returns.
-pub fn addDirPath(b: *Batch, dir: Io.Dir, sub_path: []const u8) AddError!void {
-    return b.push(.{ .kind = .dir_path, .root = dir.handle, .path = sub_path, .touched = true });
+pub fn addDirPath(b: *Batch, dir: Io.Dir, sub_path: []const u8) void {
+    b.push(.{ .kind = .dir_path, .root = dir.handle, .path = sub_path, .touched = true });
 }
 
 /// Renames added after this reach the disk after those added before it.
-pub fn fence(b: *Batch) AddError!void {
-    return b.push(.{ .kind = .fence });
+pub fn fence(b: *Batch) void {
+    b.push(.{ .kind = .fence });
 }
 
 pub const Options = struct {
@@ -186,7 +191,7 @@ pub const Options = struct {
     blocking: ?*Blocking = null,
 };
 
-pub const Error = Pending.CommitError || platform.SyncPathError || platform.DirSyncError || sys.StatIdError || error{BatchFull};
+pub const Error = Pending.CommitError || platform.SyncPathError || platform.DirSyncError || sys.StatIdError;
 
 /// `Error`, and a filesystem that cannot keep the level.
 pub const CommitOrRefuseError = Error || error{

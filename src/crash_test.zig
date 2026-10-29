@@ -123,11 +123,11 @@ pub const Operation = struct {
         var slots: [8]airlock.Batch.Slot = undefined;
         var batch: airlock.Batch = .init(&slots);
         defer batch.reset(io);
-        try batch.addPending(io, &pendings[0], .replace);
-        try batch.addPending(io, &pendings[1], .replace);
-        try batch.fence();
-        try batch.addPending(io, &pendings[2], .replace);
-        try batch.addDir(dir);
+        batch.addPending(io, &pendings[0], .replace);
+        batch.addPending(io, &pendings[1], .replace);
+        batch.fence();
+        batch.addPending(io, &pendings[2], .replace);
+        batch.addDir(dir);
         s.reached = try batch.commit(io, .{ .parallel = 1, .barrier = s.barrier });
     }
 

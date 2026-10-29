@@ -34,8 +34,10 @@ test "a rename within one directory syncs it once; across two, both" {
     try testing.expectEqualStrings("1", s.read("sub/c", &buffer).?);
     try testing.expectEqual(@as(?[]const u8, null), s.read("b", &buffer));
     h.reset();
-    try testing.expectEqual(airlock.Reached.none, try airlock.rename(io, s.dir(), "sub/c", s.dir(), "d", .{ .sync = .{ .level = .ordered } }));
+    // A rename with no sync syncs nothing, and has no sync that can fail.
+    try airlock.renameUnsynced(io, s.dir(), "sub/c", s.dir(), "d", .fromMilliseconds(2000));
     try testing.expectEqual(@as(u32, 0), h.count(.sync_dir));
+    try testing.expectEqualStrings("1", s.read("d", &buffer).?);
 }
 
 test "a rename replaces, and a missing source is FileNotFound" {

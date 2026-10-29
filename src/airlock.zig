@@ -73,6 +73,8 @@ pub const RenameOptions = names.RenameOptions;
 pub const RenameError = names.RenameError;
 /// Renames, replacing, and syncs the directories involved.
 pub const rename = names.rename;
+/// Renames, replacing, with no sync: git's rename.
+pub const renameUnsynced = names.renameUnsynced;
 /// What `remove` can fail with.
 pub const RemoveError = names.RemoveError;
 /// Removes a file and syncs its directory.

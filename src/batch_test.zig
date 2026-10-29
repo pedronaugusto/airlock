@@ -49,7 +49,7 @@ test "three publishes into one directory: the fewest barriers per platform" {
     var slots: [8]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    for (&ps) |*p| try batch.addPending(io, p, .replace);
+    for (&ps) |*p| batch.addPending(io, p, .replace);
     h.reset();
     const reached = try batch.commit(io, .{ .parallel = 1 });
     try testing.expect(reached.atLeast(.data));
@@ -85,8 +85,8 @@ test "files without renames: one flush per volume, no barrier" {
     var slots: [4]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addFile(x);
-    try batch.addPath(s.dir(), "y");
+    batch.addFile(x);
+    batch.addPath(s.dir(), "y");
     const reached = try batch.commit(io, .{ .parallel = 1 });
     try testing.expect(reached.atLeast(.data));
     if (is_darwin) {
@@ -118,11 +118,11 @@ test "renames happen in add order, and the directories are synced once each" {
     var slots: [8]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &pack, .replace);
-    try batch.addPending(io, &rev, .replace);
-    try batch.fence();
-    try batch.addPending(io, &idx, .replace);
-    try batch.addDir(s.dir());
+    batch.addPending(io, &pack, .replace);
+    batch.addPending(io, &rev, .replace);
+    batch.fence();
+    batch.addPending(io, &idx, .replace);
+    batch.addDir(s.dir());
     h.reset();
     _ = try batch.commit(io, .{ .parallel = 1 });
     var names: [3][]const u8 = undefined;
@@ -163,10 +163,10 @@ test "a fence on Darwin writes out every directory touched, then one barrier" {
     var slots: [8]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &a, .replace);
-    try batch.addPending(io, &b, .replace);
-    try batch.fence();
-    try batch.addPending(io, &c, .replace);
+    batch.addPending(io, &a, .replace);
+    batch.addPending(io, &b, .replace);
+    batch.fence();
+    batch.addPending(io, &c, .replace);
     h.reset();
     _ = try batch.commit(io, .{ .parallel = 1 });
     var buffer: [64]Call = undefined;
@@ -194,7 +194,7 @@ test "keep_existing on a taken name syncs the existing file inside the batch" {
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &p, .keep_existing);
+    batch.addPending(io, &p, .keep_existing);
     const reached = try batch.commit(io, .{ .parallel = 1 });
     try testing.expect(reached.atLeast(.data));
     try testing.expectEqual(airlock.Pending.State.kept, p.state());
@@ -233,8 +233,8 @@ test "a failed sync poisons the batch: nothing renamed, temps gone, the slot nam
     var slots: [4]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &a, .replace);
-    try batch.addPending(io, &b, .replace);
+    batch.addPending(io, &a, .replace);
+    batch.addPending(io, &b, .replace);
     try testing.expectError(error.InputOutput, batch.commit(io, .{ .parallel = 1 }));
     const failure = batch.failure().?;
     try testing.expectEqual(try airlock.Batch.SlotIndex.from(1, slots.len), failure.slot);
@@ -274,7 +274,7 @@ test "a failure after the directories were sorted names the slot by when it was 
     var slots: [3]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    for (added) |i| try batch.addDir(dirs[i]);
+    for (added) |i| batch.addDir(dirs[i]);
     try testing.expectError(error.InputOutput, batch.commit(io, .{ .parallel = 1 }));
     const failure = batch.failure().?;
     try testing.expectEqual(try airlock.Batch.SlotIndex.from(2, slots.len), failure.slot);
@@ -294,17 +294,22 @@ test "a failure after a rename is PublishedNotDurable" {
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &a, .replace);
+    batch.addPending(io, &a, .replace);
     try testing.expectError(error.PublishedNotDurable, batch.commit(io, .{ .parallel = 1 }));
     try testing.expectEqual(@as(anyerror, error.InputOutput), batch.failure().?.cause);
     try expectContents(&s, "a", "a");
 }
 
-test "a full batch says so; the caller commits and starts the next one" {
-    var slots: [1]airlock.Batch.Slot = undefined;
+test "a batch says how much room it has left; the caller commits a full one and starts the next" {
+    var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
-    try batch.fence();
-    try testing.expectError(error.BatchFull, batch.fence());
+    try testing.expectEqual(@as(usize, 2), batch.room());
+    batch.fence();
+    try testing.expectEqual(@as(usize, 1), batch.room());
+    batch.fence();
+    try testing.expectEqual(@as(usize, 0), batch.room());
+    batch.reset(testing.io);
+    try testing.expectEqual(@as(usize, 2), batch.room());
 }
 
 test "Linux and Darwin sync concurrently and the calls are the same multiset" {
@@ -326,7 +331,7 @@ test "Linux and Darwin sync concurrently and the calls are the same multiset" {
         var slots: [16]airlock.Batch.Slot = undefined;
         var batch: airlock.Batch = .init(&slots);
         defer batch.reset(io);
-        for (&ps) |*p| try batch.addPending(io, p, .replace);
+        for (&ps) |*p| batch.addPending(io, p, .replace);
         h.reset();
         _ = try batch.commit(io, .{ .parallel = parallel });
         for (&counts[round], 0..) |*c, i| c.* = h.count(@fromBackingInt(@as(u8, @intCast(i))));
@@ -350,7 +355,7 @@ test "two hundred nested pendings stay within one descriptor each, plus parallel
         const n = std.mem.print(name, "d{d}/f", .{i % 50}) catch unreachable; // unreachable: 16 bytes hold the name
         if (i < 50) try s.dir().createDirPath(io, n[0 .. n.len - 2]);
         p.* = try airlock.create(io, s.dir(), n, .{});
-        try batch.addPending(io, p, .replace);
+        batch.addPending(io, p, .replace);
     }
     defer for (&ps) |*p| p.discard(io);
     try testing.expect(seam.openDescriptors() - before <= count);
@@ -372,8 +377,8 @@ test "Windows: two directories that differ only in the device name are two volum
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addDir(s.dir());
-    try batch.addDir(s.dir());
+    batch.addDir(s.dir());
+    batch.addDir(s.dir());
     _ = try batch.commit(io, .{});
     try testing.expectEqual(@as(u32, 2), h.count(.sync_writeout));
     try testing.expectEqual(@as(u32, 2), h.count(.sync_full));
@@ -394,8 +399,8 @@ test "Windows: NO_SYNC refused (ReFS) flushes each file instead" {
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addFile(x);
-    try batch.addFile(y);
+    batch.addFile(x);
+    batch.addFile(y);
     try testing.expectEqual(airlock.Reached.full, try batch.commit(io, .{}));
     // A flush per file, and no volume flush for what they covered.
     try testing.expectEqual(@as(u32, 2), h.count(.sync_full));
@@ -420,7 +425,7 @@ test "pendings in as many directories as slots stay within one descriptor per sl
         const n = std.mem.print(name, "d{d}/f", .{i}) catch unreachable; // unreachable: 16 bytes hold the name
         try s.dir().createDirPath(testing.io, n[0 .. n.len - 2]);
         p.* = try pending(io, s.dir(), n, "x");
-        try batch.addPending(io, p, .replace);
+        batch.addPending(io, p, .replace);
     }
     defer for (&ps) |*p| p.discard(io);
     h.reset();
@@ -444,7 +449,7 @@ test "addPath files are opened parallel at a time and closed after their sync" {
     var slots: [count]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    for (&names, 0..) |*name, i| try batch.addPath(s.dir(), std.mem.print(name, "f{d}", .{i}) catch unreachable); // unreachable: as above
+    for (&names, 0..) |*name, i| batch.addPath(s.dir(), std.mem.print(name, "f{d}", .{i}) catch unreachable); // unreachable: as above
     const before = seam.openDescriptors();
     h.reset();
     try testing.expect((try batch.commit(io, .{ .parallel = parallel })).atLeast(.data));
@@ -472,7 +477,7 @@ test "a pending a refused rename left synced joins a batch without a second sync
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &p, .replace);
+    batch.addPending(io, &p, .replace);
     try testing.expect((try batch.commit(io, .{ .parallel = 1 })).atLeast(.data));
     try expectContents(&s, "a", "new");
     // The temp was synced by the first commit and, on POSIX, closed: the
@@ -508,11 +513,11 @@ test "a synced pending is what its first sync reached: a batch refuses it below 
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &p, .replace);
+    batch.addPending(io, &p, .replace);
     try testing.expectError(error.LevelUnavailable, batch.commitOrRefuse(io, .{ .level = .data, .parallel = 1 }));
     try expectContents(&s, "a", null);
     batch.reset(io);
-    try batch.addPending(io, &q, .replace);
+    batch.addPending(io, &q, .replace);
     try testing.expectEqual(airlock.Reached.none, try batch.commit(io, .{ .level = .data, .parallel = 1 }));
     try expectContents(&s, "b", "new");
 }
@@ -533,7 +538,7 @@ test "Windows: a batch syncs a read-only file it keeps, and leaves it read-only"
     var slots: [2]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    try batch.addPending(io, &p, .keep_existing);
+    batch.addPending(io, &p, .keep_existing);
     try testing.expect((try batch.commit(io, .{ .parallel = 1 })).atLeast(.data));
     try expectContents(&s, "obj", "theirs");
     try expectReadOnly(s.dir(), "obj");
@@ -567,7 +572,7 @@ test "in place: a batch at none publishes files with no rename" {
     var slots: [8]airlock.Batch.Slot = undefined;
     var batch: airlock.Batch = .init(&slots);
     defer batch.reset(io);
-    for (&ps) |*p| try batch.addPending(io, p, .replace);
+    for (&ps) |*p| batch.addPending(io, p, .replace);
     h.reset();
     const reached = try batch.commit(io, .{ .level = .none, .parallel = 1 });
     try testing.expectEqual(airlock.Reached.none, reached);
