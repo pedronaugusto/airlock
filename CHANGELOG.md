@@ -28,6 +28,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `Pending.discard` and every path that lets a temp go remove it under cancel protection: a cancel that landed in the removal left the temp behind, a lock file a stale lock, and was lost. The cancel waits for the task's next cancelation point.
 - `Volume.of` on Linux returns `error.Canceled` for a cancel while it opens or reads `/proc/self/mountinfo`, where it ended the query and named no file system.
 
 ## [0.6.0] - 2026-10-27

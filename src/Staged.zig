@@ -525,6 +525,11 @@ pub fn markFailed(p: *Staged, io: Io, cause: anyerror) void {
 /// Closes the temp if it is open and removes its name. On Windows by
 /// handle, so the name goes even while a scanner holds the file.
 fn removeTemp(p: *Staged, io: Io) void {
+    // The temp goes whatever the task is told: a cancel that landed in its
+    // removal would leave it behind, a lock file a stale lock. A cancel
+    // waits for the task's next cancelation point.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     // Once a batch closed the parent, the temp is named from the caller's
     // directory.
     var buffer: [Io.Dir.max_path_bytes]u8 = undefined;

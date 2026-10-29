@@ -251,6 +251,29 @@ test "a cancel before the rename publishes nothing; after it, PublishedNotDurabl
     try testing.expectEqual(@as(?anyerror, error.Canceled), q.cause());
 }
 
+fn discardCanceled(io: Io, dir: Io.Dir) Io.Cancelable!void {
+    var p = airlock.create(io, dir, "a", .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => @panic("the temp is made"),
+    };
+    // Canceled while it waits, the task is told again and lets the temp go.
+    io.sleep(.fromSeconds(30), .awake) catch io.recancel();
+    p.discard(io);
+    return io.checkCancel();
+}
+
+test "a discard removes the temp whatever the task is told: a cancel waits for its next cancelation point" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    var task = testing.io.concurrent(discardCanceled, .{ testing.io, s.dir() }) catch return error.SkipZigTest;
+    try testing.io.sleep(.fromMilliseconds(50), .awake);
+    try testing.expectError(error.Canceled, task.cancel(testing.io));
+    // A temp left would be a lock left: stale for whoever comes next.
+    var it = s.dir().iterate();
+    try testing.expectEqual(@as(?Io.Dir.Entry, null), try it.next(testing.io));
+}
+
 test "a rename refused for access stays synced, and the retry makes no second sync" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
