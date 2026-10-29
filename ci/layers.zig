@@ -68,21 +68,13 @@ pub const required = blk: {
     break :blk paths;
 };
 
-/// Tokens only their owner may spell: every sync, rename and identity call
+/// Tokens only their owner may spell: every rename, link, clone and identity call
 /// airlock makes goes through `src/sys.zig`, where each code is mapped and
-/// the test seam sits in front of it. Moved here from strand, with the
-/// calls airlock adds.
+/// the test seam sits in front of it. Its syncs are the family's durability
+/// door (preflight's policy, by what a reference resolves to), which names
+/// airlock their owner.
 pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "raw calls owner", .tokens = &.{
-        "fsync",
-        "fdatasync",
-        "F_FULLFSYNC",
-        "FULLFSYNC",
-        "F_BARRIERFSYNC",
-        "BARRIERFSYNC",
-        "FlushFileBuffers",
-        "NtFlushBuffersFile",
-        "NtFlushBuffersFileEx",
         "statx",
         "fstat",
         "fstatat",
@@ -95,5 +87,7 @@ pub const owned: []const gantry.rules.TokenRule = &.{
         "mkdirat",
         "symlinkat",
         "getattrlistbulk",
+        "FICLONE",
+        "fclonefileat",
     }, .owners = &.{ "src/sys.zig", "bench/primitives.zig", "bench/baseline/**" } },
 };
