@@ -235,6 +235,12 @@ pub const SymLinkOptions = struct {
     temp_prefix: []const u8 = ".",
     /// Filled in when the call returns `error.PublishedNotDurable`.
     diagnostics: ?*Diagnostics = null,
+    /// What the link points at, which Windows records in it: a directory
+    /// link is entered, a file link opened. `detect` asks the target, from
+    /// the link's directory, as libarchive does: a directory there makes a
+    /// directory link, and anything else, a missing target too, a file
+    /// link. POSIX links have no kind, and this is not read there.
+    target_kind: enum { detect, file, directory } = .detect,
 };
 
 pub const SymLinkError = sys.SymLinkError || Io.Dir.RenameError || sys.OpenDirError || platform.DirSyncError || error{
@@ -257,7 +263,9 @@ pub const SymLinkOrRefuseError = SymLinkError || error{
 /// pointing at a link that never reached the disk; at `data` the directory
 /// is synced again after the rename. The usual "current -> release-N"
 /// swap. A filesystem that refuses the directory sync leaves the link
-/// `.written` at best. Windows returns `error.OperationUnsupported`.
+/// `.written` at best. On Windows the link needs the right to create
+/// symbolic links (`error.PermissionDenied` without it), and is a file or
+/// directory link as `options.target_kind` says.
 pub fn symLink(io: Io, dir: Io.Dir, target: []const u8, sub_path: []const u8, options: SymLinkOptions) SymLinkError!Reached {
     return linkAs(.report, io, dir, target, sub_path, options);
 }
@@ -274,19 +282,19 @@ fn LinkError(comptime fallback: Fallback) type {
 }
 
 fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, sub_path: []const u8, options: SymLinkOptions) LinkError(fallback)!Reached {
-    if (is_windows) return error.OperationUnsupported;
     const base_start = paths.baseStart(sub_path);
     const base = sub_path[base_start..];
     if (base.len == 0 or std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, "..")) return error.BadPathName;
     if (options.temp_prefix.len > Staged.max_prefix or paths.baseStart(options.temp_prefix) != 0) return error.BadPathName;
     var parent = try Parent.open(io, dir, sub_path);
     defer parent.close(io);
+    const kind = try linkKind(io, parent.dir, target, options);
     var buffer: [64]u8 = undefined;
     var temp: []const u8 = undefined;
     var draws: u32 = 0;
     while (true) {
         temp = buffer[0..Staged.drawName(io, options.temp_prefix, &buffer)];
-        sys.symLink(io, target, parent.dir.handle, temp) catch |err| switch (err) {
+        sys.symLink(io, target, parent.dir.handle, temp, kind) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 draws += 1;
                 if (draws < 4) continue;
@@ -309,7 +317,7 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
             return err;
         };
     }
-    sys.rename(io, parent.dir.handle, temp, parent.dir.handle, base) catch |err| {
+    renameUnsynced(io, parent.dir, temp, parent.dir, base, platform.default_busy_deadline) catch |err| {
         // glint-ignore: Z026 -- cleanup after a failure the caller already gets
         sys.unlink(io, parent.dir.handle, temp) catch {};
         return err;
@@ -317,6 +325,24 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
     if (@backingInt(level) < @backingInt(Level.data)) return reached;
     const second = syncOne(io, options.sync.blocking, parent.dir, platform.default_busy_deadline) catch |err| return notDurable(options.diagnostics, err);
     return if (reached.atLeast(.ordered)) second else reached;
+}
+
+/// The kind of link `target` makes in `dir`, as `options.target_kind` says.
+fn linkKind(io: Io, dir: Io.Dir, target: []const u8, options: SymLinkOptions) Io.Cancelable!sys.LinkKind {
+    if (!is_windows) return .file;
+    return switch (options.target_kind) {
+        .file => .file,
+        .directory => .directory,
+        .detect => {
+            const stat = dir.statFile(io, target, .{}) catch |err| return switch (err) {
+                error.Canceled => error.Canceled,
+                // Missing, unreadable or not a path: a file link, as a
+                // dangling link is everywhere.
+                else => .file,
+            };
+            return if (stat.kind == .directory) .directory else .file;
+        },
+    };
 }
 
 /// The sync that makes a new link durable before its rename: `.ordered`

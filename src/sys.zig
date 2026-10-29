@@ -698,18 +698,23 @@ pub fn makeDir(io: Io, dir: Handle, name: []const u8) MakeDirError!void {
     };
 }
 
-pub const SymLinkError = Io.Dir.SymLinkError || error{OperationUnsupported};
+pub const SymLinkError = Io.Dir.SymLinkError;
+
+/// What a Windows link points at, which its reparse point records: a
+/// directory link is entered, a file link opened. POSIX links have no kind.
+pub const LinkKind = enum { file, directory };
 
 fn symlinkatRaw(target: [*:0]const u8, dir: posix.fd_t, path: [*:0]const u8) if (is_linux) usize else c_int {
     if (is_linux) return linux.symlinkat(target, dir, path);
     return std.c.symlinkat(target, dir, path);
 }
 
-/// `symlinkat(target, dir, name)`. Windows: `error.OperationUnsupported`,
-/// since creating a symbolic link there needs a privilege or developer
-/// mode.
-pub fn symLink(io: Io, target: []const u8, dir: Handle, name: []const u8) SymLinkError!void {
-    if (is_windows) return error.OperationUnsupported;
+/// `symlinkat(target, dir, name)`. Windows: a symbolic link reparse point
+/// of `kind` (std's `Dir.symLink`), which needs the right to create
+/// symbolic links (`SeCreateSymbolicLinkPrivilege`): without it,
+/// `error.PermissionDenied`.
+pub fn symLink(io: Io, target: []const u8, dir: Handle, name: []const u8, kind: LinkKind) SymLinkError!void {
+    if (is_windows) return symLinkWindows(io, target, dir, name, kind);
     const target_z = try posix.toPosixPath(target);
     const path = try posix.toPosixPath(name);
     const e = switch (try retrying(io, .symlink, name, symlinkatRaw, .{ &target_z, dir, &path })) {
@@ -1496,6 +1501,29 @@ pub fn openDirWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, flush_
         .DELETE_PENDING => error.AccessDenied,
         else => if (isDeviceFailureNt(status)) error.InputOutput else windows.unexpectedStatus(status),
     };
+}
+
+fn symLinkWindows(io: Io, target: []const u8, root: windows.HANDLE, name: []const u8, kind: LinkKind) SymLinkError!void {
+    const flags: Io.Dir.SymLinkFlags = .{ .is_directory = kind == .directory };
+    while (true) {
+        try io.checkCancel();
+        const status: Code = switch (try decide(io, .symlink, name)) {
+            .system => return dirOf(root).symLink(io, target, name, flags),
+            .route => |route| return dirOf(root).symLink(route.io, target, name, flags),
+            .code => |c| c,
+        };
+        return switch (status) {
+            .CANCELLED => continue,
+            .OBJECT_NAME_COLLISION => error.PathAlreadyExists,
+            .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => error.FileNotFound,
+            .PRIVILEGE_NOT_HELD => error.PermissionDenied,
+            .ACCESS_DENIED => error.AccessDenied,
+            .DISK_FULL => error.NoSpaceLeft,
+            .MEDIA_WRITE_PROTECTED => error.ReadOnlyFileSystem,
+            .INVALID_DEVICE_REQUEST => error.FileSystem,
+            else => if (isDeviceFailureNt(status)) error.FileSystem else windows.unexpectedStatus(status),
+        };
+    }
 }
 
 fn makeDirWindows(io: Io, root: windows.HANDLE, name: []const u8) MakeDirError!void {

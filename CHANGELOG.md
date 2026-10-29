@@ -12,6 +12,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `Batch` add takes a slot it is given room for: `addFile`, `addPath`, `addPending`, `addDir`, `addDirPath` and `fence` return nothing, an add past the slots stops the program in every build, and `room()` says how many are left. `AddError` is gone, and so is `BatchFull` from `Batch.Error` (`commit`'s and `commitOrRefuse`'s sets), where no commit could raise it. Every caller sizes its own slots: one that fills a batch commits it when `room()` is 0. (relic's `fs.syncAll`, which held each add and the commit's `BatchFull` `unreachable`; chronicle's backup, which checked its count and carried `BatchFull` in its error set.)
 - On aegis 0.3.0, which has one way to lend (`borrow`): `Pending.file()` and `Lock.file()` return the `std.Io.File`, lent by value, where they returned `aegis.own.Lent(Io.File)`. The pending (or the lock) still closes it; glint's lending rule keeps a holder from closing it. Migration: drop `.get()`.
 
+- `SymLinkError` loses `OperationUnsupported`: Windows makes symbolic links.
+
 ### Added
 
 - `lock` (`Lock`, `LockOptions`, `LockError`): git's lock-file protocol, from `lockfile.c`.
@@ -24,6 +26,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The copy is synced at its level, renamed over the destination and its directory synced, as `commit` does, so nothing is under the name until the whole copy is.
   - `clone = .always` is `error.CloneUnsupported` with nothing published, and `.never` copies the bytes. `Copied.by` says which happened.
   - The copy takes the source's permissions, or those asked. Windows copies; its block cloning is not yet asked for.
+- `symLink` and `symLinkOrRefuse` on Windows, where they were `error.OperationUnsupported`: a symbolic link reparse point (std's `Dir.symLink`), renamed by handle over the name without following it, synced as on the other platforms. It needs the right to create symbolic links (`error.PermissionDenied` without it). Windows records whether a link points at a directory: `SymLinkOptions.target_kind` is `.detect` (the target, from the link's directory, as libarchive asks it: a directory makes a directory link, anything else or nothing a file link), `.file` or `.directory`.
 - `Temp.suffix`: the destination's name with a suffix, such as `.lock`, held inline (a name as long as the platform allows).
 
 ### Fixed

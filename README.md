@@ -235,9 +235,10 @@ fallbacks and fences, goes through it.
 ## Platforms
 
 Linux, macOS and Windows are tested in CI. The BSDs compile and use plain
-`fsync` for every level; their rows are not verified. `symLink` returns
-`error.OperationUnsupported` on Windows, where creating a symbolic link needs a
-privilege or developer mode. On macOS, what APFS does
+`fsync` for every level; their rows are not verified. On Windows `symLink`
+needs the right to create symbolic links (`error.PermissionDenied` without
+it), and makes a directory link where its target is a directory
+(`SymLinkOptions.target_kind`). On macOS, what APFS does
 with `F_BARRIERFSYNC` on a third-party drive without barrier support is not
 documented; `barrier = false` makes every replace two full flushes. macOS and
 Windows have no block-level crash replay, so their tables rest on the man

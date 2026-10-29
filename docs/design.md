@@ -154,7 +154,6 @@ its fast/merge/release matrices. Ordinary CI still compiles and smoke-runs only.
 These are **indicative hosted-runner numbers, not a target check**. Shared CPU,
 virtual storage and load vary; this manual job has no timing thresholds and
 cannot establish an idle-hardware durability or throughput target. The Windows
-symlink timing/count rows explicitly report `skipped`: the public operation
-returns `OperationUnsupported`. The macOS strategy program emits no rows on
+symlink rows run where the runner may create symbolic links. The macOS strategy program emits no rows on
 Windows because its strategies require Darwin primitives. Raw primitive
 refusals remain refusal records, without fabricated latencies.

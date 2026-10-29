@@ -243,23 +243,52 @@ test "symLink swaps a link in one rename, and syncs the link before its name" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    if (is_windows) {
-        try testing.expectError(error.OperationUnsupported, airlock.symLink(testing.io, s.dir(), "release-1", "current", .{}));
-        return;
-    }
     try s.write("release-1", "1");
     try s.write("release-2", "2");
     const h = try Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
-    try testing.expect((try airlock.symLink(io, s.dir(), "release-1", "current", .{})).atLeast(.data));
-    try expectCalls(h, &.{ .symlink, .sync_dir, .rename, .sync_dir });
-    h.reset();
-    _ = try airlock.symLink(io, s.dir(), "release-2", "current", .{ .sync = .{ .level = .ordered } });
-    try expectCalls(h, &.{ .symlink, .sync_dir, .rename });
+    if (is_windows) {
+        // A link reparse point, its directory synced, renamed by handle over
+        // the name, the directory synced again.
+        _ = try airlock.symLink(io, s.dir(), "release-1", "current", .{});
+        try testing.expectEqual(@as(u32, 1), h.count(.symlink));
+        try testing.expectEqual(@as(u32, 1), h.count(.win_rename_ex));
+        try testing.expectEqual(@as(u32, 2), h.count(.sync_dir));
+        _ = try airlock.symLink(io, s.dir(), "release-2", "current", .{ .sync = .{ .level = .ordered } });
+    } else {
+        try testing.expect((try airlock.symLink(io, s.dir(), "release-1", "current", .{})).atLeast(.data));
+        try expectCalls(h, &.{ .symlink, .sync_dir, .rename, .sync_dir });
+        h.reset();
+        _ = try airlock.symLink(io, s.dir(), "release-2", "current", .{ .sync = .{ .level = .ordered } });
+        try expectCalls(h, &.{ .symlink, .sync_dir, .rename });
+    }
     var buffer: [64]u8 = undefined;
     try testing.expectEqualStrings("release-2", buffer[0..try s.dir().readLink(testing.io, "current", &buffer)]);
     try testing.expectEqualStrings("2", s.read("current", &buffer).?);
+    try testing.expectEqual(@as(usize, 0), (try s.entries(".")).prefixed);
+}
+
+test "on Windows a link to a directory is a directory link, entered, and any other a file link" {
+    if (!is_windows) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const io = testing.io;
+    try s.dir().createDirPath(io, "dir");
+    try s.write("dir/f", "in");
+    try s.write("file", "out");
+    _ = try airlock.symLink(io, s.dir(), "dir", "to-dir", .{});
+    _ = try airlock.symLink(io, s.dir(), "file", "to-file", .{});
+    _ = try airlock.symLink(io, s.dir(), "missing", "dangling", .{});
+    // A directory link for a target that comes later, as asked.
+    _ = try airlock.symLink(io, s.dir(), "later", "to-later", .{ .target_kind = .directory });
+    try s.dir().createDirPath(io, "later");
+    try s.write("later/g", "late");
+    var buffer: [64]u8 = undefined;
+    try testing.expectEqualStrings("in", s.read("to-dir/f", &buffer).?);
+    try testing.expectEqualStrings("out", s.read("to-file", &buffer).?);
+    try testing.expectEqualStrings("late", s.read("to-later/g", &buffer).?);
+    try testing.expectEqualStrings("missing", buffer[0..try s.dir().readLink(io, "dangling", &buffer)]);
     try testing.expectEqual(@as(usize, 0), (try s.entries(".")).prefixed);
 }
 
