@@ -277,3 +277,78 @@ test "a retry waits with doubling, jittered sleeps on the clock until its deadli
     try testing.expectEqual(@as(u64, retry.tries - 1), sleeps);
     try testing.expectEqual(@as(i96, std.time.ns_per_s + 2 * std.time.ns_per_s), h.clock.?.read(.awake).nanoseconds);
 }
+
+/// A file of two pages mapped for writing, "x" at an offset in its second.
+fn mappedFile(s: *harness.Scratch) !struct { file: Io.File, map: Io.File.MemoryMap } {
+    const io = testing.io;
+    const len = 2 * std.heap.pageSize();
+    const file = try s.dir().createFile(io, "mapped", .{ .read = true, .truncate = true });
+    errdefer file.close(io);
+    try file.setLength(io, len);
+    const map = try file.createMemoryMap(io, .{ .len = len });
+    return .{ .file = file, .map = map };
+}
+
+test "a mapped range is written back, then synced as its file at each level" {
+    if (builtin.os.tag != .linux and !is_darwin and !is_windows) return error.SkipZigTest;
+    const io = testing.io;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    var m = try mappedFile(&s);
+    defer m.file.close(io);
+    defer m.map.destroy(io);
+    // Past the first page, across none of its own.
+    const at = std.heap.pageSize() + 100;
+    inline for ([_]airlock.Level{ .none, .ordered, .data, .full }) |level| {
+        @memcpy(m.map.memory[at..][0..5], @tagName(level)[0..4] ++ "!");
+        const h = try Seam.create(testing.allocator, io, .{});
+        defer h.destroy();
+        const reached = try airlock.syncMapped(h.io(), &m.map, m.map.memory[at..][0..5], .{ .level = level });
+        try testing.expect(reached.atLeast(level));
+        const expected: []const Call = switch (level) {
+            .none => &.{},
+            .ordered => if (is_darwin) &.{ .write_mapped, .sync_barrier } else if (is_linux) &.{.write_mapped} else &.{ .write_mapped, .sync_data },
+            .data => if (is_darwin) &.{ .write_mapped, .sync_full } else if (is_linux) &.{.write_mapped} else &.{ .write_mapped, .sync_data },
+            .full => &.{ .write_mapped, .sync_full },
+        };
+        try expectCalls(h, expected);
+        if (level != .none) {
+            // The file holds what was written through the map.
+            var buffer: [5]u8 = undefined;
+            try testing.expectEqual(@as(usize, 5), try m.file.readPositionalAll(io, &buffer, at));
+            try testing.expectEqualStrings(@tagName(level)[0..4] ++ "!", &buffer);
+        }
+    }
+}
+
+test "a failed writeback of a mapped range is returned, and no sync follows it" {
+    if (builtin.os.tag != .linux and !is_darwin and !is_windows) return error.SkipZigTest;
+    const io = testing.io;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    var m = try mappedFile(&s);
+    defer m.file.close(io);
+    defer m.map.destroy(io);
+    const h = try Seam.create(testing.allocator, io, .{ .plan = &.{seam.always(.write_mapped, io_error)} });
+    defer h.destroy();
+    m.map.memory[0] = 'y';
+    try testing.expectError(error.InputOutput, airlock.syncMapped(h.io(), &m.map, m.map.memory[0..1], .{}));
+    try expectCalls(h, &.{.write_mapped});
+}
+
+test "a map std made as a buffer is written back positionally, then synced" {
+    const io = testing.io;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const file = try scratchFile(&s);
+    defer file.close(io);
+    var memory: [8]u8 align(std.heap.page_size_min) = "contents".*;
+    const map: Io.File.MemoryMap = .{ .file = file, .offset = 0, .memory = &memory, .section = null };
+    memory[0..3].* = "CON".*;
+    const h = try Seam.create(testing.allocator, io, .{});
+    defer h.destroy();
+    try testing.expect((try airlock.syncMapped(h.io(), &map, memory[0..3], .{})).atLeast(.data));
+    try testing.expectEqual(@as(u32, 0), h.count(.write_mapped));
+    var buffer: [8]u8 = undefined;
+    try testing.expectEqualStrings("CONtents", s.read("data", &buffer).?);
+}

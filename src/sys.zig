@@ -2159,6 +2159,55 @@ pub fn cloneAt(io: Io, src: Handle, dir: Handle, name: []const u8) CloneError!Cl
     return cloneOutcome(e);
 }
 
+fn msyncRaw(address: [*]const u8, len: usize) if (is_linux) usize else c_int {
+    if (is_linux) return linux.msync(address, len, linux.MSF.SYNC);
+    return std.c.msync(@ptrCast(@alignCast(address)), len, std.c.MSF.SYNC); // aegis: boundary: msync takes a page-aligned address, and writeMapped is handed whole pages
+}
+
+fn ntFlushVirtual(address: [*]const u8, len: usize) windows.NTSTATUS {
+    var base: ?*anyopaque = @constCast(address); // aegis: boundary: NtFlushVirtualMemory takes the base as an in-out pointer and writes back only the page it rounded to; the memory is read, never written
+    var size = len;
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    return NtFlushVirtualMemory(windows.GetCurrentProcess(), &base, &size, &iosb);
+}
+
+// aegis: boundary: ntdll's NtFlushVirtualMemory, which kernel32's FlushViewOfFile calls, declared as ntdll exports it, called only from this file
+extern "ntdll" fn NtFlushVirtualMemory(
+    ProcessHandle: windows.HANDLE,
+    BaseAddress: *?*anyopaque,
+    RegionSize: *usize,
+    IoStatusBlock: *windows.IO_STATUS_BLOCK,
+) callconv(.winapi) windows.NTSTATUS;
+
+/// Writes the mapped pages of `memory` (page-aligned, inside one mapping)
+/// back to their file: `msync(MS_SYNC)`, which on Linux is the data sync of
+/// the range and elsewhere puts the pages in the file; Windows
+/// `NtFlushVirtualMemory`, which starts their write and waits for no
+/// device. Never retried after a failure, as no sync is.
+pub fn writeMapped(io: Io, blocking: ?*Blocking, memory: []const u8, path: ?[]const u8) Io.File.SyncError!void {
+    if (memory.len == 0) return;
+    const f = if (is_windows) ntFlushVirtual else msyncRaw;
+    const code = while (true) {
+        try io.checkCancel();
+        const c = switch (try decide(io, .write_mapped, path)) {
+            .system => try syncCall(io, blocking, f, .{ memory.ptr, memory.len }),
+            .code => |c| c,
+            // A simulated disk maps nothing: the file's sync carries the bytes.
+            .route => return,
+        };
+        if (c != interrupted) break c;
+    };
+    if (is_windows) return switch (code) {
+        // FlushViewOfFile's own reading: nothing of the range was dirty.
+        .SUCCESS, .NOT_MAPPED_DATA => {},
+        else => ntSyncFailure(code),
+    };
+    return switch (code) {
+        .SUCCESS => {},
+        else => syncFailure(code),
+    };
+}
+
 const clone_nofollow: u32 = 0x0001;
 const clone_noownercopy: u32 = 0x0002;
 

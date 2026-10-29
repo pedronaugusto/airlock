@@ -75,6 +75,10 @@ pub const Call = enum(u8) {
     /// A copy-on-write clone: Linux `FICLONE` into the temp, Darwin
     /// `fclonefileat` under a temp's name.
     clone,
+    /// A mapped range written back to its file: `msync(MS_SYNC)`, on Linux
+    /// the data sync of the range; Windows `NtFlushVirtualMemory`, what
+    /// `FlushViewOfFile` makes.
+    write_mapped,
 };
 
 /// An errno on POSIX, an NTSTATUS on Windows.

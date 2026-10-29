@@ -200,6 +200,30 @@ pub fn syncFile(io: Io, file: Io.File, options: SyncOptions) Io.File.SyncError!R
     return syncChain(io, options.blocking, file.handle, options.level, options.barrier, null);
 }
 
+pub const MappedSyncError = Io.File.SyncError || Io.File.WritePositionalError;
+
+/// Makes `bytes`, a range of `map`'s memory written through the mapping,
+/// durable at `options.level`: its pages written back to the file (from the
+/// one `bytes` starts in), then the file synced through the fallback chain,
+/// as `syncFile` syncs it. On Linux the writeback is itself the data sync of
+/// the range, so up to `data` it is the only call. A map std made as a
+/// buffer is written back positionally. Says nothing about the file's name.
+pub fn syncMapped(io: Io, map: *const Io.File.MemoryMap, bytes: []const u8, options: SyncOptions) MappedSyncError!Reached {
+    const base = @intFromPtr(map.memory.ptr);
+    const at = @intFromPtr(bytes.ptr);
+    aegis.assert.invariant(at >= base and at - base + bytes.len <= map.memory.len, "airlock.syncMapped: bytes lie inside the map's memory");
+    if (options.level == .none) return .none;
+    const start = at - base;
+    if (map.section == null) {
+        try map.file.writePositionalAll(io, bytes, map.offset + start);
+    } else {
+        const first = std.mem.alignBackward(usize, start, std.heap.pageSize());
+        try sys.writeMapped(io, options.blocking, map.memory[first .. start + bytes.len], null);
+        if (os == .linux and options.level != .full) return .data;
+    }
+    return syncChain(io, options.blocking, map.file.handle, options.level, options.barrier, null);
+}
+
 pub const DirSyncError = Io.File.SyncError || sys.OpenDirError;
 
 /// What a directory sync came to: what it reached, and whether the

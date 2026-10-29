@@ -24,7 +24,7 @@ const is_linux = os == .linux;
 const is_darwin = os.isDarwin();
 const is_tested_os = is_linux or is_darwin or is_windows;
 
-const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs, sym_link, make_path, copy, lock };
+const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, sync_mapped, rename, remove, batch, batch_two_dirs, sym_link, make_path, copy, lock };
 
 /// The error classes tried at each of airlock's calls: a refusal where the
 /// call has one, a failure, a full disk, an interruption, a cancel, and on
@@ -128,6 +128,14 @@ pub const Operation = struct {
                 try file.writePositionalAll(io, "new", 0);
                 s.reached = try airlock.syncFile(io, file, .{});
             },
+            .sync_mapped => {
+                const file = try dir.openFile(testing.io, "a", .{ .mode = .read_write });
+                defer file.close(testing.io);
+                var map = try file.createMemoryMap(testing.io, .{ .len = 3 });
+                defer map.destroy(testing.io);
+                @memcpy(map.memory[0..3], "new");
+                s.reached = try airlock.syncMapped(io, &map, map.memory[0..3], .{});
+            },
             .rename => s.reached = try airlock.rename(io, dir, "src", dir, "b", .{}),
             .remove => s.reached = try airlock.remove(io, dir, "a", .{}),
             .sym_link => s.reached = try airlock.symLink(io, dir, "new-target", "a", .{}),
@@ -191,7 +199,7 @@ pub const Operation = struct {
             const got = s.scratch.read(d, &buffer);
             switch (s.kind) {
                 // An in-place write is the caller's; only the sync is airlock's.
-                .sync_file => if (err == null) try testing.expectEqualStrings("new", got.?),
+                .sync_file, .sync_mapped => if (err == null) try testing.expectEqualStrings("new", got.?),
                 // Directories: all of them once it succeeded; any prefix of
                 // them if it failed.
                 .make_path => if (err == null) (try s.scratch.dir().openDir(testing.io, "sub/x/y", .{})).close(testing.io),
@@ -264,7 +272,7 @@ pub const Operation = struct {
     fn checkModel(s: *Operation, err: ?anyerror) !void {
         // A clone writes the copy's temp in one call the model does not
         // replay as a write: never torn is checked above, at every fault.
-        if (s.kind == .batch_two_dirs or s.kind == .rename or s.kind == .remove or s.kind == .sync_file or s.kind == .make_path or s.kind == .copy) return;
+        if (s.kind == .batch_two_dirs or s.kind == .rename or s.kind == .remove or s.kind == .sync_file or s.kind == .sync_mapped or s.kind == .make_path or s.kind == .copy) return;
         var m: model_mod.Model = .init(model_mod.native());
         // The batch's fence comes after its first two renames.
         if (s.kind == .batch) m.fenceAt(2);
@@ -327,6 +335,10 @@ test "every fault: keep_existing" {
 
 test "every fault: syncFile" {
     try everyFault(.sync_file);
+}
+
+test "every fault: syncMapped" {
+    try everyFault(.sync_mapped);
 }
 
 test "every fault: rename" {

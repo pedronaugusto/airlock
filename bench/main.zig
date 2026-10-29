@@ -44,6 +44,9 @@ const Context = struct {
     pendings: []airlock.Pending,
     slots: []airlock.Batch.Slot,
     files: []Io.File,
+    /// The probe file mapped, for the mapped rows: made at a row's first
+    /// operation, gone with the row.
+    map: ?Io.File.MemoryMap = null,
 };
 
 const Op = *const fn (ctx: *Context, row: *const Row, i: u64) anyerror!void;
@@ -81,7 +84,7 @@ const hook_rows = [_]Row{
     .{ .name = "hook/batch-100/offloaded", .ops = 5, .op = batch, .n = 100, .renames = false, .include_dir = true, .parallel = 16, .offload = true },
 };
 
-const rows = hook_rows ++ probe_rows ++ replace_rows ++ batch_rows ++ op_rows ++ ab_rows;
+const rows = hook_rows ++ probe_rows ++ replace_rows ++ mapped_rows ++ batch_rows ++ op_rows ++ ab_rows;
 
 const primitive_rows = if (builtin.os.tag == .windows) [_]Row{
     .{ .name = "probe/raw/nt-full", .ops = 1000, .op = probeRaw, .primitive = .nt_full },
@@ -120,6 +123,23 @@ const replace_rows = blk: {
                     .overwrite = overwrite,
                 }};
             }
+        }
+    }
+    break :blk out[0..out.len].*;
+};
+
+/// A dirty range of a mapped file made durable: 4 KiB and 1 MiB, at each level.
+const mapped_rows = blk: {
+    var out: []const Row = &.{};
+    for ([_]airlock.Level{ .ordered, .data, .full }) |level| {
+        for ([_]usize{ 4096, 1 << 20 }) |size| {
+            out = out ++ [_]Row{.{
+                .name = "mapped/" ++ @tagName(level) ++ (if (size == 4096) "/4k" else "/1m"),
+                .ops = if (size == 4096) 200 else 50,
+                .op = mappedRow,
+                .level = level,
+                .size = size,
+            }};
         }
     }
     break :blk out[0..out.len].*;
@@ -242,6 +262,10 @@ pub fn main(init: std.process.Init) !void {
         defer ctx.dir.close(io);
         ctx.file = try ctx.dir.createFile(io, "probe", .{ .read = true });
         defer ctx.file.close(io);
+        defer if (ctx.map) |*m| {
+            m.destroy(io);
+            ctx.map = null;
+        };
         if (row.overwrite) try ctx.dir.writeFile(io, .{ .sub_path = "replaced", .data = ctx.big[0..row.size] });
         const samples = try gpa.alloc(u64, row.ops);
         defer gpa.free(samples);
@@ -412,9 +436,21 @@ fn makePathRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
 
 /// A link swapped between two targets (not on Windows, where airlock
 /// makes no links).
+/// The probe file's first `row.size` bytes, mapped once a row, dirtied and
+/// made durable at the row's level.
+fn mappedRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
+    if (ctx.map == null) {
+        try ctx.file.setLength(ctx.io, row.size);
+        ctx.map = try ctx.file.createMemoryMap(ctx.io, .{ .len = row.size });
+    }
+    const map = &ctx.map.?;
+    // A byte pattern from the counter: its low bits are the point.
+    @memset(map.memory[0..row.size], @truncate(i));
+    _ = try airlock.syncMapped(ctx.io, map, map.memory[0..row.size], .{ .level = row.level });
+}
+
 fn symLinkRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     _ = row;
-    if (builtin.target.os.tag == .windows) return;
     _ = try airlock.symLink(ctx.io, ctx.dir, if (i % 2 == 0) "release-a" else "release-b", "current", .{});
 }
 

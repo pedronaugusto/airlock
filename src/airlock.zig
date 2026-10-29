@@ -23,6 +23,11 @@ pub const SyncOptions = level.SyncOptions;
 
 /// Syncs an open file at a level and reports what was reached.
 pub const syncFile = platform.syncFile;
+/// Makes a range written through a file's mapping (std's `MemoryMap`)
+/// durable at a level, and reports what was reached.
+pub const syncMapped = platform.syncMapped;
+/// What `syncMapped` can fail with.
+pub const MappedSyncError = platform.MappedSyncError;
 /// `std.Io.File.SyncError` plus the errors of reopening a directory for
 /// its sync.
 pub const DirSyncError = platform.DirSyncError;

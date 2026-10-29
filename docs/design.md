@@ -89,7 +89,8 @@ measurements. The manual Windows interface below runs separately from those chec
 
 Rows cover raw primitives; syncs at each level; new and overwrite publishes
 at 4 KiB and 1 MiB; batches of 1, 10, 100 and 1000 files at 4 and 64 KiB,
-with renames, writing handles and paths; Linux parallelism 1, 4, 16 and 64;
+with renames, writing handles and paths; a mapped file's dirty 4 KiB and
+1 MiB at each level; Linux parallelism 1, 4, 16 and 64;
 name operations; append and migration baselines; and inline versus an
 application-supplied Threaded executor. macOS uses p1 and p16; both Linux data syncs and macOS writeouts now honor
 `parallel`.

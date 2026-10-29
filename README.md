@@ -1,7 +1,8 @@
 # airlock
 
-airlock makes files durable in Zig. It syncs a file or a directory at a level
-you choose and tells you what was reached, publishes a file atomically (replace,
+airlock makes files durable in Zig. It syncs a file, a directory or a range
+written through a file's mapping at a level you choose and tells you what was
+reached, publishes a file atomically (replace,
 create or keep) and a symbolic link too, creates directories durably, puts many
 files under the fewest barriers, removes the temps a crash left behind,
 tells files apart by identity rather than by path, stats a path whole and says
@@ -88,6 +89,13 @@ The calls per level and platform:
 | `data`, file | `fdatasync` | `F_FULLFSYNC` | `DATA_SYNC_ONLY` |
 | `full`, file | `fsync` | `F_FULLFSYNC` | `NtFlushBuffersFile` |
 | `data`, directory | `fsync` | `F_FULLFSYNC` | reopened with `FILE_ADD_FILE`, `NtFlushBuffersFile` |
+| `data`, mapped range | `msync(MS_SYNC)` | `msync(MS_SYNC)`, `F_FULLFSYNC` | `NtFlushVirtualMemory` (`FlushViewOfFile`), `DATA_SYNC_ONLY` |
+
+`syncMapped(io, map, bytes, options)` takes std's `Io.File.MemoryMap` and a
+range of its memory: the range's pages are written back to the file, then the
+file is synced at the level as `syncFile` syncs it. On Linux `msync(MS_SYNC)` is
+itself the data sync of the range; std's own `MemoryMap.write` syncs nothing of
+a real mapping.
 
 [src/platform.zig](src/platform.zig) holds the full table, the fallback
 chains and what each one reports. `Reached.expected(level)` gives what this
