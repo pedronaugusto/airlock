@@ -1223,9 +1223,13 @@ const MountKey = union(enum) {
 };
 
 /// The type `/proc/self/mountinfo` gives the mount `key` finds, or nothing
-/// when the table cannot be read or does not list it.
-fn linuxMountType(io: Io, key: MountKey, out: *VolumeInfo) void {
-    const file = Io.Dir.openFileAbsolute(io, "/proc/self/mountinfo", .{}) catch return;
+/// when the table cannot be read or does not list it. A cancel while it is
+/// opened or read is `error.Canceled`.
+fn linuxMountType(io: Io, key: MountKey, out: *VolumeInfo) Io.Cancelable!void {
+    const file = Io.Dir.openFileAbsolute(io, "/proc/self/mountinfo", .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var reader = file.readerStreaming(io, &buffer);
@@ -1234,10 +1238,10 @@ fn linuxMountType(io: Io, key: MountKey, out: *VolumeInfo) void {
         // passed over; its mount is not the one.
         const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
             error.StreamTooLong => {
-                _ = reader.interface.discardDelimiterInclusive('\n') catch return;
+                _ = reader.interface.discardDelimiterInclusive('\n') catch return canceled(&reader);
                 continue;
             },
-            else => return,
+            else => return canceled(&reader),
         };
         // `id parent major:minor root point options [tags] - type source super`
         var fields = std.mem.tokenizeScalar(u8, std.mem.trimEnd(u8, line, "\n"), ' ');
@@ -1261,6 +1265,12 @@ fn linuxMountType(io: Io, key: MountKey, out: *VolumeInfo) void {
     }
 }
 
+/// What a mount table read that failed hands back: the cancel, where the
+/// reader's failure was one; nothing otherwise, the table being unreadable.
+fn canceled(reader: *const Io.File.Reader) Io.Cancelable!void {
+    if (reader.err) |err| if (err == error.Canceled) return error.Canceled;
+}
+
 /// What the volume `dir` is on is: whether it is remote and its file
 /// system's type name.
 pub fn volumeOf(io: Io, dir: Handle) VolumeError!VolumeInfo {
@@ -1279,7 +1289,7 @@ pub fn volumeOf(io: Io, dir: Handle) VolumeError!VolumeInfo {
             info.setName(r.name);
         };
         var mount = std.mem.zeroes(linux.Statx);
-        if (linux.errno(statxMountRaw(dir, &mount)) == .SUCCESS) linuxMountType(io, if (mount.mask.MNT_ID and mount.mnt_id != 0)
+        if (linux.errno(statxMountRaw(dir, &mount)) == .SUCCESS) try linuxMountType(io, if (mount.mask.MNT_ID and mount.mnt_id != 0)
             .{ .id = mount.mnt_id }
         else
             .{ .device = .{ .major = mount.dev_major, .minor = mount.dev_minor } }, &info);

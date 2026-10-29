@@ -46,6 +46,19 @@ test "the volume a temporary directory is on is local and named" {
     try std.testing.expect(v.name().len != 0);
 }
 
+test "a cancel while the mount table is read comes back as error.Canceled" {
+    // Linux names a volume from /proc/self/mountinfo, read through the `Io`.
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+    const io = std.testing.io;
+    const testing = @import("airlock.testing");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const s = try testing.Seam.create(std.testing.allocator, io, .{});
+    defer s.destroy();
+    try s.fio.setPlan(&.{.{ .at = .{ .nth = .{ .call = .file_read_streaming, .n = 1 } }, .fault = .{ .fail = error.Canceled } }});
+    try std.testing.expectError(error.Canceled, of(s.io(), tmp.dir));
+}
+
 test "a volume query is a raw call a seam decides" {
     const io = std.testing.io;
     const testing = @import("airlock.testing");
