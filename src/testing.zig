@@ -104,7 +104,8 @@ pub const Seam = struct {
     counters: [16]u32 = undefined,
     fired: [32]Plan.Fired = undefined,
     /// Raw calls run on several tasks at once (a batch's concurrent
-    /// syncs); the plan is decided under this.
+    /// syncs); the plan is decided, and the descriptor peak kept, under
+    /// this.
     mutex: std.atomic.Mutex = .unlocked,
     hook: seam.Hook,
     hooked: Hooked,
@@ -244,12 +245,24 @@ pub const Seam = struct {
         }
     }
 
+    /// Whether the descriptor peak is kept (`Options.sample_descriptors`).
+    fn sampling(s: *Seam) bool {
+        while (!s.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer s.mutex.unlock();
+        return s.peak_descriptors != null;
+    }
+
     /// Each raw call is a foreign step of the `FaultIo`: a fault the
     /// `FaultIo`'s own plan puts there (an `everyFault` run) wins, and the
     /// seam's plan decides the rest.
     fn decide(ctx: *anyopaque, call: Call, path: ?[]const u8) ?Result {
         const s: *Seam = @ptrCast(@alignCast(ctx)); // safe: `over` makes the hook with its own seam as ctx
-        if (s.peak_descriptors) |peak| s.peak_descriptors = @max(peak, openDescriptors());
+        if (s.sampling()) {
+            const open = openDescriptors();
+            while (!s.mutex.tryLock()) std.atomic.spinLoopHint();
+            defer s.mutex.unlock();
+            if (s.peak_descriptors) |peak| s.peak_descriptors = @max(peak, open);
+        }
         if (s.gate) |gate| if (gate.call == call and std.mem.endsWith(u8, path orelse "", gate.suffix) and !s.gate_taken.swap(true, .acq_rel)) {
             gate.reached.set(s.hook.base);
             gate.release.wait(s.hook.base) catch return .canceled;
