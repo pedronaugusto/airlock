@@ -146,17 +146,67 @@ pub fn writeFileOrRefuse(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []con
     return p.commitOrRefuse(io, options.commit);
 }
 
+/// Whether a copy is a copy-on-write clone of its source.
+pub const Clone = enum {
+    /// A clone where the filesystem makes one, else a copy.
+    auto,
+    /// A clone, or `error.CloneUnsupported` with nothing written.
+    always,
+    /// A copy of the bytes.
+    never,
+};
+
+/// How a copy came to be: a clone shares the source's blocks until either
+/// is written; a copy went through std's file writer, which copies in the
+/// kernel where it can (`copy_file_range`, `fcopyfile`).
+pub const By = enum { clone, copy };
+
+/// How `copyFrom` fills a pending.
+pub const CopyFromOptions = struct {
+    clone: Clone = .auto,
+    /// Only the source's first `limit` bytes, which is always a copy: a
+    /// clone takes the whole file as it is at that moment, and a writer
+    /// may still be appending to it. `clone = .always` with a limit stops
+    /// the program.
+    limit: ?u64 = null,
+};
+
+pub const CopyFromError = sys.CloneError || sys.RenameError || sys.SetModeError || Io.File.StatError || Io.File.Reader.Error || Io.File.Writer.Error || error{
+    /// `clone = .always` where the filesystem cannot clone this file into
+    /// this temp. Nothing was written.
+    CloneUnsupported,
+    /// The source ended before `limit`.
+    EndOfStream,
+};
+
+/// Fills the open, unwritten temp from `src`, from its start: a clone of
+/// it where the filesystem makes one, else a copy of its bytes. The temp
+/// keeps the permissions `create` gave it. The pending is then committed,
+/// or added to a `Batch`, as any other; a failure leaves it a temp for
+/// `discard`. On Darwin a clone needs a random temp (`Temp.random`, the
+/// default); an exact temp is copied. A temp written in place is copied.
+pub fn copyFrom(p: *Pending, io: Io, src: Io.File, options: CopyFromOptions) CopyFromError!By {
+    assert.invariant(options.limit == null or options.clone != .always, "Pending.copyFrom: a limit is a copy, never a clone");
+    assert.invariant(p.staged.state == .open, "Pending.copyFrom: the temp is no longer open for writing");
+    const tried = options.clone != .never and options.limit == null and p.staged.canClone();
+    if (tried and try p.staged.cloneFrom(io, src.handle) == .cloned) return .clone;
+    if (options.clone == .always) return error.CloneUnsupported;
+    var reader = src.reader(io, &.{});
+    var buffer: [16 * 1024]u8 = undefined;
+    var out = p.file().writer(io, &buffer);
+    const limit: Io.Limit = if (options.limit) |n| .limited64(n) else .unlimited;
+    const sent = out.interface.sendFileAll(&reader, limit) catch |err| return switch (err) {
+        error.ReadFailed => reader.err.?,
+        error.WriteFailed => out.err.?,
+    };
+    out.interface.flush() catch return out.err.?;
+    if (options.limit) |n| if (sent != n) return error.EndOfStream;
+    return .copy;
+}
+
 /// How a durable copy is made.
 pub const CopyOptions = struct {
-    /// Whether the copy is a copy-on-write clone of the source.
-    clone: enum {
-        /// A clone where the filesystem makes one, else a copy.
-        auto,
-        /// A clone, or `error.CloneUnsupported` with nothing published.
-        always,
-        /// A copy of the bytes.
-        never,
-    } = .auto,
+    clone: Clone = .auto,
     /// The copy's permissions: the source's, or these.
     mode: union(enum) { source, exact: Io.File.Permissions } = .source,
     /// The random temp's prefix, as `Temp.random` takes it.
@@ -167,24 +217,18 @@ pub const CopyOptions = struct {
 /// What a copy came to.
 pub const Copied = struct {
     committed: Committed,
-    /// A clone shares the source's blocks until either is written; a copy
-    /// went through std's file writer, which copies in the kernel where it
-    /// can (`copy_file_range`, `fcopyfile`).
-    by: enum { clone, copy },
+    by: By,
 };
 
-pub const CopyError = CreateError || CommitError || sys.CloneError || sys.RenameError || Io.File.OpenError || Io.File.StatError || Io.File.Reader.Error || Io.File.Writer.Error || error{
-    /// `CopyOptions.clone = .always` on a filesystem that cannot clone this
-    /// file there. Nothing was published.
-    CloneUnsupported,
-};
+pub const CopyError = CreateError || CommitError || CopyFromError || Io.File.OpenError;
 
 /// A durable copy of `src_path` in `src_dir` at `dst_path` in `dst_dir`: a
-/// temp next to the destination, a clone of the source or a copy of its
-/// bytes, synced at `options.commit.level`, renamed over the destination
-/// and its directory synced, as `commit` does. A clone's metadata still
-/// takes the sync its level asks. Nothing is under the destination's name
-/// until the whole copy is.
+/// temp next to the destination, filled by `copyFrom`, synced at
+/// `options.commit.level`, renamed over the destination and its directory
+/// synced, as `commit` does. A clone's metadata still takes the sync its
+/// level asks. Nothing is under the destination's name until the whole
+/// copy is. Many copies made durable together are each a `create` and a
+/// `copyFrom`, added to a `Batch`.
 pub fn copyFile(io: Io, src_dir: Io.Dir, src_path: []const u8, dst_dir: Io.Dir, dst_path: []const u8, options: CopyOptions) CopyError!Copied {
     const src = try src_dir.openFile(io, src_path, .{});
     defer src.close(io);
@@ -194,19 +238,6 @@ pub fn copyFile(io: Io, src_dir: Io.Dir, src_path: []const u8, dst_dir: Io.Dir, 
     };
     var p = try create(io, dst_dir, dst_path, .{ .temp = .{ .random = options.temp }, .mode = .{ .exact = mode } });
     defer p.discard(io);
-    const by: @FieldType(Copied, "by") = if (options.clone == .never) .copy else switch (try p.staged.cloneFrom(io, src.handle, mode)) {
-        .cloned => .clone,
-        .refused => if (options.clone == .always) return error.CloneUnsupported else .copy,
-    };
-    if (by == .copy) {
-        var reader = src.reader(io, &.{});
-        var buffer: [16 * 1024]u8 = undefined;
-        var out = p.file().writer(io, &buffer);
-        _ = out.interface.sendFileAll(&reader, .unlimited) catch |err| return switch (err) {
-            error.ReadFailed => reader.err.?,
-            error.WriteFailed => out.err.?,
-        };
-        out.interface.flush() catch return out.err.?;
-    }
+    const by = try p.copyFrom(io, src, .{ .clone = options.clone });
     return .{ .committed = try p.commit(io, options.commit), .by = by };
 }

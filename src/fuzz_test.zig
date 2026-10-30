@@ -116,7 +116,7 @@ fn fuzzComponents(_: void, c: *Case) !void {
     try testing.expectEqual(n, seen);
 }
 
-test "a copy is its source byte for byte, at any size and with holes anywhere" {
+test "a copy is its source byte for byte, or its first bytes, at any size and with holes anywhere" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try shakedown.check(testing.allocator, tmp.dir, fuzzCopy, .{ .cases = 64 });
@@ -147,8 +147,21 @@ fn fuzzCopy(dir: std.Io.Dir, c: *Case) !void {
             try src.writePositionalAll(io, extent, at);
         }
     }
-    const how = gen.oneOf(c.source, @FieldType(airlock.CopyOptions, "clone"), &.{ .auto, .never });
     // The bytes are the property; durability is the crash model's.
+    const how = gen.oneOf(c.source, airlock.Clone, &.{ .auto, .never });
+    if (gen.oneOf(c.source, bool, &.{ false, true })) {
+        // A prefix, through a pending: what a writer had appended so far.
+        const limit = gen.intRange(c.source, usize, 0, len);
+        const src = try dir.openFile(io, "src", .{});
+        defer src.close(io);
+        var p = try airlock.create(io, dir, "dst", .{});
+        defer p.discard(io);
+        try testing.expectEqual(.copy, try p.copyFrom(io, src, .{ .clone = how, .limit = limit }));
+        _ = try p.commit(io, .{ .level = .none });
+        const got = try dir.readFileAlloc(io, "dst", gpa, .unlimited);
+        defer gpa.free(got);
+        return testing.expectEqualSlices(u8, expected[0..limit], got);
+    }
     const copied = try airlock.copyFile(io, dir, "src", dir, "dst", .{ .clone = how, .commit = .{ .level = .none } });
     if (how == .never) try testing.expectEqual(.copy, copied.by);
     const got = try dir.readFileAlloc(io, "dst", gpa, .unlimited);

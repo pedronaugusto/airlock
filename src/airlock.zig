@@ -67,6 +67,13 @@ pub const copyFile = Pending.copyFile;
 pub const CopyOptions = Pending.CopyOptions;
 pub const CopyError = Pending.CopyError;
 pub const Copied = Pending.Copied;
+/// Whether a copy is a clone: where the filesystem makes one, always, or never.
+pub const Clone = Pending.Clone;
+/// What a copy came to: a clone or a copy of the bytes.
+pub const By = Pending.By;
+/// How `Pending.copyFrom` fills a pending, for copies made durable together.
+pub const CopyFromOptions = Pending.CopyFromOptions;
+pub const CopyFromError = Pending.CopyFromError;
 
 /// Where a call puts the error behind `error.PublishedNotDurable`.
 pub const Diagnostics = names.Diagnostics;

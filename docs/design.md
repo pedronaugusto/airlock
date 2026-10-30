@@ -19,6 +19,19 @@ per volume. Per-file errors, refusal, cancellation, synced retries, close errors
 and volume identity remain part of the contract. Raw sync-call counts describe
 calls, not physical cache drains or filesystem transaction boundaries.
 
+## Copies
+
+One copy path. `Pending.copyFrom` fills an open, unwritten temp from an open
+source: a clone where the filesystem makes one, else std's file writer, with an
+optional limit for a prefix (always a copy: a clone takes the whole file as it
+is at that moment). `copyFile` is `create`, `copyFrom` and `commit`; copies made
+durable together are pendings in one `Batch`, each synced through the handle
+that filled it. A clone keeps the temp's permissions: Linux's `FICLONE` writes
+into the temp's own inode, and Darwin's `fclonefileat`, which makes its own file
+with the source's mode, is renamed over the temp and given the temp's mode,
+read from it. Darwin clones only a random temp, whose prefix names the clone's
+own temporary name; an exact temp, or one written in place, is copied.
+
 ## aegis types, contracts and the sites kept raw
 
 airlock imports aegis and uses three of its namespaces: `id`, `handle` and

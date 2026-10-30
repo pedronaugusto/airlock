@@ -21,7 +21,7 @@ const Seam = seam.Seam;
 const os = builtin.target.os.tag;
 const is_tested_os = os == .linux or os.isDarwin() or os == .windows;
 
-const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs, sym_link, make_path, copy, clone, lock };
+const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs, copy_batch, sym_link, make_path, copy, clone, lock };
 
 /// The simulated disk's names, as this platform's file systems compare them.
 const names: @FieldType(shakedown.Sim.Fs.Options, "names") = if (os.isDarwin()) .darwin else if (os == .windows) .windows else .posix;
@@ -40,7 +40,7 @@ pub const Operation = struct {
 
     fn dests(s: *const Operation) []const []const u8 {
         return switch (s.kind) {
-            .batch => &.{ "a", "b", "c" },
+            .batch, .copy_batch => &.{ "a", "b", "c" },
             .batch_two_dirs => &.{ "a", "sub/b", "sub/c" },
             .rename => &.{"b"},
             else => &.{"a"},
@@ -57,7 +57,9 @@ pub const Operation = struct {
         if (s.existedBefore()) {
             for (s.dests()) |d| try fs.write(d, "old");
         }
-        if (s.kind == .rename or s.kind == .copy or s.kind == .clone) try fs.write("src", "new");
+        if (s.kind == .rename or s.kind == .copy or s.kind == .clone or s.kind == .copy_batch) try fs.write("src", "new");
+        // A source a writer is still appending to: the copy takes its first bytes.
+        if (s.kind == .copy_batch) try fs.write("growing", "new, and more");
         s.h = try Seam.create(testing.allocator, sim.io(), .{ .plan = s.plan, .trace = .off });
         s.reached = .none;
         s.returned = false;
@@ -106,10 +108,10 @@ pub const Operation = struct {
             .remove => s.reached = try airlock.remove(io, dir, "a", .{}),
             .sym_link => s.reached = try airlock.symLink(io, dir, "new-target", "a", .{}),
             .make_path => s.reached = (try airlock.makePath(io, dir, "sub/x/y", .{})).reached,
-            .batch, .batch_two_dirs => try s.runBatch(io),
+            .batch, .batch_two_dirs, .copy_batch => try s.runBatch(io),
             // A clone where the disk makes one, else the copy it falls to.
             .copy, .clone => {
-                const how: @FieldType(airlock.CopyOptions, "clone") = if (s.kind == .copy) .never else .auto;
+                const how: airlock.Clone = if (s.kind == .copy) .never else .auto;
                 s.reached = (try airlock.copyFile(io, dir, "src", dir, "a", .{ .clone = how, .commit = commit })).committed.reached;
             },
             .lock => {
@@ -127,10 +129,23 @@ pub const Operation = struct {
         var count: usize = 0;
         defer for (pendings[0..count]) |*p| p.discard(io);
         const dir = Io.Dir.cwd();
-        for (s.dests()) |d| {
+        for (s.dests(), 0..) |d, i| {
             pendings[count] = try airlock.create(io, dir, d, .{});
             count += 1;
-            try pendings[count - 1].file().writePositionalAll(io, "new", 0);
+            const p = &pendings[count - 1];
+            if (s.kind != .copy_batch) {
+                try p.file().writePositionalAll(io, "new", 0);
+                continue;
+            }
+            // A clone where the disk makes one, the bytes, a prefix.
+            const from = try dir.openFile(io, if (i == 2) "growing" else "src", .{});
+            defer from.close(io);
+            const options: airlock.CopyFromOptions = switch (i) {
+                0 => .{},
+                1 => .{ .clone = .never },
+                else => .{ .limit = 3 },
+            };
+            _ = try p.copyFrom(io, from, options);
         }
         var slots: [8]airlock.Batch.Slot = undefined;
         var batch: airlock.Batch = .init(&slots);
@@ -187,7 +202,7 @@ pub const Operation = struct {
                 }
                 // The fence: the rename after it is never seen without
                 // both before it.
-                if ((s.kind == .batch or s.kind == .batch_two_dirs) and news[2] and !(news[0] and news[1])) return error.FenceBroken;
+                if ((s.kind == .batch or s.kind == .batch_two_dirs or s.kind == .copy_batch) and news[2] and !(news[0] and news[1])) return error.FenceBroken;
             },
         }
     }
@@ -295,6 +310,10 @@ test "every crash: copyFile, the bytes copied" {
 
 test "every crash: copyFile, a clone where the disk makes one" {
     try crashes(.clone);
+}
+
+test "every crash: copies filled by copyFrom, made durable by one batch" {
+    try crashes(.copy_batch);
 }
 
 test "every crash: a lock committed" {

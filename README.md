@@ -140,6 +140,15 @@ removes the random temps a crash or a kill left, by prefix and age, and nothing
 else: only names a random temp can have, last modified long enough ago that no
 other process is still writing them.
 
+`copyFile` copies a file durably: into a temp next to the destination, as a
+copy-on-write clone where the filesystem makes one (Linux `FICLONE`, Darwin
+`fclonefileat`), else through std's file writer, which copies in the kernel
+where it can; then committed, so nothing is under the name until the whole copy
+is. `Copied.by` says which it was, and `clone = .always` refuses a filesystem
+that cannot clone with nothing published. Copies made durable together are each
+a `create` and a `Pending.copyFrom`, added to one `Batch`; `copyFrom`'s `limit`
+copies a file's first bytes while a writer may still be appending to it.
+
 `Batch` takes files, pending publishes, directories and fences. It syncs each
 file through its writing handle (Linux data syncs and macOS writeouts run
 concurrently, bounded by `parallel`; Windows writes each one out), puts one
@@ -229,8 +238,8 @@ fallbacks and fences, goes through it.
   and advisory locks are `std.Io.File.Lock`'s.
 - No write-ahead log, group commit or record framing: airlock syncs, it does
   not decide when.
-- No `O_TMPFILE` and no `msync`. A copy-on-write clone is made only as
-  the fast path of a durable copy (`copyFile`), never on its own: a clone
+- No `O_TMPFILE`. A copy-on-write clone is made only as
+  the fast path of a durable copy (`copyFile`, `copyFrom`), never on its own: a clone
   that is never synced and published is not durable. Windows copies; its
   block cloning (ReFS, Dev Drive) is not asked for yet. A replace keeps
   the permissions it replaces, not extended attributes, ACLs or ownership.

@@ -89,6 +89,80 @@ test "a copy takes the source's permissions, or those asked" {
     }
 }
 
+test "copies made durable together: each a pending filled by copyFrom, one batch commits them" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const sizes = [_]usize{ 0, 4096, 70000 };
+    const sources = [_][]const u8{ "src0", "src1", "src2" };
+    // Borrowed by each pending until the batch commits it.
+    const dests = [_][]const u8{ "dst0", "dst1", "dst2" };
+    var pendings: [sizes.len]airlock.Pending = undefined;
+    var count: usize = 0;
+    defer for (pendings[0..count]) |*p| p.discard(io);
+    var slots: [sizes.len + 1]airlock.Batch.Slot = undefined;
+    var batch: airlock.Batch = .init(&slots);
+    defer batch.reset(io);
+    for (sizes, sources, dests, 0..) |len, src, dst, i| {
+        try source(io, tmp.dir, src, len, i);
+        const from = try tmp.dir.openFile(io, src, .{});
+        defer from.close(io);
+        pendings[count] = try airlock.create(io, tmp.dir, dst, .{});
+        count += 1;
+        const by = try pendings[count - 1].copyFrom(io, from, .{});
+        if (is_darwin) try testing.expectEqual(.clone, by);
+        batch.addPending(io, &pendings[count - 1], .replace);
+    }
+    batch.addDir(tmp.dir);
+    _ = try batch.commit(io, .{});
+    for (sources, dests) |src, dst| try expectSame(io, tmp.dir, src, dst);
+}
+
+test "a limit copies the source's first bytes, and a source shorter than it is EndOfStream" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try source(io, tmp.dir, "src", 20000, 5);
+    const from = try tmp.dir.openFile(io, "src", .{});
+    defer from.close(io);
+    for ([_]u64{ 0, 1, 12345, 20000 }) |limit| {
+        var p = try airlock.create(io, tmp.dir, "dst", .{});
+        defer p.discard(io);
+        try testing.expectEqual(.copy, try p.copyFrom(io, from, .{ .limit = limit }));
+        _ = try p.commit(io, .{});
+        const gpa = testing.allocator;
+        const whole = try tmp.dir.readFileAlloc(io, "src", gpa, .unlimited);
+        defer gpa.free(whole);
+        const got = try tmp.dir.readFileAlloc(io, "dst", gpa, .unlimited);
+        defer gpa.free(got);
+        try testing.expectEqualSlices(u8, whole[0..@intCast(limit)], got);
+    }
+    var p = try airlock.create(io, tmp.dir, "short", .{});
+    defer p.discard(io);
+    try testing.expectError(error.EndOfStream, p.copyFrom(io, from, .{ .limit = 20001 }));
+}
+
+test "on Darwin an exact temp is copied, and clone always refuses it" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try source(io, tmp.dir, "src", 3000, 2);
+    const from = try tmp.dir.openFile(io, "src", .{});
+    defer from.close(io);
+    {
+        var p = try airlock.create(io, tmp.dir, "dst", .{ .temp = .{ .exact = "dst.new" } });
+        defer p.discard(io);
+        const by = try p.copyFrom(io, from, .{});
+        if (is_darwin) try testing.expectEqual(.copy, by);
+        _ = try p.commit(io, .{});
+        try expectSame(io, tmp.dir, "src", "dst");
+    }
+    if (!is_darwin) return;
+    var p = try airlock.create(io, tmp.dir, "other", .{ .temp = .{ .exact = "other.new" } });
+    defer p.discard(io);
+    try testing.expectError(error.CloneUnsupported, p.copyFrom(io, from, .{ .clone = .always }));
+}
+
 const seam = @import("airlock.testing");
 const Seam = seam.Seam;
 const is_linux = builtin.target.os.tag == .linux;

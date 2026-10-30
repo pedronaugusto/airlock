@@ -552,16 +552,24 @@ fn removeTemp(p: *Staged, io: Io) void {
     sys.unlink(io, dir, name orelse return) catch {};
 }
 
+/// Whether `cloneFrom` can make this temp a clone: never one written in
+/// place, and on Darwin, whose clone makes its own file under a new name,
+/// only a random temp.
+pub fn canClone(p: *const Staged) bool {
+    return !p.in_place and (!is_darwin or (p.temp_len >= random_len and p.exact.len == 0));
+}
+
 /// Makes the open temp, still empty, a copy-on-write clone of `src` where
-/// the filesystem can, its permissions then `mode`. Linux clones into the
-/// temp's own descriptor. Darwin clones under a new random name beside it
-/// (`fclonefileat` makes its own file) and renames the clone over the empty
-/// temp, which keeps its name: a random temp only. A refusal changes
-/// nothing; a failure leaves the temp a temp, for `discard` to remove.
-pub fn cloneFrom(p: *Staged, io: Io, src: sys.Handle, mode: Io.File.Permissions) (sys.CloneError || sys.RenameError || sys.SetModeError)!sys.Cloned {
-    assert.invariant(p.state == .open and !p.writer_active and !p.in_place, "Staged.cloneFrom: the temp is open, unwritten and not in place");
+/// the filesystem can, keeping the temp's permissions. Linux clones into
+/// the temp's own descriptor. Darwin clones under a new random name beside
+/// it (`fclonefileat` makes its own file, with the source's permissions),
+/// renames the clone over the empty temp, which keeps its name, and gives
+/// it the temp's permissions. A refusal changes nothing; a failure leaves
+/// the temp a temp, for `discard` to remove.
+pub fn cloneFrom(p: *Staged, io: Io, src: sys.Handle) (sys.CloneError || sys.RenameError || sys.SetModeError || Io.File.StatError)!sys.Cloned {
+    assert.invariant(p.state == .open and !p.writer_active and p.canClone(), "Staged.cloneFrom: the temp is open, unwritten and can be a clone");
     if (!is_darwin) return sys.cloneInto(io, p.file.handle, src);
-    assert.invariant(p.temp_len >= random_len and p.exact.len == 0, "Staged.cloneFrom: Darwin clones a random temp only");
+    const mode = (try p.file.stat(io)).permissions;
     const prefix = p.tempName()[0 .. p.temp_len - random_len];
     var buffer: [64]u8 = undefined;
     var draws: u32 = 0;
