@@ -277,6 +277,29 @@ pub fn symLinkOrRefuse(io: Io, dir: Io.Dir, target: []const u8, sub_path: []cons
     return linkAs(.refuse, io, dir, target, sub_path, options);
 }
 
+/// What `hardLink` fails with: a rename's failures, a name already there,
+/// and a filesystem with no hard links, each by name.
+pub const HardLinkError = sys.RenameError || error{
+    /// `new` names something already; it is left as it is.
+    PathAlreadyExists,
+    /// The filesystem has no hard links (FAT, exFAT, some SMB shares), or
+    /// refuses this one.
+    HardLinksUnsupported,
+};
+
+/// Gives the file `old` names in `old_dir` a second name, `new` in
+/// `new_dir`, never replacing one; a symbolic link at `old` is linked
+/// itself, not followed. POSIX `linkat`; Windows `FileLinkInformation`
+/// (NTFS and ReFS keep hard links). Nothing is synced: the new name is as
+/// durable as its directory's next sync makes it.
+pub fn hardLink(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new: []const u8) HardLinkError!void {
+    sys.link(io, old_dir.handle, old, new_dir.handle, new) catch |err| return switch (err) {
+        error.AlreadyExists => error.PathAlreadyExists,
+        error.Refused => error.HardLinksUnsupported,
+        else => |e| e,
+    };
+}
+
 fn LinkError(comptime fallback: Fallback) type {
     return if (fallback == .refuse) SymLinkOrRefuseError else SymLinkError;
 }

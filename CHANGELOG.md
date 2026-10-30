@@ -16,6 +16,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `hardLink(io, old_dir, old, new_dir, new)`: a second name for a file, never replacing one, on every platform: POSIX `linkat`, Windows `FileLinkInformation` (std 0.17's `Dir.hardLink` refuses Windows outright). A filesystem without hard links is `error.HardLinksUnsupported` by name. A publish's no-replace fallback links on Windows too.
 - `lock` (`Lock`, `LockOptions`, `LockError`): git's lock-file protocol, from `lockfile.c`.
   - `<path>.lock` is taken exclusively. `Contention.wait` tries again with git's backoff: the attempt squared in milliseconds, capped at a second, a quarter either way at random. Each wait is a cancellation point, and `error.LockHeld` comes once the wait is spent.
   - `Holder.pid_file` is `core.lockfilePid`'s `<path>~pid.lock`, saying `pid <n>` byte for byte as git writes it. A holder file a crash left is the new lock's to replace, or to remove under `Holder.none`.

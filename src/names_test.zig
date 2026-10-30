@@ -321,3 +321,40 @@ test "pruneTemps removes old random temps and nothing else" {
     for (kept) |name| try testing.expect(s.read(name, &buffer) != null);
     try testing.expectError(error.BadPathName, airlock.pruneTemps(h.io(), s.dir(), "a/", .{}));
 }
+
+test "a hard link is a second name for the file, across directories, and never replaces one" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const io = testing.io;
+    try s.write("a", "1");
+    try s.dir().createDirPath(io, "sub");
+    var sub = try s.dir().openDir(io, "sub", .{});
+    defer sub.close(io);
+    try airlock.hardLink(io, s.dir(), "a", sub, "b");
+    try testing.expect(airlock.FileId.eql(
+        try airlock.FileId.ofPath(io, s.dir(), "a", .{}),
+        try airlock.FileId.ofPath(io, s.dir(), "sub/b", .{}),
+    ));
+    // Written through one name, read through the other.
+    try s.write("a", "22");
+    var buffer: [4]u8 = undefined;
+    try testing.expectEqualStrings("22", s.read("sub/b", &buffer).?);
+    try s.write("c", "3");
+    try testing.expectError(error.PathAlreadyExists, airlock.hardLink(io, s.dir(), "c", sub, "b"));
+    try testing.expectEqualStrings("22", s.read("sub/b", &buffer).?);
+    try testing.expectError(error.FileNotFound, airlock.hardLink(io, s.dir(), "gone", sub, "d"));
+}
+
+test "a filesystem without hard links refuses one by name" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    try s.write("a", "1");
+    const no_links: seam.Code = if (is_windows) .NOT_SUPPORTED else .PERM;
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{seam.always(.link, no_links)} });
+    defer h.destroy();
+    try testing.expectError(error.HardLinksUnsupported, airlock.hardLink(h.io(), s.dir(), "a", s.dir(), "b"));
+    var buffer: [4]u8 = undefined;
+    try testing.expectEqual(@as(?[]const u8, null), s.read("b", &buffer));
+}

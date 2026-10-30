@@ -99,6 +99,11 @@ pub const MakePathError = names.MakePathError;
 pub const Made = names.Made;
 /// Creates the missing directories of a path and syncs each new entry.
 pub const makePath = names.makePath;
+/// What `hardLink` can fail with.
+pub const HardLinkError = names.HardLinkError;
+/// A second name for a file, never replacing one: `linkat`, or Windows's
+/// `FileLinkInformation`; a filesystem without hard links by name.
+pub const hardLink = names.hardLink;
 /// The syncs and the temp prefix of `symLink`.
 pub const SymLinkOptions = names.SymLinkOptions;
 /// What `symLink` can fail with.

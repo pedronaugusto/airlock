@@ -605,9 +605,14 @@ fn linkatRaw(old_dir: posix.fd_t, old: [*:0]const u8, new_dir: posix.fd_t, new: 
     return std.c.linkat(old_dir, old, new_dir, new, 0);
 }
 
+/// What `link` fails with.
+pub const LinkError = RenameError || Refused || error{AlreadyExists};
+
 /// `linkat`, the fallback for a rename that must not replace. Refused on
-/// filesystems without hard links (exFAT, FAT, some SMB).
-pub fn link(io: Io, old_dir: Handle, old: []const u8, new_dir: Handle, new: []const u8) (RenameError || Refused || error{AlreadyExists})!void {
+/// filesystems without hard links (exFAT, FAT, some SMB). Windows:
+/// `FileLinkInformation` on the file itself, a link not followed.
+pub fn link(io: Io, old_dir: Handle, old: []const u8, new_dir: Handle, new: []const u8) LinkError!void {
+    if (is_windows) return linkWindows(io, old_dir, old, new_dir, new);
     const old_z = try posix.toPosixPath(old);
     const new_z = try posix.toPosixPath(new);
     const e = switch (try retrying(io, .link, new, linkatRaw, .{ old_dir, &old_z, new_dir, &new_z })) {
@@ -623,7 +628,7 @@ pub fn link(io: Io, old_dir: Handle, old: []const u8, new_dir: Handle, new: []co
 }
 
 /// `link` through a route: std's hard link.
-fn linkRouted(route: *const Route, old_dir: Handle, old: []const u8, new_dir: Handle, new: []const u8) (RenameError || Refused || error{AlreadyExists})!void {
+fn linkRouted(route: *const Route, old_dir: Handle, old: []const u8, new_dir: Handle, new: []const u8) LinkError!void {
     return dirOf(old_dir).hardLink(old, dirOf(new_dir), new, route.io, .{}) catch |err| switch (err) {
         error.PathAlreadyExists => error.AlreadyExists,
         error.OperationUnsupported => error.Refused,
@@ -1772,6 +1777,67 @@ fn ntRenameByHandle(handle: windows.HANDLE, root: windows.HANDLE, name: []const 
         .FileName = space.span(),
     });
     return ntSetInfo(handle, info.toBuffer(), if (posix_semantics) .RenameEx else .Rename);
+}
+
+/// `FileLinkInformation` on `handle`: `name` in `root` a second name for
+/// the file it is open on, never replacing one. Its information is laid
+/// out as the rename's (`ReplaceIfExists`, the root, the name), so it is
+/// built as one.
+fn ntLinkByHandle(handle: windows.HANDLE, root: windows.HANDLE, name: []const u8) windows.NTSTATUS {
+    const space = ntName(root, name) catch |err| return ntNameStatus(err);
+    const absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
+    var info: windows.FILE.RENAME_INFORMATION = .init(.{
+        .Flags = .{ .REPLACE_IF_EXISTS = false },
+        .RootDirectory = if (absolute) null else root,
+        .FileName = space.span(),
+    });
+    return ntSetInfo(handle, info.toBuffer(), .Link);
+}
+
+/// `link` on Windows: the file `old` names in `old_dir`, the link itself if
+/// it is one, given the name `new` in `new_dir`. A filesystem with no hard
+/// links (FAT, exFAT) refuses the information class: `error.Refused`.
+fn linkWindows(io: Io, old_dir: windows.HANDLE, old: []const u8, new_dir: windows.HANDLE, new: []const u8) LinkError!void {
+    const source = openAttributes(io, old_dir, old) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        error.FileNotFound => error.FileNotFound,
+        error.AccessDenied => error.AccessDenied,
+        error.PermissionDenied => error.PermissionDenied,
+        error.IsDir => error.IsDir,
+        error.SymLinkLoop => error.SymLinkLoop,
+        error.NameTooLong => error.NameTooLong,
+        error.BadPathName => error.BadPathName,
+        error.NoDevice => error.NoDevice,
+        error.NetworkNotFound => error.NetworkNotFound,
+        error.PipeBusy => error.PipeBusy,
+        error.AntivirusInterference => error.AntivirusInterference,
+        error.NoSpaceLeft => error.NoSpaceLeft,
+        error.SystemResources, error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => error.SystemResources,
+        error.InputOutput => error.HardwareFailure,
+        else => error.Unexpected,
+    };
+    defer release(io, source);
+    const status = switch (try retryingNt(io, .link, new, ntLinkByHandle, .{ source, new_dir, new })) {
+        .code => |c| c,
+        .route => |route| return linkRouted(route, old_dir, old, new_dir, new),
+    };
+    return switch (status) {
+        .SUCCESS => {},
+        .OBJECT_NAME_COLLISION => error.AlreadyExists,
+        .NOT_SUPPORTED, .INVALID_DEVICE_REQUEST, .NOT_IMPLEMENTED => error.Refused,
+        .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => error.FileNotFound,
+        .OBJECT_NAME_INVALID => error.BadPathName,
+        .NAME_TOO_LONG => error.NameTooLong,
+        .ACCESS_DENIED => error.AccessDenied,
+        .SHARING_VIOLATION => error.FileBusy,
+        .NOT_SAME_DEVICE => error.CrossDevice,
+        .TOO_MANY_LINKS => error.LinkQuotaExceeded,
+        .FILE_IS_A_DIRECTORY => error.IsDir,
+        .NOT_A_DIRECTORY => error.NotDir,
+        .DISK_FULL => error.NoSpaceLeft,
+        .MEDIA_WRITE_PROTECTED => error.ReadOnlyFileSystem,
+        else => if (isDeviceFailureNt(status)) error.HardwareFailure else windows.unexpectedStatus(status),
+    };
 }
 
 /// How a Windows rename by handle ended.
