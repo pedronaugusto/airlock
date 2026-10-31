@@ -7,6 +7,10 @@
 //! through `writer`. `commit` syncs the temp through the handle that wrote
 //! it, publishes it, then syncs the directory that received the name.
 //! `discard` removes the temp; it is idempotent and meant for `defer`.
+//!
+//! The temp and the directory opened for it each have one owner, which binds
+//! its address at its first use: a pending may move until then (as `create`
+//! returns it), never after.
 const std = @import("std");
 const Io = std.Io;
 const Staged = @import("Staged.zig");
@@ -56,9 +60,9 @@ pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOpt
 /// file; asking for it then, or after the pending ended, stops the program
 /// in every build rather than write to the wrong file. Lent: the pending
 /// closes it, never the holder.
-pub fn file(p: *const Pending) Io.File {
+pub fn file(p: *Pending) Io.File {
     assert.invariant(p.staged.state == .open, "Pending.file: the temp is no longer open for writing");
-    return p.staged.file;
+    return p.staged.file.?.borrow().*;
 }
 
 /// The error behind `error.PublishedNotDurable` or `error.Poisoned`.
@@ -74,8 +78,7 @@ pub fn state(p: *const Pending) State {
 /// A buffered writer onto the temp. `commit` flushes it, so bytes still in
 /// `buffer` are written before the sync. With `writeback_bytes`, writeback
 /// starts every that many bytes. A failed write poisons the pending: what
-/// reached the file is unknown, and `commit` returns the write's error. The
-/// pending must not move while the writer is in use.
+/// reached the file is unknown, and `commit` returns the write's error.
 pub fn writer(p: *Pending, io: Io, buffer: []u8) *Io.Writer {
     return p.staged.writer(io, buffer);
 }

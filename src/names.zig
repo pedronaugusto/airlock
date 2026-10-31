@@ -8,7 +8,8 @@ const Blocking = @import("Blocking.zig");
 const sys = @import("sys.zig");
 const platform = @import("platform.zig");
 const level_mod = @import("level.zig");
-const assert = @import("aegis").assert;
+const aegis = @import("aegis");
+const assert = aegis.assert;
 const Staged = @import("Staged.zig");
 const paths = @import("paths.zig");
 const Level = level_mod.Level;
@@ -72,9 +73,9 @@ fn syncRenamed(io: Io, old_dir: Io.Dir, old: []const u8, new_dir: Io.Dir, new: [
     defer new_parent.close(io);
     var old_parent = try Parent.open(io, old_dir, old);
     defer old_parent.close(io);
-    var reached = try syncOne(io, options.sync.blocking, new_parent.dir, options.busy_deadline);
-    if (!try sameDirectory(io, new_parent.dir, old_parent.dir)) {
-        reached = Reached.min(reached, try syncOne(io, options.sync.blocking, old_parent.dir, options.busy_deadline));
+    var reached = try syncOne(io, options.sync.blocking, new_parent.directory(), options.busy_deadline);
+    if (!try sameDirectory(io, new_parent.directory(), old_parent.directory())) {
+        reached = Reached.min(reached, try syncOne(io, options.sync.blocking, old_parent.directory(), options.busy_deadline));
     }
     return reached;
 }
@@ -137,7 +138,7 @@ pub fn remove(io: Io, dir: Io.Dir, sub_path: []const u8, options: RenameOptions)
 fn syncParentOf(io: Io, dir: Io.Dir, sub_path: []const u8, options: RenameOptions) SyncAfterError!Reached {
     var parent = try Parent.open(io, dir, sub_path);
     defer parent.close(io);
-    return syncOne(io, options.sync.blocking, parent.dir, options.busy_deadline);
+    return syncOne(io, options.sync.blocking, parent.directory(), options.busy_deadline);
 }
 
 // ---------------------------------------------------------------------
@@ -199,11 +200,11 @@ fn makeMissing(io: Io, dir: Io.Dir, sub_path: []const u8, options: MakePathOptio
             else => |e| return e,
         }
     } else null;
-    var parent: Parent = if (deepest) |handle| .{ .dir = .{ .handle = handle }, .owned = true } else .{ .dir = dir, .owned = false };
+    var parent: Parent = if (deepest) |handle| .opened(handle) else .{ .lent = dir };
     defer parent.close(io);
     var components: paths.Components = .{ .path = sub_path, .at = start, .end = end };
     while (components.next()) |name| {
-        const created = if (sys.makeDir(io, parent.dir.handle, name)) true else |err| switch (err) {
+        const created = if (sys.makeDir(io, parent.directory().handle, name)) true else |err| switch (err) {
             error.PathAlreadyExists => false,
             else => |e| return e,
         };
@@ -211,16 +212,16 @@ fn makeMissing(io: Io, dir: Io.Dir, sub_path: []const u8, options: MakePathOptio
         if (@backingInt(options.sync.level) >= @backingInt(Level.data)) {
             // Whoever created it, its entry is synced before anything goes
             // under it.
-            const reached = syncOne(io, options.sync.blocking, parent.dir, platform.default_busy_deadline) catch |err| {
+            const reached = syncOne(io, options.sync.blocking, parent.directory(), platform.default_busy_deadline) catch |err| {
                 if (made.created == 0) return err;
                 return notDurable(options.diagnostics, err);
             };
             made.reached = Reached.min(made.reached, reached);
             synced.* = true;
         }
-        const child = try sys.openDir(io, parent.dir.handle, name);
+        const child = try sys.openDir(io, parent.directory().handle, name);
         parent.close(io);
-        parent = .{ .dir = .{ .handle = child }, .owned = true };
+        parent = .opened(child);
     }
 }
 
@@ -311,13 +312,13 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
     if (options.temp_prefix.len > Staged.max_prefix or paths.baseStart(options.temp_prefix) != 0) return error.BadPathName;
     var parent = try Parent.open(io, dir, sub_path);
     defer parent.close(io);
-    const kind = try linkKind(io, parent.dir, target, options);
+    const kind = try linkKind(io, parent.directory(), target, options);
     var buffer: [64]u8 = undefined;
     var temp: []const u8 = undefined;
     var draws: u32 = 0;
     while (true) {
         temp = buffer[0..Staged.drawName(io, options.temp_prefix, &buffer)];
-        sys.symLink(io, target, parent.dir.handle, temp, kind) catch |err| switch (err) {
+        sys.symLink(io, target, parent.directory().handle, temp, kind) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 draws += 1;
                 if (draws < 4) continue;
@@ -334,19 +335,19 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
         // name over a link that never reached the disk. A filesystem that
         // refuses the sync leaves no such order, so it is refused, or
         // reported, before the rename.
-        reached = linkSync(fallback, io, options.sync.blocking, parent.dir) catch |err| {
+        reached = linkSync(fallback, io, options.sync.blocking, parent.directory()) catch |err| {
             // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-            sys.unlink(io, parent.dir.handle, temp) catch {};
+            sys.unlink(io, parent.directory().handle, temp) catch {};
             return err;
         };
     }
-    renameUnsynced(io, parent.dir, temp, parent.dir, base, platform.default_busy_deadline) catch |err| {
+    renameUnsynced(io, parent.directory(), temp, parent.directory(), base, platform.default_busy_deadline) catch |err| {
         // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-        sys.unlink(io, parent.dir.handle, temp) catch {};
+        sys.unlink(io, parent.directory().handle, temp) catch {};
         return err;
     };
     if (@backingInt(level) < @backingInt(Level.data)) return reached;
-    const second = syncOne(io, options.sync.blocking, parent.dir, platform.default_busy_deadline) catch |err| return notDurable(options.diagnostics, err);
+    const second = syncOne(io, options.sync.blocking, parent.directory(), platform.default_busy_deadline) catch |err| return notDurable(options.diagnostics, err);
     return if (reached.atLeast(.ordered)) second else reached;
 }
 
@@ -419,23 +420,43 @@ pub fn pruneTemps(io: Io, dir: Io.Dir, prefix: []const u8, options: PruneOptions
     return removed;
 }
 
-/// The directory that holds `sub_path`: `dir` itself, or its nested
-/// directory opened for the sync.
-const Parent = struct {
-    dir: Io.Dir,
-    owned: bool,
+/// The directory that holds `sub_path`: `dir` itself, the caller's and
+/// lent, or its nested directory opened for the sync, owned until `close`.
+const Parent = union(enum) {
+    owned: aegis.own.OwnedIo(Io.Dir, releaseDir),
+    lent: Io.Dir,
+    closed,
 
     fn open(io: Io, dir: Io.Dir, sub_path: []const u8) sys.OpenDirError!Parent {
         const base_start = paths.baseStart(sub_path);
-        if (base_start == 0) return .{ .dir = dir, .owned = false };
-        return .{ .dir = .{ .handle = try sys.openDir(io, dir.handle, paths.parentPath(sub_path, base_start)) }, .owned = true };
+        if (base_start == 0) return .{ .lent = dir };
+        return opened(try sys.openDir(io, dir.handle, paths.parentPath(sub_path, base_start)));
+    }
+
+    fn opened(handle: sys.Handle) Parent {
+        return .{ .owned = .init(.{ .handle = handle }) };
+    }
+
+    fn directory(p: *Parent) Io.Dir {
+        return switch (p.*) {
+            .owned => |*held| held.borrow().*,
+            .lent => |lent| lent,
+            .closed => unreachable, // unreachable: a closed parent is read by nothing, its scope ending or a new one taking its place
+        };
     }
 
     fn close(p: *Parent, io: Io) void {
-        if (p.owned) sys.release(io, p.dir.handle);
-        p.owned = false;
+        switch (p.*) {
+            .owned => |*held| held.deinit(io),
+            .lent, .closed => {},
+        }
+        p.* = .closed;
     }
 };
+
+fn releaseDir(d: *Io.Dir, io: Io) void {
+    sys.release(io, d.handle);
+}
 
 /// One directory's sync after a name changed in it: a refusal leaves the
 /// change `.ordered`.

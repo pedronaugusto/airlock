@@ -441,7 +441,7 @@ fn Run(comptime fallback: Fallback) type {
                 for (all[start..end]) |*s| if (isFileSlot(s)) {
                     if (s.err) |err| return r.fail(s, err);
                     if (s.reached == .written and (s.pending == null or s.pending.?.state == .open)) {
-                        s.reached = r.registerWriteout(s, if (s.pending) |p| p.file.handle else s.handle, s.id, no_device, if (s.pending) |p| p.tempName() else s.path) catch |err| return r.fail(s, err);
+                        s.reached = r.registerWriteout(s, if (s.pending) |p| p.fileHandle() else s.handle, s.id, no_device, if (s.pending) |p| p.tempName() else s.path) catch |err| return r.fail(s, err);
                     }
                     r.closePath(s);
                     try r.part(s, s.reached);
@@ -566,7 +566,7 @@ fn Run(comptime fallback: Fallback) type {
         fn fileHandle(r: *Self, s: *Slot) Error!sys.Handle {
             switch (s.kind) {
                 .file => return s.handle,
-                .pending => return s.pending.?.file.handle,
+                .pending => return s.pending.?.fileHandle(),
                 .path => {
                     s.handle = try sys.openFile(r.io, s.root, s.path);
                     s.owned = true;

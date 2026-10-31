@@ -70,7 +70,7 @@ pub fn take(io: Io, dir: Io.Dir, path: []const u8, options: Options) Error!Lock 
 }
 
 /// The lock, written to while it is held, as `Pending.file` says.
-pub fn file(l: *const Lock) Io.File {
+pub fn file(l: *Lock) Io.File {
     return l.pending.file();
 }
 
@@ -144,7 +144,7 @@ pub fn backoff(attempt: u32, random: u16) u64 {
 }
 
 /// The holder file's name, `<base>~pid.lock`, in `out`.
-fn holderName(base: []const u8, out: *[Staged.max_temp_name]u8) error{NameTooLong}![]const u8 {
+fn holderName(base: []const u8, out: []u8) error{NameTooLong}![]const u8 {
     const suffix = "~pid.lock";
     if (suffix.len > out.len - base.len) return error.NameTooLong;
     @memcpy(out[0..base.len], base);
@@ -156,15 +156,18 @@ fn holderName(base: []const u8, out: *[Staged.max_temp_name]u8) error{NameTooLon
 /// held, any holder file beside it is this lock's to keep or drop.
 fn mark(l: *Lock, io: Io, holder: Holder) (HolderError || error{NameTooLong})!void {
     const staged = &l.pending.staged;
-    var buffer: [Staged.max_temp_name]u8 = undefined;
-    const name = try holderName(staged.baseName(), &buffer);
+    // Named from the caller's directory by the destination's path, beside it as in its
+    // parent: the parent the pending owns is lent only once `take` has returned the lock,
+    // whose owners bind their address at their first use.
+    var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const name = try holderName(staged.dest, &buffer);
     switch (holder) {
-        .none => staged.parent.deleteFile(io, name) catch |err| switch (err) {
+        .none => staged.root.deleteFile(io, name) catch |err| switch (err) {
             error.FileNotFound => {},
             else => |e| return e,
         },
         .pid_file => {
-            const f = try staged.parent.createFile(io, name, .{ .truncate = true });
+            const f = try staged.root.createFile(io, name, .{ .truncate = true });
             defer f.close(io);
             var text: [32]u8 = undefined;
             const line = std.mem.print(&text, "pid {d}\n", .{sys.processId()}) catch unreachable; // safe: "pid " and ten digits fit
@@ -182,7 +185,7 @@ fn unmark(l: *Lock, io: Io) void {
     var buffer: [Staged.max_temp_name]u8 = undefined;
     const name = holderName(staged.baseName(), &buffer) catch return;
     // glint-ignore: Z026 -- a holder file left behind is read only beside a held lock, and the next lock writes or removes it
-    staged.parent.deleteFile(io, name) catch {};
+    staged.parentDir().deleteFile(io, name) catch {};
 }
 
 /// What a held lock says of its holder.
