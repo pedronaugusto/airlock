@@ -124,8 +124,8 @@ fn create(io: Io, dir: Io.Dir, path: []const u8, options: Options) Error!Pending
         var jitter: [2]u8 = undefined;
         io.random(&jitter);
         const delay = backoff(attempt, std.mem.readInt(u16, &jitter, .little));
-        try Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(@intCast(delay)), .clock = .awake } }, io); // safe: a backoff is at most 1249 ms
         const step = aegis.units.Duration(.millisecond, i64).fromRaw(@intCast(delay)).convert(.nanosecond, i96, .exact); // safe: a backoff is at most 1249 ms
+        try Io.Timeout.sleep(.{ .duration = .{ .raw = step.toIoDuration(), .clock = .awake } }, io);
         waited = waited.add(step) catch return error.LockHeld;
         attempt +|= 1;
     }

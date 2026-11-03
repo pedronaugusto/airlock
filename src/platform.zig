@@ -66,6 +66,7 @@ const Awake = aegis.units.Instant(.awake, .nanosecond, i96);
 const Span = aegis.units.Duration(.nanosecond, i96);
 /// The longest a backoff waits between tries.
 const longest_wait: Span = aegis.units.Duration(.millisecond, i64).fromRaw(100).convert(.nanosecond, i96, .exact);
+const first_wait: Span = aegis.units.Duration(.millisecond, i64).fromRaw(1).convert(.nanosecond, i96, .exact);
 const level_mod = @import("level.zig");
 const Level = level_mod.Level;
 const Reached = level_mod.Reached;
@@ -231,7 +232,7 @@ pub const DirSyncError = Io.File.SyncError || sys.OpenDirError;
 pub const DirOutcome = struct { reached: Reached, refused: bool };
 
 /// How long a Windows directory open retries a sharing violation.
-pub const default_busy_deadline: Io.Duration = .fromMilliseconds(2000);
+pub const default_busy_deadline: Io.Duration = aegis.units.Duration(.millisecond, i64).fromRaw(2000).convert(.nanosecond, i96, .exact).toIoDuration();
 
 /// Syncs a directory's entries: the names created, renamed and removed in
 /// it. Any `Dir`: an `O_PATH` handle (Linux), `cwd()` or a read-only handle
@@ -301,7 +302,7 @@ pub const Backoff = struct {
     next: Io.Duration,
 
     pub fn start(io: Io, limit: Io.Duration) Backoff {
-        return .{ .deadline = Io.Timestamp.now(io, .awake).addDuration(limit), .next = .fromMilliseconds(1) };
+        return .{ .deadline = Io.Timestamp.now(io, .awake).addDuration(limit), .next = first_wait.toIoDuration() };
     }
 
     /// Sleeps before the next try and returns true, or returns false once

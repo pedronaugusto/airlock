@@ -47,14 +47,14 @@ pub fn atomicWrite(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8)
     io.random(&raw);
     var name_buf: [64]u8 = undefined;
     const temp = try std.mem.print(&name_buf, "tmp_{x}", .{&raw});
-    var file = try dir.createFile(io, temp, .{ .exclusive = true });
-    errdefer {
-        file.close(io);
-        // glint-ignore: Z026 -- the entry is scratch the row removes; a leftover is in the run directory
-        dir.deleteFile(io, temp) catch {};
+    const file = try dir.createFile(io, temp, .{ .exclusive = true });
+    // glint-ignore: Z026 -- the entry is scratch the row removes; a leftover is in the run directory
+    errdefer dir.deleteFile(io, temp) catch {};
+    {
+        // Closed once, before the rename, whether the writes failed or not.
+        defer file.close(io);
+        try file.writePositionalAll(io, bytes, 0);
+        try file.sync(io);
     }
-    try file.writePositionalAll(io, bytes, 0);
-    try file.sync(io);
-    file.close(io);
     try dir.rename(temp, dir, sub_path, io);
 }

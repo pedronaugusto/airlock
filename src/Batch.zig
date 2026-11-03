@@ -184,7 +184,7 @@ pub const Options = struct {
     /// Linux and Darwin: how many file syncs run at once; 1 = sequential.
     parallel: u8 = 16,
     /// Windows: how long to retry a rename a scanner is blocking.
-    busy_deadline: Io.Duration = .fromMilliseconds(2000),
+    busy_deadline: Io.Duration = platform.default_busy_deadline,
     /// As `SyncOptions.barrier`.
     barrier: bool = true,
     /// Optional executor for raw syncs; null runs inline. Borrowed for this call.
@@ -877,7 +877,10 @@ fn Run(comptime fallback: Fallback) type {
             const all = r.slots();
             if (index.get(all)) |s| {
                 if (s.index == index) return s;
-            } else |_| {}
+            } else |err| switch (err) {
+                // An index past the slots finds its slot by the search below.
+                error.OutOfBounds => {},
+            }
             for (all) |*s| if (s.index == index) return s;
             unreachable; // unreachable: every index names a slot of this batch
         }
