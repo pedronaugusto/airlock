@@ -1306,7 +1306,7 @@ pub fn volumeOf(io: Io, dir: Handle) VolumeError!VolumeInfo {
         return info;
     }
     if (!is_darwin) return error.Unexpected;
-    var buf: DarwinStatfs = undefined;
+    var buf: DarwinStatfs = std.mem.zeroes(DarwinStatfs);
     const e = switch (try retrying(io, .statfs, null, darwinFstatfs, .{ dir, &buf })) {
         .code => |c| c,
         .route => return .{ .remote = false },
@@ -1389,12 +1389,12 @@ fn isRefusalNt(status: windows.NTSTATUS) bool {
 }
 
 fn ntFlush(handle: windows.HANDLE) windows.NTSTATUS {
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = std.mem.zeroes(windows.IO_STATUS_BLOCK);
     return windows.ntdll.NtFlushBuffersFile(handle, &iosb);
 }
 
 fn ntFlushEx(handle: windows.HANDLE, flags: u32) windows.NTSTATUS {
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = std.mem.zeroes(windows.IO_STATUS_BLOCK);
     return NtFlushBuffersFileEx(handle, flags, null, 0, &iosb);
 }
 
@@ -1466,7 +1466,7 @@ fn ntCreate(
         absolute = Io.Dir.path.isAbsoluteWindowsWtf16(space.span());
     }
     const attr: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = if (absolute) null else root, .ObjectName = &nt };
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = std.mem.zeroes(windows.IO_STATUS_BLOCK);
     return windows.ntdll.NtCreateFile(handle, access, &attr, &iosb, null, attributes, share, disposition, options, null, 0);
 }
 
@@ -1482,7 +1482,7 @@ pub fn openDirWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, flush_
             .READ_ATTRIBUTES = true,
         } },
     };
-    var handle: windows.HANDLE = undefined;
+    var handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
     const status = switch (try retryingNt(io, .open_dir, sub_path, ntCreate, .{
         &handle,                                  access,
         root,                                     sub_path,
@@ -1536,7 +1536,7 @@ fn makeDirWindows(io: Io, root: windows.HANDLE, name: []const u8) MakeDirError!v
         .STANDARD = .{ .SYNCHRONIZE = true },
         .SPECIFIC = .{ .FILE_DIRECTORY = .{ .LIST = true, .READ_ATTRIBUTES = true } },
     };
-    var handle: windows.HANDLE = undefined;
+    var handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
     const status = switch (try retryingNt(io, .make_dir, name, ntCreate, .{
         &handle,                                  access,
         root,                                     name,
@@ -1618,7 +1618,7 @@ fn openAttributes(io: Io, root: windows.HANDLE, name: []const u8) OpenFileError!
         .STANDARD = .{ .SYNCHRONIZE = true },
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true, .WRITE_ATTRIBUTES = true } },
     };
-    var handle: windows.HANDLE = undefined;
+    var handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
     const status = switch (try retryingNt(io, .open_file, name, ntCreate, .{
         &handle,                                  access,
         root,                                     name,
@@ -1633,7 +1633,7 @@ fn openAttributes(io: Io, root: windows.HANDLE, name: []const u8) OpenFileError!
 }
 
 fn basicInformation(handle: windows.HANDLE) ?windows.FILE.BASIC_INFORMATION {
-    var info: windows.FILE.BASIC_INFORMATION = undefined;
+    var info: windows.FILE.BASIC_INFORMATION = std.mem.zeroes(windows.FILE.BASIC_INFORMATION);
     if (ntQueryInfo(handle, std.mem.asBytes(&info), .Basic) != .SUCCESS) return null;
     return info;
 }
@@ -1664,7 +1664,7 @@ fn openByName(io: Io, root: windows.HANDLE, sub_path: []const u8, purpose: OpenF
         .GENERIC = .{ .WRITE = purpose == .sync },
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true } },
     };
-    var handle: windows.HANDLE = undefined;
+    var handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
     const status = switch (try retryingNt(io, .open_file, sub_path, ntCreate, .{
         &handle,                                  access,
         root,                                     sub_path,
@@ -1712,7 +1712,7 @@ fn createTempWindows(io: Io, root: windows.HANDLE, name: []const u8, read: bool)
         .GENERIC = .{ .WRITE = true, .READ = read },
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true, .WRITE_ATTRIBUTES = true } },
     };
-    var handle: windows.HANDLE = undefined;
+    var handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
     const status = switch (try retryingNt(io, .create_temp, name, ntCreate, .{
         &handle,                                  access,
         root,                                     name,
@@ -1758,7 +1758,7 @@ fn windowsPermissions(read_only: bool) Io.File.Permissions {
 }
 
 fn ntSetInfo(handle: windows.HANDLE, info: []u8, class: windows.FILE.INFORMATION_CLASS) windows.NTSTATUS {
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = std.mem.zeroes(windows.IO_STATUS_BLOCK);
     return windows.ntdll.NtSetInformationFile(handle, &iosb, info.ptr, @intCast(info.len), class);
 }
 
@@ -1956,12 +1956,12 @@ const FileIdInformation = extern struct {
 };
 
 fn ntQueryInfo(handle: windows.HANDLE, buf: []u8, class: windows.FILE.INFORMATION_CLASS) windows.NTSTATUS {
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = std.mem.zeroes(windows.IO_STATUS_BLOCK);
     return windows.ntdll.NtQueryInformationFile(handle, &iosb, buf.ptr, @intCast(buf.len), class);
 }
 
 fn ntQueryVolume(handle: windows.HANDLE, buf: []u8) windows.NTSTATUS {
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = std.mem.zeroes(windows.IO_STATUS_BLOCK);
     return windows.ntdll.NtQueryVolumeInformationFile(handle, &iosb, buf.ptr, @intCast(buf.len), .Volume);
 }
 
@@ -1973,7 +1973,7 @@ fn statFailureNt(status: windows.NTSTATUS) StatIdError {
 }
 
 fn statIdWindows(io: Io, handle: windows.HANDLE) StatIdError!Id {
-    var id: FileIdInformation = undefined;
+    var id: FileIdInformation = std.mem.zeroes(FileIdInformation);
     const status = switch (try retryingNt(io, .stat_id, null, ntQueryInfo, .{ handle, std.mem.asBytes(&id), .Id })) {
         .code => |c| c,
         // The process's current directory is a handle of its own to a
@@ -1994,13 +1994,13 @@ fn statIdWindows(io: Io, handle: windows.HANDLE) StatIdError!Id {
     var volume: extern struct {
         info: windows.FILE.FS_VOLUME_INFORMATION,
         label: [64]windows.WCHAR,
-    } = undefined;
+    } = .{ .info = std.mem.zeroes(windows.FILE.FS_VOLUME_INFORMATION), .label = @splat(0) };
     switch (ntQueryVolume(handle, std.mem.asBytes(&volume))) {
         .SUCCESS, .BUFFER_OVERFLOW => {},
         .ACCESS_DENIED => return error.AccessDenied,
         else => |s| return statFailureNt(s),
     }
-    var internal: windows.FILE.INTERNAL_INFORMATION = undefined;
+    var internal: windows.FILE.INTERNAL_INFORMATION = std.mem.zeroes(windows.FILE.INTERNAL_INFORMATION);
     switch (ntQueryInfo(handle, std.mem.asBytes(&internal), .Internal)) {
         .SUCCESS => {},
         .ACCESS_DENIED => return error.AccessDenied,
@@ -2017,7 +2017,7 @@ fn statIdPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow:
         .STANDARD = .{ .SYNCHRONIZE = true },
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true } },
     };
-    var handle: windows.HANDLE = undefined;
+    var handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
     const status = switch (try retryingNt(io, .open_file, sub_path, ntCreate, .{
         &handle,                                  access,
         root,                                     sub_path,
@@ -2040,7 +2040,7 @@ fn statPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow: b
         .STANDARD = .{ .SYNCHRONIZE = true },
         .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true } },
     };
-    var handle: windows.HANDLE = undefined;
+    var handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
     const status = switch (try retryingNt(io, .stat, sub_path, ntCreate, .{
         &handle,                                  access,
         root,                                     sub_path,
@@ -2053,7 +2053,7 @@ fn statPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow: b
     if (status != .SUCCESS) return openFailureNt(status);
     defer release(io, handle);
 
-    var info: windows.FILE.ALL_INFORMATION = undefined;
+    var info: windows.FILE.ALL_INFORMATION = std.mem.zeroes(windows.FILE.ALL_INFORMATION);
     switch (ntQueryInfo(handle, std.mem.asBytes(&info), .All)) {
         // More than the buffer holds is the name, which this does not use.
         .SUCCESS, .BUFFER_OVERFLOW => {},
@@ -2062,7 +2062,7 @@ fn statPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow: b
     const attributes = info.BasicInformation.FileAttributes;
     var tag: u32 = 0;
     if (attributes.REPARSE_POINT) {
-        var tag_info: windows.FILE.ATTRIBUTE_TAG_INFO = undefined;
+        var tag_info: windows.FILE.ATTRIBUTE_TAG_INFO = std.mem.zeroes(windows.FILE.ATTRIBUTE_TAG_INFO);
         switch (ntQueryInfo(handle, std.mem.asBytes(&tag_info), .AttributeTag)) {
             .SUCCESS => {},
             else => |s| return statFailureNt(s),
@@ -2072,7 +2072,7 @@ fn statPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow: b
     var volume: extern struct {
         info: windows.FILE.FS_VOLUME_INFORMATION,
         label: [64]windows.WCHAR,
-    } = undefined;
+    } = .{ .info = std.mem.zeroes(windows.FILE.FS_VOLUME_INFORMATION), .label = @splat(0) };
     switch (ntQueryVolume(handle, std.mem.asBytes(&volume))) {
         .SUCCESS, .BUFFER_OVERFLOW => {},
         else => |s| return statFailureNt(s),
@@ -2102,19 +2102,19 @@ fn statPathWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, follow: b
 const windows_remote_device = 0x10;
 
 fn ntQueryVolumeClass(handle: windows.HANDLE, buf: []u8, class: windows.FS_INFORMATION_CLASS) windows.NTSTATUS {
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = std.mem.zeroes(windows.IO_STATUS_BLOCK);
     return windows.ntdll.NtQueryVolumeInformationFile(handle, &iosb, buf.ptr, @intCast(buf.len), class);
 }
 
 fn volumeWindows(io: Io, handle: windows.HANDLE) VolumeError!VolumeInfo {
-    var device: extern struct { device_type: u32, characteristics: u32 } = undefined;
+    var device: extern struct { device_type: u32, characteristics: u32 } = .{ .device_type = 0, .characteristics = 0 };
     const status = switch (try retryingNt(io, .statfs, null, ntQueryVolumeClass, .{ handle, std.mem.asBytes(&device), .Device })) {
         .code => |c| c,
         .route => return .{ .remote = false },
     };
     if (status != .SUCCESS) return statFailureNt(status);
     var info: VolumeInfo = .{ .remote = device.characteristics & windows_remote_device != 0 };
-    var attribute: extern struct { attributes: u32, max_component: i32, name_bytes: u32, name: [32]u16 } = undefined;
+    var attribute: extern struct { attributes: u32, max_component: i32, name_bytes: u32, name: [32]u16 } = .{ .attributes = 0, .max_component = 0, .name_bytes = 0, .name = @splat(0) };
     switch (ntQueryVolumeClass(handle, std.mem.asBytes(&attribute), .Attribute)) {
         .SUCCESS, .BUFFER_OVERFLOW => {},
         else => |s| return statFailureNt(s),
@@ -2146,7 +2146,7 @@ pub fn volumeName(io: Io, handle: windows.HANDLE) StatIdError!DeviceId {
         // A route's file system is one volume, with no name to hash.
         if (hook.route != null) return .fromRaw(0);
     }
-    var buf: extern struct { len: u32, name: [60]u16 } = undefined;
+    var buf: extern struct { len: u32, name: [60]u16 } = .{ .len = 0, .name = @splat(0) };
     const status = ntQueryInfo(handle, std.mem.asBytes(&buf), .VolumeName);
     switch (status) {
         .SUCCESS, .BUFFER_OVERFLOW => {},
@@ -2233,7 +2233,7 @@ fn msyncRaw(address: [*]const u8, len: usize) if (is_linux) usize else c_int {
 fn ntFlushVirtual(address: [*]const u8, len: usize) windows.NTSTATUS {
     var base: ?*anyopaque = @constCast(address); // aegis: boundary(A019): NtFlushVirtualMemory takes the base as an in-out pointer and writes back only the page it rounded to; the memory is read, never written
     var size = len;
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = std.mem.zeroes(windows.IO_STATUS_BLOCK);
     return NtFlushVirtualMemory(windows.GetCurrentProcess(), &base, &size, &iosb);
 }
 

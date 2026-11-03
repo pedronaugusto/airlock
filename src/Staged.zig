@@ -40,10 +40,9 @@ root: Io.Dir,
 dest: []const u8,
 /// Where the base name starts in `dest`.
 base_start: usize,
-/// A random temp name, or the destination's name and a suffix, inline.
-temp_buffer: [max_temp_name]u8,
-/// The temp name's length in `temp_buffer`; 0 for an exact name.
-temp_len: u16,
+/// A random temp name, or the destination's name and a suffix, inline;
+/// empty for an exact name.
+temp: TempName = .init,
 /// An exact temp name, borrowed.
 exact: []const u8,
 /// `Temp.in_place`: the file is under its own name, and nothing renames it.
@@ -166,8 +165,6 @@ pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOpt
         .root = dir,
         .dest = dest_sub_path,
         .base_start = base_start,
-        .temp_buffer = undefined,
-        .temp_len = 0,
         .exact = &.{},
         .writer_state = undefined,
     };
@@ -203,17 +200,18 @@ fn createTemp(p: *Staged, io: Io, options: CreateOptions, mode: Io.File.Permissi
         .suffix => |suffix| {
             if (suffix.len == 0 or paths.baseStart(suffix) != 0) return error.BadPathName;
             const base = p.baseName();
-            if (suffix.len > p.temp_buffer.len - base.len) return error.NameTooLong;
-            @memcpy(p.temp_buffer[0..base.len], base);
-            @memcpy(p.temp_buffer[base.len..][0..suffix.len], suffix);
-            p.temp_len = @intCast(base.len + suffix.len); // safe: at most max_temp_name, checked above
+            p.temp = .init;
+            p.temp.appendSlice(base) catch return error.NameTooLong;
+            p.temp.appendSlice(suffix) catch return error.NameTooLong;
             return sys.createTemp(io, p.parent.handle, p.tempName(), mode, options.read);
         },
         .random => |prefix| {
             if (prefix.len > max_prefix or paths.baseStart(prefix) != 0) return error.BadPathName;
             var draws: u32 = 0;
             while (true) {
-                p.temp_len = drawName(io, prefix, p.temp_buffer[0..64]);
+                const drawn = drawName(io, prefix);
+                p.temp = .init;
+                p.temp.appendSlice(drawn.constItems()) catch assert.never("a drawn name is at most 64 bytes, and max_temp_name is at least 64");
                 return sys.createTemp(io, p.parent.handle, p.tempName(), mode, options.read) catch |err| switch (err) {
                     error.PathAlreadyExists, error.Busy => {
                         draws += 1;
@@ -235,20 +233,27 @@ pub const max_temp_name = @max(64, std.fs.max_name_bytes);
 /// How many base32 characters follow the prefix.
 pub const random_len = 26;
 
-/// Writes the prefix, then 26 lowercase base32 characters of 128 random
-/// bits, into `out`, and returns the name's length.
-pub fn drawName(io: Io, prefix: []const u8, out: *[64]u8) u8 {
+/// A temp name held inline.
+pub const TempName = @import("aegis").bounded.Array(u8, max_temp_name);
+/// A random temp name: a prefix of at most `max_prefix` bytes and
+/// `random_len` characters.
+pub const DrawnName = @import("aegis").bounded.Array(u8, 64);
+
+/// The prefix, then 26 lowercase base32 characters of 128 random bits.
+pub fn drawName(io: Io, prefix: []const u8) DrawnName {
     assert.invariant(prefix.len <= max_prefix, "drawName: the prefix is longer than max_prefix");
     var random: [16]u8 = undefined;
     io.random(&random);
-    @memcpy(out[0..prefix.len], prefix);
-    encodeBase32(&random, out[prefix.len..][0..random_len]);
-    return @intCast(prefix.len + random_len); // safe: the contract above bounds the prefix, so the name is at most 58 bytes
+    var name: DrawnName = .init;
+    name.appendSlice(prefix) catch assert.never("the contract above bounds the prefix, so the name is at most 58 bytes");
+    name.appendSlice(&encodeBase32(&random)) catch assert.never("the contract above bounds the prefix, so the name is at most 58 bytes");
+    return name;
 }
 
 const base32 = "abcdefghijklmnopqrstuvwxyz234567";
 
-fn encodeBase32(bytes: *const [16]u8, out: *[random_len]u8) void {
+fn encodeBase32(bytes: *const [16]u8) [random_len]u8 {
+    var out: [random_len]u8 = @splat(0);
     var bits = std.mem.readInt(u128, bytes, .big);
     var i: usize = out.len;
     while (i > 0) {
@@ -256,6 +261,7 @@ fn encodeBase32(bytes: *const [16]u8, out: *[random_len]u8) void {
         out[i] = base32[@as(u5, @truncate(bits))];
         bits >>= 5;
     }
+    return out;
 }
 
 /// Whether `name` is `prefix` followed by exactly the characters
@@ -289,8 +295,8 @@ fn applyMode(p: *Staged, io: Io, mode: Mode) CreateError!void {
 
 /// The temp's name in the destination's directory.
 pub fn tempName(p: *const Staged) []const u8 {
-    if (p.temp_len == 0) return p.exact;
-    return p.temp_buffer[0..p.temp_len];
+    if (p.temp.len() == 0) return p.exact;
+    return p.temp.constItems();
 }
 
 /// The destination's base name.
@@ -556,7 +562,7 @@ fn removeTemp(p: *Staged, io: Io) void {
 /// place, and on Darwin, whose clone makes its own file under a new name,
 /// only a random temp.
 pub fn canClone(p: *const Staged) bool {
-    return !p.in_place and (!is_darwin or (p.temp_len >= random_len and p.exact.len == 0));
+    return !p.in_place and (!is_darwin or (p.temp.len() >= random_len and p.exact.len == 0));
 }
 
 /// Makes the open temp, still empty, a copy-on-write clone of `src` where
@@ -570,12 +576,11 @@ pub fn cloneFrom(p: *Staged, io: Io, src: sys.Handle) (sys.CloneError || sys.Ren
     assert.invariant(p.state == .open and !p.writer_active and p.canClone(), "Staged.cloneFrom: the temp is open, unwritten and can be a clone");
     if (!is_darwin) return sys.cloneInto(io, p.file.handle, src);
     const mode = (try p.file.stat(io)).permissions;
-    const prefix = p.tempName()[0 .. p.temp_len - random_len];
-    var buffer: [64]u8 = undefined;
+    const prefix = p.tempName()[0 .. p.temp.len() - random_len];
     var draws: u32 = 0;
-    const name = while (true) {
-        const n = drawName(io, prefix, &buffer);
-        const cloned = sys.cloneAt(io, src, p.parent.handle, buffer[0..n]) catch |err| switch (err) {
+    const drawn = while (true) {
+        const candidate = drawName(io, prefix);
+        const cloned = sys.cloneAt(io, src, p.parent.handle, candidate.constItems()) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 draws += 1;
                 if (draws < max_draws) continue;
@@ -585,9 +590,10 @@ pub fn cloneFrom(p: *Staged, io: Io, src: sys.Handle) (sys.CloneError || sys.Ren
         };
         switch (cloned) {
             .refused => return .refused,
-            .cloned => break buffer[0..n],
+            .cloned => break candidate,
         }
     };
+    const name = drawn.constItems();
     sys.rename(io, p.parent.handle, name, p.parent.handle, p.tempName()) catch |err| {
         // glint-ignore: Z026 -- cleanup after a failure the caller already gets
         sys.unlink(io, p.parent.handle, name) catch {};
@@ -832,11 +838,8 @@ test "a staged file moves forward only: a synced temp publishes or is kept, and 
 }
 
 test "base32 names are 26 lowercase characters" {
-    var out: [26]u8 = undefined;
-    encodeBase32(&@splat(0xff), &out);
-    try std.testing.expectEqualStrings("h7777777777777777777777777", &out);
-    encodeBase32(&@splat(0), &out);
-    try std.testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaa", &out);
+    try std.testing.expectEqualStrings("h7777777777777777777777777", &encodeBase32(&@splat(0xff)));
+    try std.testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaa", &encodeBase32(&@splat(0)));
 }
 
 test "a random name is the prefix and 26 base32 characters, nothing else" {

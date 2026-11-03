@@ -143,21 +143,23 @@ pub fn backoff(attempt: u32, random: u16) u64 {
     return @max(1, spread * multiplier / 1000);
 }
 
-/// The holder file's name, `<base>~pid.lock`, in `out`.
-fn holderName(base: []const u8, out: *[Staged.max_temp_name]u8) error{NameTooLong}![]const u8 {
-    const suffix = "~pid.lock";
-    if (suffix.len > out.len - base.len) return error.NameTooLong;
-    @memcpy(out[0..base.len], base);
-    @memcpy(out[base.len..][0..suffix.len], suffix);
-    return out[0 .. base.len + suffix.len];
+/// A holder file's name.
+const HolderName = aegis.bounded.Array(u8, Staged.max_temp_name);
+
+/// The holder file's name, `<base>~pid.lock`.
+fn holderName(base: []const u8) error{NameTooLong}!HolderName {
+    var out: HolderName = .init;
+    out.appendSlice(base) catch return error.NameTooLong;
+    out.appendSlice("~pid.lock") catch return error.NameTooLong;
+    return out;
 }
 
 /// Writes the holder file, or removes one a crash left: while this lock is
 /// held, any holder file beside it is this lock's to keep or drop.
 fn mark(l: *Lock, io: Io, holder: Holder) (HolderError || error{NameTooLong})!void {
     const staged = &l.pending.staged;
-    var buffer: [Staged.max_temp_name]u8 = undefined;
-    const name = try holderName(staged.baseName(), &buffer);
+    const holder_name = try holderName(staged.baseName());
+    const name = holder_name.constItems();
     switch (holder) {
         .none => staged.parent.deleteFile(io, name) catch |err| switch (err) {
             error.FileNotFound => {},
@@ -179,8 +181,8 @@ fn mark(l: *Lock, io: Io, holder: Holder) (HolderError || error{NameTooLong})!vo
 /// writes or removes it.
 fn unmark(l: *Lock, io: Io) void {
     const staged = &l.pending.staged;
-    var buffer: [Staged.max_temp_name]u8 = undefined;
-    const name = holderName(staged.baseName(), &buffer) catch return;
+    const holder_name = holderName(staged.baseName()) catch return;
+    const name = holder_name.constItems();
     // glint-ignore: Z026 -- a holder file left behind is read only beside a held lock, and the next lock writes or removes it
     staged.parent.deleteFile(io, name) catch {};
 }

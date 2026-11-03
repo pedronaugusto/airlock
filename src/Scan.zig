@@ -21,6 +21,7 @@
 //! first; failed with `ENOTSUP` it is the volume without one.
 const std = @import("std");
 const builtin = @import("builtin");
+const aegis = @import("aegis");
 const Io = std.Io;
 const assert = std.debug.assert;
 const sys = @import("sys.zig");
@@ -29,7 +30,12 @@ const Scan = @This();
 
 dir: Io.Dir,
 buffer: []align(@alignOf(usize)) u8,
-arm: Arm,
+/// Which way the scan reads, chosen by the first `next`.
+arm: Arms.Runtime(void),
+/// The batch arm's place in the buffer.
+batch: Batched = .{},
+/// The plain arm's reader.
+plain: Io.Dir.Reader,
 
 /// One entry and its stat. `name` points into the scan's buffer and is
 /// valid until the next call to `next`.
@@ -48,21 +54,23 @@ pub const min_buffer_len = @max(Io.Dir.Reader.min_buffer_len, 1024);
 /// Whether this platform has a batch call. A volume may still refuse it.
 pub const batch_supported = builtin.target.os.tag.isDarwin();
 
-const Arm = union(enum) {
-    /// Nothing read yet: the first `next` chooses the arm.
-    start,
-    /// Batches: `count` entries left in the buffer from `cursor` on, and
-    /// another call when they run out unless the last one was empty.
-    batch: struct { cursor: usize, count: u32, done: bool },
-    /// The directory read, and one stat per name.
-    plain: Io.Dir.Reader,
-};
+/// The ways a scan reads: nothing read yet (`start`), then batches, or the
+/// directory read with one stat per name. The first `next` chooses, once.
+const Arm = enum { start, batch, plain };
+const Arms = aegis.state.Machine(Arm, enum { batched, plain }, .{ .initial = .start, .terminal = &.{ .batch, .plain }, .edges = &.{
+    .{ .from = .start, .on = .batched, .to = .batch },
+    .{ .from = .start, .on = .plain, .to = .plain },
+} });
+
+/// Batches: `count` entries left in the buffer from `cursor` on, and
+/// another call when they run out unless the last one was empty.
+const Batched = struct { cursor: usize = 0, count: u32 = 0, done: bool = false };
 
 /// A scan of `dir`, opened for iteration, from its first entry, into
 /// `buffer` (at least `min_buffer_len` bytes). Reads nothing until `next`.
 pub fn init(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
     assert(buffer.len >= min_buffer_len);
-    return .{ .dir = dir, .buffer = buffer, .arm = .start };
+    return .{ .dir = dir, .buffer = buffer, .arm = .init({}), .plain = .init(dir, buffer) };
 }
 
 /// A scan that reads the directory the ordinary way on every platform:
@@ -70,31 +78,37 @@ pub fn init(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
 /// volume that takes the other arm.
 pub fn initPlain(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
     assert(buffer.len >= min_buffer_len);
-    return .{ .dir = dir, .buffer = buffer, .arm = .{ .plain = .init(dir, buffer) } };
+    var s: Scan = .{ .dir = dir, .buffer = buffer, .arm = .init({}), .plain = .init(dir, buffer) };
+    _ = s.arm.step(.plain) catch unreachable; // unreachable: a new scan is at its start
+    return s;
 }
 
 /// Whether the scan reads batches. Decided by the first `next`; a caller
 /// that measures asks here.
 pub fn isBatched(s: *const Scan) bool {
-    return s.arm == .batch;
+    return s.arm.current() == .batch;
 }
 
 /// The next entry, or null at the end of the directory. `.` and `..` are
 /// never given; the order is the file system's. An entry removed between
 /// the listing and its stat is passed over.
 pub fn next(s: *Scan, io: Io) Error!?Entry {
-    while (true) switch (s.arm) {
+    while (true) switch (s.arm.current()) {
         .start => {
             if (batch_supported) switch (try sys.readBatch(io, s.dir.handle, s.buffer, true)) {
                 .entries => |count| {
-                    s.arm = .{ .batch = .{ .cursor = 0, .count = count, .done = count == 0 } };
+                    s.batch = .{ .count = count, .done = count == 0 };
+                    _ = s.arm.step(.batched) catch unreachable; // unreachable: at the start
                     continue;
                 },
                 .unsupported, .routed => {},
             };
-            s.arm = .{ .plain = .init(s.dir, s.buffer) };
+            // A batch call the volume refused may have written the buffer.
+            s.plain = .init(s.dir, s.buffer);
+            _ = s.arm.step(.plain) catch unreachable; // unreachable: at the start
         },
-        .batch => |*b| {
+        .batch => {
+            const b = &s.batch;
             if (b.count == 0) {
                 if (b.done) return null;
                 const batch = try sys.readBatch(io, s.dir.handle, s.buffer, false);
@@ -119,8 +133,8 @@ pub fn next(s: *Scan, io: Io) Error!?Entry {
             };
             return .{ .name = parsed.name, .stat = stat };
         },
-        .plain => |*reader| {
-            const entry = try reader.next(io) orelse return null;
+        .plain => {
+            const entry = try s.plain.next(io) orelse return null;
             if (isDots(entry.name)) continue;
             const stat = statOf(io, s.dir, entry.name) catch |err| switch (err) {
                 error.FileNotFound => continue,

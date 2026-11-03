@@ -312,12 +312,10 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
     var parent = try Parent.open(io, dir, sub_path);
     defer parent.close(io);
     const kind = try linkKind(io, parent.dir, target, options);
-    var buffer: [64]u8 = undefined;
-    var temp: []const u8 = undefined;
     var draws: u32 = 0;
-    while (true) {
-        temp = buffer[0..Staged.drawName(io, options.temp_prefix, &buffer)];
-        sys.symLink(io, target, parent.dir.handle, temp, kind) catch |err| switch (err) {
+    const drawn = while (true) {
+        const candidate = Staged.drawName(io, options.temp_prefix);
+        sys.symLink(io, target, parent.dir.handle, candidate.constItems(), kind) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 draws += 1;
                 if (draws < 4) continue;
@@ -325,8 +323,9 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
             },
             else => |e| return e,
         };
-        break;
-    }
+        break candidate;
+    };
+    const temp = drawn.constItems();
     const level = options.sync.level;
     var reached: Reached = .none;
     if (level != .none) {
