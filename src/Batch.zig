@@ -86,8 +86,12 @@ pub const Slot = struct {
     id: sys.Id = .{ .volume = .fromRaw(0), .file = 0 },
     /// Private: Windows, the hash of the volume's device name.
     device: sys.DeviceId = no_device,
-    /// Private: a file or directory handle, or a pending's parent.
+    /// Private: a file or directory handle, or a pending's parent: lent,
+    /// and never released through this field.
     handle: sys.Handle = undefined,
+    /// Private: the handle the batch opened for this slot, which it
+    /// closes: `handle` too, while it is set.
+    opened: ?sys.Handle = null,
     /// Private: the pending's state, for a pending slot.
     pending: ?*Staged = null,
     /// Private: the root a path slot is relative to.
@@ -98,8 +102,6 @@ pub const Slot = struct {
     index: SlotIndex = undefined, // set by `push`; a slot beyond `len` is never read
     kind: Kind = .fence,
     publish: Pending.Publish = .replace,
-    /// Private: the batch opened `handle` and closes it.
-    owned: bool = false,
     /// Private: `handle` is open.
     open: bool = false,
     /// Private: a name changed in the directory this slot stands for.
@@ -115,6 +117,22 @@ pub const Slot = struct {
     /// Private: `id.volume` and `device` name the volume a file slot's
     /// sync registered, for the parent that later stands for it.
     on_volume: bool = false,
+
+    /// The batch opened `h` for this slot: it is the slot's handle until
+    /// `close` closes it.
+    fn adopt(s: *Slot, h: sys.Handle) void {
+        s.opened = h;
+        s.handle = h;
+        s.open = true;
+    }
+
+    /// Closes what the batch opened for this slot; a lent handle is let
+    /// go.
+    fn close(s: *Slot, io: Io) void {
+        if (s.opened) |h| sys.release(io, h);
+        s.opened = null;
+        s.open = false;
+    }
 };
 
 pub fn init(storage: []Slot) Batch {
@@ -225,9 +243,7 @@ pub fn reset(b: *Batch, io: Io) void {
 }
 
 fn closeSlot(io: Io, s: *Slot) void {
-    if (s.owned and s.open) sys.release(io, s.handle);
-    s.open = false;
-    s.owned = false;
+    s.close(io);
 }
 
 /// Makes everything in the batch durable at `options.level`, as the table
@@ -354,9 +370,7 @@ fn Run(comptime fallback: Fallback) type {
         fn openDirs(r: *Self) E!void {
             for (r.slots()) |*s| switch (s.kind) {
                 .dir_path => {
-                    s.handle = sys.openDir(r.io, s.root, s.path) catch |err| return r.fail(s, err);
-                    s.owned = true;
-                    s.open = true;
+                    s.adopt(sys.openDir(r.io, s.root, s.path) catch |err| return r.fail(s, err));
                 },
                 .dir => try r.ownCwd(s),
                 else => {},
@@ -366,9 +380,7 @@ fn Run(comptime fallback: Fallback) type {
         /// A slot whose directory is `cwd()` gets its own handle on `"."`.
         fn ownCwd(r: *Self, s: *Slot) E!void {
             if (is_windows or s.handle != sys.at_fdcwd) return;
-            s.handle = sys.openDir(r.io, sys.at_fdcwd, ".") catch |err| return r.fail(s, err);
-            s.owned = true;
-            s.open = true;
+            s.adopt(sys.openDir(r.io, sys.at_fdcwd, ".") catch |err| return r.fail(s, err));
         }
 
         /// Opens a pending's parent before its rename: the handle an earlier
@@ -386,9 +398,7 @@ fn Run(comptime fallback: Fallback) type {
                 s.open = true;
                 try r.ownCwd(s);
             } else {
-                s.handle = sys.openDir(r.io, s.root, s.path) catch |err| return r.fail(s, err);
-                s.owned = true;
-                s.open = true;
+                s.adopt(sys.openDir(r.io, s.root, s.path) catch |err| return r.fail(s, err));
             }
             p.adoptParent(.{ .handle = s.handle });
             if (s.on_volume) _ = r.volume(s.id.volume, s.device, s.handle, true, s.index);
@@ -441,7 +451,7 @@ fn Run(comptime fallback: Fallback) type {
                 for (all[start..end]) |*s| if (isFileSlot(s)) {
                     if (s.err) |err| return r.fail(s, err);
                     if (s.reached == .written and (s.pending == null or s.pending.?.state == .open)) {
-                        s.reached = r.registerWriteout(s, if (s.pending) |p| p.file.handle else s.handle, s.id, no_device, if (s.pending) |p| p.tempName() else s.path) catch |err| return r.fail(s, err);
+                        s.reached = r.registerWriteout(s, if (s.pending) |p| p.tempFile().handle else s.handle, s.id, no_device, if (s.pending) |p| p.tempName() else s.path) catch |err| return r.fail(s, err);
                     }
                     r.closePath(s);
                     try r.part(s, s.reached);
@@ -480,11 +490,7 @@ fn Run(comptime fallback: Fallback) type {
         }
 
         fn closePath(r: *Self, s: *Slot) void {
-            if (s.kind == .path and s.open and !r.standsForVolume(s.handle)) {
-                sys.release(r.io, s.handle);
-                s.open = false;
-                s.owned = false;
-            }
+            if (s.kind == .path and s.open and !r.standsForVolume(s.handle)) s.close(r.io);
         }
 
         /// Linux: `parallel` syncs at once; the journal merges concurrent
@@ -545,11 +551,7 @@ fn Run(comptime fallback: Fallback) type {
             };
             // A path's handle is closed after its sync, unless it stands for
             // its volume's flush.
-            if (s.kind == .path and s.open and !r.standsForVolume(handle)) {
-                sys.release(r.io, handle);
-                s.open = false;
-                s.owned = false;
-            }
+            if (s.kind == .path and s.open and !r.standsForVolume(handle)) s.close(r.io);
         }
 
         /// A pending a failed rename left synced: its temp is not synced again
@@ -566,11 +568,9 @@ fn Run(comptime fallback: Fallback) type {
         fn fileHandle(r: *Self, s: *Slot) Error!sys.Handle {
             switch (s.kind) {
                 .file => return s.handle,
-                .pending => return s.pending.?.file.handle,
+                .pending => return s.pending.?.tempFile().handle,
                 .path => {
-                    s.handle = try sys.openFile(r.io, s.root, s.path);
-                    s.owned = true;
-                    s.open = true;
+                    s.adopt(try sys.openFile(r.io, s.root, s.path));
                     return s.handle;
                 },
                 else => unreachable, // unreachable: only file slots reach here
@@ -878,8 +878,7 @@ fn Run(comptime fallback: Fallback) type {
             if (index.get(all)) |s| {
                 if (s.index == index) return s;
             } else |err| switch (err) {
-                // An index past the slots finds its slot by the search below.
-                error.OutOfBounds => {},
+                error.OutOfBounds => assert.never("Batch: an index is given out at `push` as `len` was, so it is below `len`"),
             }
             for (all) |*s| if (s.index == index) return s;
             unreachable; // unreachable: every index names a slot of this batch

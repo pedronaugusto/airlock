@@ -33,7 +33,8 @@ fn pending(io: Io, dir: Io.Dir, name: []const u8, bytes: []const u8) !airlock.Pe
     var p = try airlock.create(io, dir, name, .{});
     errdefer p.discard(io);
     try p.file().writePositionalAll(io, bytes, 0);
-    return p;
+    // The write bound it here: it moves to the caller.
+    return p.move();
 }
 
 test "three publishes into one directory: the fewest barriers per platform" {

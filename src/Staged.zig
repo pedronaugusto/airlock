@@ -11,6 +11,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const sys = @import("sys.zig");
 const paths = @import("paths.zig");
+const held = @import("held.zig");
 const platform = @import("platform.zig");
 const level_mod = @import("level.zig");
 const Level = level_mod.Level;
@@ -23,17 +24,15 @@ const native_os = builtin.target.os.tag;
 const is_windows = native_os == .windows;
 const is_darwin = native_os.isDarwin();
 
-/// The temp file.
-file: Io.File,
+/// The temp file while it is open: its sync closes it on POSIX, and the
+/// end of its part everywhere.
+file: ?held.File,
 /// The error behind `error.PublishedNotDurable` or a poisoned state.
 cause: ?anyerror = null,
-/// The directory the destination is in, held from create to the end. Not
-/// valid after a batch took it and closed it.
-parent: Io.Dir,
-/// Whether airlock opened `parent` and closes it.
-owns_parent: bool,
-/// Whether `parent` is open.
-parent_open: bool,
+/// The directory the destination is in, held from create to the end: one
+/// airlock opened, or `root`, lent. A batch lets an opened one go, and
+/// lends its own at the rename.
+parent: held.Parent,
 /// The directory the caller named the destination relative to.
 root: Io.Dir,
 /// The destination as the caller named it, borrowed.
@@ -49,13 +48,13 @@ exact: []const u8,
 in_place: bool = false,
 /// Where the temp is (see `State`).
 state: State = .open,
-/// Whether `file`'s handle is open.
-file_open: bool = true,
 /// What the temp's sync reached, for a retried commit too.
 file_reached: Reached = .none,
-/// The writer `writer` hands out, and whether it is in use.
-writer_state: Writer = undefined,
-writer_active: bool = false,
+/// `CreateOptions.writeback_bytes`, for the writer.
+writeback_bytes: u32 = 0,
+/// The writer `writer` hands out, once it has: from then on the staged
+/// file does not move, since the writer points into it.
+writer_state: ?Writer = null,
 
 pub const State = enum {
     /// Created, written to, not yet synced.
@@ -158,30 +157,59 @@ pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOpt
     const base = dest_sub_path[base_start..];
     if (base.len == 0 or std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, "..")) return error.BadPathName;
     var p: Staged = .{
-        .file = undefined,
-        .parent = dir,
-        .owns_parent = false,
-        .parent_open = true,
+        .file = null,
+        .parent = try .open(io, dir, dest_sub_path),
         .root = dir,
         .dest = dest_sub_path,
         .base_start = base_start,
         .exact = &.{},
-        .writer_state = undefined,
+        .writeback_bytes = options.writeback_bytes,
     };
-    if (base_start != 0) {
-        p.parent = .{ .handle = try sys.openDir(io, dir.handle, paths.parentPath(dest_sub_path, base_start)) };
-        p.owns_parent = true;
-    }
-    errdefer if (p.owns_parent) sys.release(io, p.parent.handle);
+    errdefer p.parent.close(io);
     const create_mode: Io.File.Permissions = switch (options.mode) {
         .exact => |perm| perm,
         else => .default_file,
     };
-    p.file = .{ .handle = try p.createTemp(io, options, create_mode), .flags = .{ .nonblocking = false } };
+    p.file = .init(.{ .handle = try p.createTemp(io, options, create_mode), .flags = .{ .nonblocking = false } });
     errdefer p.removeTemp(io);
     try p.applyMode(io, options.mode);
-    p.writer_state = .{ .interface = undefined, .io = io, .threshold = options.writeback_bytes };
-    return p;
+    // Its owners bound to `p` as the create used them.
+    return p.move();
+}
+
+/// The staged file at its new address. Its owners bind where they are
+/// first used, so one used and then returned by value (a create, a lock
+/// that wrote its holder file) goes through here. Once a writer is handed
+/// out it does not move at all: the writer points into it.
+pub fn move(p: *Staged) Staged {
+    assert.invariant(p.writer_state == null, "Staged.move: a writer points into it");
+    return .{
+        .file = if (p.file) |*f| f.move() else null,
+        .cause = p.cause,
+        .parent = p.parent.move(),
+        .root = p.root,
+        .dest = p.dest,
+        .base_start = p.base_start,
+        .temp = p.temp,
+        .exact = p.exact,
+        .in_place = p.in_place,
+        .state = p.state,
+        .file_reached = p.file_reached,
+        .writeback_bytes = p.writeback_bytes,
+        .writer_state = null,
+    };
+}
+
+/// The temp, lent, while it is open.
+pub fn tempFile(p: *Staged) Io.File {
+    if (p.file) |*f| return f.borrow().*;
+    assert.never("Staged: the temp is closed");
+}
+
+/// Closes the temp if it is open.
+fn closeFile(p: *Staged, io: Io) void {
+    if (p.file) |*f| f.deinit(io);
+    p.file = null;
 }
 
 fn createTemp(p: *Staged, io: Io, options: CreateOptions, mode: Io.File.Permissions) CreateError!sys.Handle {
@@ -190,12 +218,12 @@ fn createTemp(p: *Staged, io: Io, options: CreateOptions, mode: Io.File.Permissi
             // The temp's name is the destination's: a discard removes it.
             p.exact = p.baseName();
             p.in_place = true;
-            return sys.createTemp(io, p.parent.handle, p.exact, mode, options.read);
+            return sys.createTemp(io, p.parent.dir().handle, p.exact, mode, options.read);
         },
         .exact => |name| {
             if (name.len == 0 or paths.baseStart(name) != 0) return error.BadPathName;
             p.exact = name;
-            return sys.createTemp(io, p.parent.handle, name, mode, options.read);
+            return sys.createTemp(io, p.parent.dir().handle, name, mode, options.read);
         },
         .suffix => |suffix| {
             if (suffix.len == 0 or paths.baseStart(suffix) != 0) return error.BadPathName;
@@ -203,7 +231,7 @@ fn createTemp(p: *Staged, io: Io, options: CreateOptions, mode: Io.File.Permissi
             p.temp = .init;
             p.temp.appendSlice(base) catch return error.NameTooLong;
             p.temp.appendSlice(suffix) catch return error.NameTooLong;
-            return sys.createTemp(io, p.parent.handle, p.tempName(), mode, options.read);
+            return sys.createTemp(io, p.parent.dir().handle, p.tempName(), mode, options.read);
         },
         .random => |prefix| {
             if (prefix.len > max_prefix or paths.baseStart(prefix) != 0) return error.BadPathName;
@@ -212,7 +240,7 @@ fn createTemp(p: *Staged, io: Io, options: CreateOptions, mode: Io.File.Permissi
                 const drawn = drawName(io, prefix);
                 p.temp = .init;
                 p.temp.appendSlice(drawn.constItems()) catch assert.never("a drawn name is at most 64 bytes, and max_temp_name is at least 64");
-                return sys.createTemp(io, p.parent.handle, p.tempName(), mode, options.read) catch |err| switch (err) {
+                return sys.createTemp(io, p.parent.dir().handle, p.tempName(), mode, options.read) catch |err| switch (err) {
                     error.PathAlreadyExists, error.Busy => {
                         draws += 1;
                         if (draws < max_draws) continue;
@@ -280,15 +308,15 @@ pub fn isRandomName(name: []const u8, prefix: []const u8) bool {
 fn applyMode(p: *Staged, io: Io, mode: Mode) CreateError!void {
     switch (mode) {
         .default => {},
-        .exact => |perm| try sys.setMode(io, p.file.handle, perm),
+        .exact => |perm| try sys.setMode(io, p.tempFile().handle, perm),
         .inherit => {
             // An exclusive create in place had no file to inherit from.
             if (p.in_place) return;
-            const stat = p.parent.statFile(io, p.baseName(), .{}) catch |err| switch (err) {
+            const stat = p.parent.dir().statFile(io, p.baseName(), .{}) catch |err| switch (err) {
                 error.FileNotFound => return,
                 else => |e| return e,
             };
-            try sys.setMode(io, p.file.handle, stat.permissions);
+            try sys.setMode(io, p.tempFile().handle, stat.permissions);
         },
     }
 }
@@ -319,6 +347,8 @@ pub fn parentSubPath(p: *const Staged) ?[]const u8 {
 /// `commit` flushes it.
 pub const Writer = struct {
     interface: Io.Writer,
+    /// The staged file it writes to, which holds it.
+    staged: *Staged,
     /// The `Io` the writes go through (a writer adapter keeps it).
     io: Io,
     /// `CreateOptions.writeback_bytes`.
@@ -331,10 +361,6 @@ pub const Writer = struct {
     err: ?anyerror = null,
 
     const vtable: Io.Writer.VTable = .{ .drain = drain };
-
-    fn staged(w: *Writer) *Staged {
-        return @alignCast(@fieldParentPtr("writer_state", w)); // safe: every Writer lives in a Staged
-    }
 
     /// One vectored write of what is buffered and the slices in `data`; a
     /// pattern repeated `splat` times is copied into the buffer instead,
@@ -356,9 +382,9 @@ pub const Writer = struct {
     }
 
     fn write(w: *Writer, header: []const u8, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const p = w.staged();
+        const p = w.staged;
         const vector: []const []const u8 = if (data.len == 0) &.{""} else data;
-        const n = p.file.writeStreaming(w.io, header, vector, splat) catch |err| {
+        const n = p.tempFile().writeStreaming(w.io, header, vector, splat) catch |err| {
             // What reached the file is unknown: a failed write poisons the
             // commit as a failed sync does.
             w.err = err;
@@ -368,7 +394,7 @@ pub const Writer = struct {
         w.offset += n;
         w.since += n;
         if (w.threshold == 0 or w.since < w.threshold) return n;
-        sys.writeback(w.io, p.file.handle, w.offset - w.since, w.since) catch |err| {
+        sys.writeback(w.io, p.tempFile().handle, w.offset - w.since, w.since) catch |err| {
             // A writeback error is a failed sync: the commit poisons.
             w.err = err;
             p.cause = err;
@@ -382,10 +408,13 @@ pub const Writer = struct {
 /// A buffered writer onto the temp, as `Pending.writer` documents.
 pub fn writer(p: *Staged, io: Io, buffer: []u8) *Io.Writer {
     assert.invariant(p.state == .open, "Pending.writer: the temp is no longer open for writing");
-    p.writer_state.io = io;
-    p.writer_state.interface = .{ .vtable = &Writer.vtable, .buffer = buffer };
-    p.writer_active = true;
-    return &p.writer_state.interface;
+    if (p.writer_state) |*w| {
+        // A writer handed out again keeps its counts: the offset is the
+        // file's.
+        w.io = io;
+        w.interface = .{ .vtable = &Writer.vtable, .buffer = buffer };
+    } else p.writer_state = .{ .interface = .{ .vtable = &Writer.vtable, .buffer = buffer }, .staged = p, .io = io, .threshold = p.writeback_bytes };
+    return &p.writer_state.?.interface;
 }
 
 // ---------------------------------------------------------------------
@@ -472,9 +501,9 @@ pub fn commit(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOp
 /// failed sync.
 pub fn flushWriter(p: *Staged, io: Io) CommitError!void {
     if (p.cause) |cause| return p.poison(io, cause);
-    if (!p.writer_active) return;
-    p.writer_state.interface.flush() catch {
-        const cause = p.writer_state.err orelse error.InputOutput;
+    const w = if (p.writer_state) |*active| active else return;
+    w.interface.flush() catch {
+        const cause = w.err orelse error.InputOutput;
         return p.poison(io, cause);
     };
 }
@@ -494,7 +523,7 @@ fn fileMeets(reached: Reached, options: CommitOptions) bool {
 }
 
 fn syncTemp(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOptions) CommitErrorOf(fallback)!void {
-    const reached = platform.syncChain(io, options.blocking, p.file.handle, fileLevel(options), options.barrier, p.tempName()) catch |err| switch (err) {
+    const reached = platform.syncChain(io, options.blocking, p.tempFile().handle, fileLevel(options), options.barrier, p.tempName()) catch |err| switch (err) {
         // EINTR and a cancel are not a failed sync: the kernel kept its state.
         error.Canceled => return error.Canceled,
         else => |e| return p.poison(io, e),
@@ -509,8 +538,12 @@ pub fn markSynced(p: *Staged, io: Io, reached: Reached) CommitError!void {
     p.file_reached = reached;
     p.moveTo(.synced);
     if (!is_windows) {
-        p.file_open = false;
-        sys.close(io, p.file.handle, p.tempName()) catch |err| return p.poison(io, err);
+        // Taken out of its owner, for a close whose failure counts: the
+        // same handle, which the owner no longer releases.
+        var file = p.tempFile();
+        p.file.?.take(&file);
+        p.file = null;
+        sys.close(io, file.handle, p.tempName()) catch |err| return p.poison(io, err);
     }
 }
 
@@ -540,20 +573,17 @@ fn removeTemp(p: *Staged, io: Io) void {
     // directory.
     var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const parent = p.parentSubPath() orelse "";
-    const dir = if (p.parent_open) p.parent.handle else p.root.handle;
-    const name: ?[]const u8 = if (p.parent_open or parent.len == 0) p.tempName() else std.mem.print(&buffer, "{s}/{s}", .{ parent, p.tempName() }) catch null;
-    if (is_windows and p.file_open) {
+    const held_parent = p.parent.get();
+    const dir = if (held_parent) |d| d.handle else p.root.handle;
+    const name: ?[]const u8 = if (held_parent != null or parent.len == 0) p.tempName() else std.mem.print(&buffer, "{s}/{s}", .{ parent, p.tempName() }) catch null;
+    if (is_windows and p.file != null) {
         // By handle: the name is what a hook sees, and a route deletes by.
         // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-        sys.dispose(io, p.file.handle, dir, name orelse p.tempName()) catch {};
-        sys.release(io, p.file.handle);
-        p.file_open = false;
+        sys.dispose(io, p.tempFile().handle, dir, name orelse p.tempName()) catch {};
+        p.closeFile(io);
         return;
     }
-    if (p.file_open) {
-        sys.release(io, p.file.handle);
-        p.file_open = false;
-    }
+    p.closeFile(io);
     // glint-ignore: Z026 -- cleanup after a failure the caller already gets
     sys.unlink(io, dir, name orelse return) catch {};
 }
@@ -573,14 +603,14 @@ pub fn canClone(p: *const Staged) bool {
 /// it the temp's permissions. A refusal changes nothing; a failure leaves
 /// the temp a temp, for `discard` to remove.
 pub fn cloneFrom(p: *Staged, io: Io, src: sys.Handle) (sys.CloneError || sys.RenameError || sys.SetModeError || Io.File.StatError)!sys.Cloned {
-    assert.invariant(p.state == .open and !p.writer_active and p.canClone(), "Staged.cloneFrom: the temp is open, unwritten and can be a clone");
-    if (!is_darwin) return sys.cloneInto(io, p.file.handle, src);
-    const mode = (try p.file.stat(io)).permissions;
+    assert.invariant(p.state == .open and p.writer_state == null and p.canClone(), "Staged.cloneFrom: the temp is open, unwritten and can be a clone");
+    if (!is_darwin) return sys.cloneInto(io, p.tempFile().handle, src);
+    const mode = (try p.tempFile().stat(io)).permissions;
     const prefix = p.tempName()[0 .. p.temp.len() - random_len];
     var draws: u32 = 0;
     const drawn = while (true) {
         const candidate = drawName(io, prefix);
-        const cloned = sys.cloneAt(io, src, p.parent.handle, candidate.constItems()) catch |err| switch (err) {
+        const cloned = sys.cloneAt(io, src, p.parent.dir().handle, candidate.constItems()) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 draws += 1;
                 if (draws < max_draws) continue;
@@ -594,26 +624,25 @@ pub fn cloneFrom(p: *Staged, io: Io, src: sys.Handle) (sys.CloneError || sys.Ren
         }
     };
     const name = drawn.constItems();
-    sys.rename(io, p.parent.handle, name, p.parent.handle, p.tempName()) catch |err| {
+    sys.rename(io, p.parent.dir().handle, name, p.parent.dir().handle, p.tempName()) catch |err| {
         // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-        sys.unlink(io, p.parent.handle, name) catch {};
+        sys.unlink(io, p.parent.dir().handle, name) catch {};
         return err;
     };
     // The temp's name is the clone's from here; its old handle, the empty
     // file's, goes once the clone's is open.
-    const clone = try sys.openFile(io, p.parent.handle, p.tempName());
+    const clone = try sys.openFile(io, p.parent.dir().handle, p.tempName());
     sys.setMode(io, clone, mode) catch |err| {
         sys.release(io, clone);
         return err;
     };
-    sys.release(io, p.file.handle);
-    p.file = .{ .handle = clone, .flags = .{ .nonblocking = false } };
+    p.closeFile(io);
+    p.file = .init(.{ .handle = clone, .flags = .{ .nonblocking = false } });
     return .cloned;
 }
 
 fn releaseParent(p: *Staged, io: Io) void {
-    if (p.owns_parent and p.parent_open) sys.release(io, p.parent.handle);
-    p.parent_open = false;
+    p.parent.close(io);
 }
 
 /// Steps 4 to 8 of a commit, from a synced temp.
@@ -622,7 +651,7 @@ fn publishSynced(p: *Staged, comptime fallback: Fallback, io: Io, options: Commi
     defer if (flush) |h| sys.release(io, h);
     var dir_refused = false;
     if (is_windows and @backingInt(options.level) >= @backingInt(Level.data)) {
-        flush = platform.openDirFlush(io, p.parent.handle, options.busy_deadline) catch |err| switch (err) {
+        flush = platform.openDirFlush(io, p.parent.dir().handle, options.busy_deadline) catch |err| switch (err) {
             error.NoDevice => blk: {
                 if (fallback == .refuse) return error.LevelUnavailable;
                 dir_refused = true;
@@ -654,7 +683,7 @@ fn syncParent(p: *Staged, comptime fallback: Fallback, io: Io, options: CommitOp
     const outcome: platform.DirOutcome = if (is_windows)
         (if (flush) |h| try platform.flushDir(io, options.blocking, h, p.baseName()) else .{ .reached = .none, .refused = refused_before })
     else
-        try platform.dirSync(io, options.blocking, p.parent.handle, options.busy_deadline, p.baseName());
+        try platform.dirSync(io, options.blocking, p.parent.dir().handle, options.busy_deadline, p.baseName());
     if (outcome.refused) {
         if (fallback == .refuse) return error.LevelUnavailable;
         // The data was ordered before the name; the name may be lost.
@@ -679,7 +708,7 @@ fn rename(p: *Staged, io: Io, options: CommitOptions) CommitError!Renamed {
     // Already under its name, created exclusively.
     if (p.in_place) return .renamed;
     if (is_windows) return p.renameWindows(io, options);
-    const parent = p.parent.handle;
+    const parent = p.parent.dir().handle;
     if (options.publish == .replace) {
         try sys.rename(io, parent, p.tempName(), parent, p.baseName());
         return .renamed;
@@ -698,7 +727,7 @@ fn rename(p: *Staged, io: Io, options: CommitOptions) CommitError!Renamed {
 /// hard links, `keep_existing` checks then renames (safe, since equal names
 /// hold equal contents) and `create_new` cannot be done.
 fn linkFallback(p: *Staged, io: Io, publish: Publish) CommitError!Renamed {
-    const parent = p.parent.handle;
+    const parent = p.parent.dir().handle;
     sys.link(io, parent, p.tempName(), parent, p.baseName()) catch |err| switch (err) {
         error.AlreadyExists => return .taken,
         error.Refused => {
@@ -723,7 +752,7 @@ fn linkFallback(p: *Staged, io: Io, publish: Publish) CommitError!Renamed {
 fn renameWindows(p: *Staged, io: Io, options: CommitOptions) CommitError!Renamed {
     var backoff: platform.Backoff = .start(io, options.busy_deadline);
     while (true) {
-        const outcome = try sys.renameByHandle(io, p.file.handle, p.parent.handle, p.tempName(), p.parent.handle, p.baseName(), options.publish == .replace);
+        const outcome = try sys.renameByHandle(io, p.tempFile().handle, p.parent.dir().handle, p.tempName(), p.parent.dir().handle, p.baseName(), options.publish == .replace);
         switch (outcome) {
             .renamed => return .renamed,
             .collision => return .taken,
@@ -751,19 +780,16 @@ fn taken(p: *Staged, io: Io, publish: Publish) CommitError!Committed {
 
 fn removeTakenTemp(p: *Staged, io: Io) sys.UnlinkError!void {
     if (is_windows) {
-        try sys.dispose(io, p.file.handle, p.parent.handle, p.tempName());
+        try sys.dispose(io, p.tempFile().handle, p.parent.dir().handle, p.tempName());
         return;
     }
-    try sys.unlink(io, p.parent.handle, p.tempName());
+    try sys.unlink(io, p.parent.dir().handle, p.tempName());
 }
 
 /// Closes what is still open once the temp's part has ended: the temp
 /// itself, and a parent airlock opened.
 pub fn finish(p: *Staged, io: Io) void {
-    if (p.file_open) {
-        sys.release(io, p.file.handle);
-        p.file_open = false;
-    }
+    p.closeFile(io);
     p.releaseParent(io);
 }
 
@@ -785,17 +811,16 @@ pub fn discard(p: *Staged, io: Io) void {
 /// Closes a parent airlock opened, so a batch of many holds one handle
 /// each. The batch opens each distinct parent once, when it renames.
 pub fn dropParent(p: *Staged, io: Io) void {
-    if (p.owns_parent and p.parent_open) {
-        sys.release(io, p.parent.handle);
-        p.parent_open = false;
+    switch (p.parent) {
+        .owned => p.parent.close(io),
+        .lent, .closed => {},
     }
 }
 
-/// The batch's handle on the parent from here on.
+/// The batch's handle on the parent from here on, lent.
 pub fn adoptParent(p: *Staged, parent: Io.Dir) void {
-    p.parent = parent;
-    p.owns_parent = false;
-    p.parent_open = true;
+    assert.invariant(p.parent != .owned, "Staged.adoptParent: a parent airlock opened is still held");
+    p.parent = .{ .lent = parent };
 }
 
 /// Renames a synced temp as `publish` says: true if renamed, false if

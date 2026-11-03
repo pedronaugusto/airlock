@@ -50,15 +50,25 @@ pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOpt
     return .{ .staged = try .create(io, dir, dest_sub_path, options) };
 }
 
+/// The pending at its new address. A pending holds its temp and its
+/// directory in owners that bind where they are first used (`file`, a
+/// write, a commit), and Debug builds stop a pending used at one address
+/// and then at another: one used and then returned by value or stored
+/// elsewhere goes through here first. Not once `writer` handed out a
+/// writer, which points into the pending.
+pub fn move(p: *Pending) Pending {
+    return .{ .staged = p.staged.move() };
+}
+
 /// The temp file, to write to directly, while the pending is `open`. Once a
 /// sync has been made (`synced`, as after a commit that failed at the rename)
 /// the temp is closed on POSIX and its descriptor number may belong to another
 /// file; asking for it then, or after the pending ended, stops the program
 /// in every build rather than write to the wrong file. Lent: the pending
 /// closes it, never the holder.
-pub fn file(p: *const Pending) Io.File {
+pub fn file(p: *Pending) Io.File {
     assert.invariant(p.staged.state == .open, "Pending.file: the temp is no longer open for writing");
-    return p.staged.file;
+    return p.staged.tempFile();
 }
 
 /// The error behind `error.PublishedNotDurable` or `error.Poisoned`.

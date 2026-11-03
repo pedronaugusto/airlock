@@ -11,6 +11,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `renameUnsynced(io, old_dir, old, new_dir, new, busy_deadline)` is the rename with no sync, git's (Windows' busy retry included), and fails only with `Io.Dir.RenameError`. `rename` is it followed by the directory syncs, and its level is `.data` or `.full`: one that syncs nothing stops the program, where it renamed and returned `.none` under a `RenameError` that still carried `PublishedNotDurable`, which no sync could raise. (relic's `fs.rename`, which held that error `unreachable`.)
 - A `Batch` add takes a slot it is given room for: `addFile`, `addPath`, `addPending`, `addDir`, `addDirPath` and `fence` return nothing, an add past the slots stops the program in every build, and `room()` says how many are left. `AddError` is gone, and so is `BatchFull` from `Batch.Error` (`commit`'s and `commitOrRefuse`'s sets), where no commit could raise it. Every caller sizes its own slots: one that fills a batch commits it when `room()` is 0. (relic's `fs.syncAll`, which held each add and the commit's `BatchFull` `unreachable`; chronicle's backup, which checked its count and carried `BatchFull` in its error set.)
 - On aegis 0.3.0, which has one way to lend (`borrow`): `Pending.file()` and `Lock.file()` return the `std.Io.File`, lent by value, where they returned `aegis.own.Lent(Io.File)`. The pending (or the lock) still closes it; glint's lending rule keeps a holder from closing it. Migration: drop `.get()`.
+- A pending holds its temp and its directory in aegis owners (`own.OwnedIo`), each released once, where it kept them by value beside open flags. `Pending.file()` and `Lock.file()` take `*Pending` and `*Lock`, since a lend binds the owner. An owner binds where it is first used, and a Debug build stops a pending used at one address and then at another: `Pending.move()` and `Lock.move()` give it a new address, for one used and then returned by value or stored elsewhere (not once `writer` handed out a writer, which points into it). Migration: a pending whose file was lent before it is returned or stored goes through `move()`. (relic's `LockFile.open`, which lent the file to its writer and then returned the pending in the lock.)
 
 - `SymLinkError` loses `OperationUnsupported`: Windows makes symbolic links.
 
@@ -34,6 +35,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `Lock.release` after a commit whose sync failed no longer removes `<path>~pid.lock` through the directory the failed sync had closed. For a nested path that descriptor could already name another directory. The commit had removed the holder file before the sync.
 - `Pending.discard` and every path that lets a temp go remove it under cancel protection: a cancel that landed in the removal left the temp behind, a lock file a stale lock, and was lost. The cancel waits for the task's next cancelation point.
 - `Volume.of` on Linux returns `error.Canceled` for a cancel while it opens or reads `/proc/self/mountinfo`, where it ended the query and named no file system.
 

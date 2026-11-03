@@ -66,11 +66,17 @@ pub fn take(io: Io, dir: Io.Dir, path: []const u8, options: Options) Error!Lock 
     var lock: Lock = .{ .pending = try create(io, dir, path, options) };
     errdefer lock.pending.discard(io);
     try lock.mark(io, options.holder);
-    return lock;
+    // The holder file was written through the parent, which bound it here.
+    return lock.move();
+}
+
+/// The lock at its new address, as `Pending.move` says.
+pub fn move(l: *Lock) Lock {
+    return .{ .pending = l.pending.move() };
 }
 
 /// The lock, written to while it is held, as `Pending.file` says.
-pub fn file(l: *const Lock) Io.File {
+pub fn file(l: *Lock) Io.File {
     return l.pending.file();
 }
 
@@ -161,12 +167,12 @@ fn mark(l: *Lock, io: Io, holder: Holder) (HolderError || error{NameTooLong})!vo
     const holder_name = try holderName(staged.baseName());
     const name = holder_name.constItems();
     switch (holder) {
-        .none => staged.parent.deleteFile(io, name) catch |err| switch (err) {
+        .none => staged.parent.dir().deleteFile(io, name) catch |err| switch (err) {
             error.FileNotFound => {},
             else => |e| return e,
         },
         .pid_file => {
-            const f = try staged.parent.createFile(io, name, .{ .truncate = true });
+            const f = try staged.parent.dir().createFile(io, name, .{ .truncate = true });
             defer f.close(io);
             var text: [32]u8 = undefined;
             const line = std.mem.print(&text, "pid {d}\n", .{sys.processId()}) catch unreachable; // safe: "pid " and ten digits fit
@@ -181,10 +187,14 @@ fn mark(l: *Lock, io: Io, holder: Holder) (HolderError || error{NameTooLong})!vo
 /// writes or removes it.
 fn unmark(l: *Lock, io: Io) void {
     const staged = &l.pending.staged;
+    // A failed sync removed the lock and let its directory go, whose
+    // descriptor may now be another's. A commit removed the holder file
+    // before it; one left beside no lock is harmless, as above.
+    const parent = staged.parent.get() orelse return;
     const holder_name = holderName(staged.baseName()) catch return;
     const name = holder_name.constItems();
     // glint-ignore: Z026 -- a holder file left behind is read only beside a held lock, and the next lock writes or removes it
-    staged.parent.deleteFile(io, name) catch {};
+    parent.deleteFile(io, name) catch {};
 }
 
 /// What a held lock says of its holder.
