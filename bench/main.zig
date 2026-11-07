@@ -457,8 +457,11 @@ fn symLinkRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
 fn createNewRow(ctx: *Context, row: *const Row, i: u64) anyerror!void {
     _ = row;
     const name = ctx.names[i % ctx.names.len][0..7];
-    // glint-ignore: Z026 -- scratch removal after the row; a leftover is in the run directory
-    ctx.dir.deleteFile(ctx.io, name) catch {};
+    // A name not there yet is the row's first run.
+    ctx.dir.deleteFile(ctx.io, name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => |other| return other,
+    };
     _ = try airlock.writeFile(ctx.io, ctx.dir, name, &ctx.page, .{ .commit = .{ .publish = .create_new } });
 }
 

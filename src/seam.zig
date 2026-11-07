@@ -141,7 +141,7 @@ pub const HookedState = struct { hook: *const Hook };
 /// The hooked layer's `fileSync`: a std-level sync passes through to the
 /// hook's base.
 pub fn hookedSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
-    // aegis: boundary(A013, A019): std.Io hands its vtable's functions the userdata the Io was made with, and an Io whose fileSync is hookedSync carries a HookedState
+    // std.Io hands its vtable's functions the userdata the Io was made with, and an Io whose fileSync is hookedSync carries a HookedState
     const state: *HookedState = @ptrCast(@alignCast(userdata.?));
     return file.sync(state.hook.base);
 }
@@ -149,7 +149,7 @@ pub fn hookedSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
 /// The hook `io` carries, if it carries one: one compare.
 pub fn hookOf(io: Io) ?*const Hook {
     if (io.vtable.fileSync != &hookedSync) return null;
-    // aegis: boundary(A013, A019): as above, the fileSync just compared being hookedSync
+    // as above, the fileSync just compared being hookedSync
     const state: *const HookedState = @ptrCast(@alignCast(io.userdata.?));
     return state.hook;
 }
