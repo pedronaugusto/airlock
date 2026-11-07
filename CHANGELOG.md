@@ -17,6 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `lint_rules` (airlock.zig): what airlock replaces, for a linter that reads it by declaration (glint, design §12): std's raw syncs (`posix.fdatasync`, `posix.syncfs`, `os.linux`'s `fsync`, `fdatasync`, `syncfs` and `IoUring.fsync`, Darwin's `F.FULLFSYNC` and `F.BARRIERFSYNC`, `Io.File.sync`), the symbols every `extern` declaration of them binds (`fsync`, `fdatasync`, `syncfs`, `FlushFileBuffers`, `NtFlushBuffersFile`, `NtFlushBuffersFileEx`), and std's atomic publish (`Io.Dir.createFileAtomic`, `Io.File.Atomic.link` and `replace`), each with its replacement (`syncFile`, `create`, `Pending.commit`). A test compiles every reference where Darwin's constants are declared.
 - `hardLink(io, old_dir, old, new_dir, new)`: a second name for a file, never replacing one, on every platform: POSIX `linkat`, Windows `FileLinkInformation` (std 0.17's `Dir.hardLink` refuses Windows outright). A filesystem without hard links is `error.HardLinksUnsupported` by name. A publish's no-replace fallback links on Windows too.
 - `lock` (`Lock`, `LockOptions`, `LockError`): git's lock-file protocol, from `lockfile.c`.
   - `<path>.lock` is taken exclusively. `Contention.wait` tries again with git's backoff: the attempt squared in milliseconds, capped at a second, a quarter either way at random. Each wait is a cancellation point, and `error.LockHeld` comes once the wait is spent.
