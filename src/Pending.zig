@@ -181,7 +181,7 @@ pub const CopyFromOptions = struct {
     limit: ?u64 = null,
 };
 
-pub const CopyFromError = sys.CloneError || sys.RenameError || sys.SetModeError || Io.File.StatError || Io.File.Reader.Error || Io.File.Writer.Error || error{
+pub const CopyFromError = sys.CloneError || sys.RenameError || sys.SetModeError || Io.File.StatError || Io.File.Reader.Error || Io.File.Reader.SeekError || Io.File.Writer.Error || Io.File.Writer.WriteFileError || Io.File.Writer.SeekError || error{
     /// `clone = .always` where the filesystem cannot clone this file into
     /// this temp. Nothing was written.
     CloneUnsupported,
@@ -206,12 +206,28 @@ pub fn copyFrom(p: *Pending, io: Io, src: Io.File, options: CopyFromOptions) Cop
     var out = p.file().writer(io, &buffer);
     const limit: Io.Limit = if (options.limit) |n| .limited64(n) else .unlimited;
     const sent = out.interface.sendFileAll(&reader, limit) catch |err| return switch (err) {
-        error.ReadFailed => reader.err.?,
-        error.WriteFailed => out.err.?,
+        error.ReadFailed => readFailure(&reader),
+        error.WriteFailed => writeFailure(&out),
     };
-    out.interface.flush() catch return out.err.?;
+    out.interface.flush() catch return writeFailure(&out);
     if (options.limit) |n| if (sent != n) return error.EndOfStream;
     return .copy;
+}
+
+/// What stopped a copy's reader, which keeps a seek's failure apart from a read's.
+fn readFailure(reader: *const Io.File.Reader) CopyFromError {
+    if (reader.err) |e| return e;
+    if (reader.seek_err) |e| return e;
+    assert.never("a reader that failed recorded why");
+}
+
+/// What stopped a copy's writer: a `sendfile`'s failure and a seek's are kept apart from a
+/// write's, so a full disk under `sendfile` reports itself.
+fn writeFailure(out: *const Io.File.Writer) CopyFromError {
+    if (out.err) |e| return e;
+    if (out.write_file_err) |e| return e;
+    if (out.seek_err) |e| return e;
+    assert.never("a writer that failed recorded why");
 }
 
 /// How a durable copy is made.

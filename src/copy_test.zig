@@ -58,7 +58,7 @@ test "clone always: a clone, or CloneUnsupported with nothing published" {
 
 test "a copy replaces its destination whole, and a missing source touches nothing" {
     const io = testing.io;
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "dst", .data = "old" });
     try testing.expectError(error.FileNotFound, airlock.copyFile(io, tmp.dir, "missing", tmp.dir, "dst", .{}));
@@ -170,7 +170,7 @@ const is_linux = builtin.target.os.tag == .linux;
 test "a refused clone is a copy, and a failed clone publishes nothing" {
     // Only where airlock asks for a clone; elsewhere it copies without asking.
     if (!is_linux and !is_darwin) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
+    var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try source(testing.io, tmp.dir, "src", 5000, 9);
     {

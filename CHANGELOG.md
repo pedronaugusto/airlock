@@ -37,6 +37,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `copyFrom` and `copyFile` report a failed `sendfile` or seek as itself, where they stopped the program on a null: a full disk during a copy on Linux or Windows crashed. `CopyFromError` holds those errors.
 - On Windows, an exclusive create at a name that is a link makes the name collide, `PathAlreadyExists`, as `O_EXCL` does, where it followed the link and made its target: `Temp.in_place` wrote through a link.
 - `Lock.release` after a commit whose sync failed no longer removes `<path>~pid.lock` through the directory the failed sync had closed. For a nested path that descriptor could already name another directory. The commit had removed the holder file before the sync.
 - `Pending.discard` and every path that lets a temp go remove it under cancel protection: a cancel that landed in the removal left the temp behind, a lock file a stale lock, and was lost. The cancel waits for the task's next cancelation point.
