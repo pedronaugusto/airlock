@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const seam = @import("seam");
 const level = @import("level.zig");
 const platform = @import("platform.zig");
 const names = @import("names.zig");
@@ -188,6 +189,7 @@ pub const lint_rules = .{
         .{ .symbol = "NtFlushBuffersFile", .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
         .{ .symbol = "NtFlushBuffersFileEx", .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
     },
+    .door = .{ syncMapped, syncDir, syncPath, Batch.commit, Batch.commitOrRefuse, Lock.commit, seam.hookedSync },
 };
 
 test "lint_rules names declarations that are there" {
