@@ -117,6 +117,9 @@ pub const symLink = names.symLink;
 /// `symLink` that refuses a level the filesystem cannot keep.
 pub const symLinkOrRefuse = names.symLinkOrRefuse;
 /// How old a leftover temp must be for `pruneTemps`.
+pub const SetTimesError = names.SetTimesError;
+/// A file's, a directory's or a link's own times, by name, on every platform.
+pub const setTimes = names.setTimes;
 pub const PruneOptions = names.PruneOptions;
 /// What `pruneTemps` can fail with.
 pub const PruneError = names.PruneError;

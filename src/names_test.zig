@@ -292,6 +292,30 @@ test "on Windows a link to a directory is a directory link, entered, and any oth
     try testing.expectEqual(@as(usize, 0), (try s.entries(".")).prefixed);
 }
 
+test "setTimes sets a directory's times and a link's own, never its target's" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const io = testing.io;
+    const at: Io.Timestamp = .{ .nanoseconds = 1_000_000_000 * 1_000_000_000 };
+    const later: Io.Timestamp = .{ .nanoseconds = 1_100_000_000 * 1_000_000_000 };
+    try s.dir().createDirPath(io, "d");
+    try airlock.setTimes(io, s.dir(), "d", .{ .modify_timestamp = .{ .new = at } });
+    try testing.expectEqual(at.nanoseconds, (try airlock.stat(io, s.dir(), "d", .{})).mtime.nanoseconds);
+    try s.write("target", "x");
+    try airlock.setTimes(io, s.dir(), "target", .{ .modify_timestamp = .{ .new = at } });
+    try s.dir().symLink(io, "target", "link", .{});
+    try airlock.setTimes(io, s.dir(), "link", .{ .modify_timestamp = .{ .new = later } });
+    const link = try airlock.stat(io, s.dir(), "link", .{});
+    try testing.expectEqual(Io.File.Kind.sym_link, link.kind);
+    try testing.expectEqual(later.nanoseconds, link.mtime.nanoseconds);
+    try testing.expectEqual(at.nanoseconds, (try airlock.stat(io, s.dir(), "target", .{})).mtime.nanoseconds);
+    // Unchanged leaves it, and a missing name says so.
+    try airlock.setTimes(io, s.dir(), "d", .{});
+    try testing.expectEqual(at.nanoseconds, (try airlock.stat(io, s.dir(), "d", .{})).mtime.nanoseconds);
+    try testing.expectError(error.FileNotFound, airlock.setTimes(io, s.dir(), "absent", .{ .modify_timestamp = .now }));
+}
+
 test "symLink leaves nothing behind when the rename fails" {
     if (is_windows or !is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();

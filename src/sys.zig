@@ -1717,7 +1717,9 @@ fn createTempWindows(io: Io, root: windows.HANDLE, name: []const u8, read: bool)
         &handle,                                  access,
         root,                                     name,
         windows.FILE.ATTRIBUTE{ .NORMAL = true }, windows.FILE.SHARE{ .READ = true, .DELETE = true },
-        windows.FILE.CREATE_DISPOSITION.CREATE,   windows.FILE.MODE{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
+        // The name's own reparse point collides: without this a create at a link makes the
+        // link's target, where `O_EXCL` never follows one.
+        windows.FILE.CREATE_DISPOSITION.CREATE,   windows.FILE.MODE{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true },
     })) {
         .code => |c| c,
         .route => |route| return createTempRouted(route, root, name, .default_file, read),
@@ -1727,6 +1729,72 @@ fn createTempWindows(io: Io, root: windows.HANDLE, name: []const u8, read: bool)
         // The name lingers while another process holds the deleted file.
         .DELETE_PENDING => error.Busy,
         else => openFailureNt(status),
+    };
+}
+
+pub const SetTimesError = OpenFileError || Io.Dir.SetTimestampsError;
+
+/// The times of what `sub_path` names relative to `dir`, a link's own and never its target's.
+pub fn setTimes(io: Io, dir: Handle, sub_path: []const u8, options: Io.File.SetTimestampsOptions) SetTimesError!void {
+    if (is_windows) return setTimesWindows(io, dir, sub_path, options);
+    const path = try posix.toPosixPath(sub_path);
+    const times = [2]posix.timespec{ Io.Threaded.setTimestampToPosix(options.access_timestamp), Io.Threaded.setTimestampToPosix(options.modify_timestamp) };
+    // Raw, as std's call reports a missing name as `Unexpected`.
+    const code = switch (try retrying(io, .set_mode, sub_path, posix.system.utimensat, .{ dir, &path, &times, posix.AT.SYMLINK_NOFOLLOW })) {
+        .code => |c| c,
+        .route => |route| return dirOf(dir).setTimestamps(route.io, sub_path, noFollow(options)),
+    };
+    return if (code == .SUCCESS) {} else openFileFailure(code);
+}
+
+fn noFollow(options: Io.File.SetTimestampsOptions) Io.Dir.SetTimestampsOptions {
+    return .{ .follow_symlinks = false, .access_timestamp = options.access_timestamp, .modify_timestamp = options.modify_timestamp };
+}
+
+fn setTimesWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, options: Io.File.SetTimestampsOptions) SetTimesError!void {
+    const access: windows.ACCESS_MASK = .{
+        .STANDARD = .{ .SYNCHRONIZE = true },
+        .SPECIFIC = .{ .FILE = .{ .WRITE_ATTRIBUTES = true } },
+    };
+    var handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
+    const opened = switch (try retryingNt(io, .open_file, sub_path, ntCreate, .{
+        &handle,                                  access,
+        root,                                     sub_path,
+        windows.FILE.ATTRIBUTE{ .NORMAL = true }, windows.FILE.SHARE.VALID_FLAGS,
+        windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true },
+    })) {
+        .code => |c| c,
+        .route => |route| return dirOf(root).setTimestamps(route.io, sub_path, noFollow(options)),
+    };
+    if (opened != .SUCCESS) return openFailureNt(opened);
+    defer release(io, handle);
+    const now = windows.ntdll.RtlGetSystemTimePrecise();
+    // Zero leaves a time and the attributes as they are.
+    var info: windows.FILE.BASIC_INFORMATION = .{
+        .CreationTime = 0,
+        .LastAccessTime = windowsTime(options.access_timestamp, now),
+        .LastWriteTime = windowsTime(options.modify_timestamp, now),
+        .ChangeTime = 0,
+        .FileAttributes = .{},
+    };
+    const status = switch (try retryingNt(io, .set_mode, null, ntSetInfo, .{ handle, std.mem.asBytes(&info), .Basic })) {
+        .code => |c| c,
+        .route => |route| return fileOf(handle).setTimestamps(route.io, options),
+    };
+    return switch (status) {
+        .SUCCESS => {},
+        .ACCESS_DENIED => error.AccessDenied,
+        .DISK_FULL => error.NoSpaceLeft,
+        .MEDIA_WRITE_PROTECTED => error.ReadOnlyFileSystem,
+        else => if (isDeviceFailureNt(status)) error.InputOutput else windows.unexpectedStatus(status),
+    };
+}
+
+fn windowsTime(time: Io.File.SetTimestamp, now: windows.LARGE_INTEGER) windows.LARGE_INTEGER {
+    return switch (time) {
+        .unchanged => 0,
+        .now => now,
+        .new => |t| windows.toSysTime(t),
     };
 }
 

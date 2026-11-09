@@ -244,6 +244,15 @@ pub const SymLinkOptions = struct {
     target_kind: enum { detect, file, directory } = .detect,
 };
 
+pub const SetTimesError = sys.SetTimesError;
+
+/// Sets the times of what `sub_path` names relative to `dir`, a file or a directory, and of a
+/// link itself, never what it names. On every platform, where `std.Io.Dir.setTimestamps` panics
+/// on Windows. Not synced: a batch or `syncDir` makes it durable.
+pub fn setTimes(io: Io, dir: Io.Dir, sub_path: []const u8, options: Io.File.SetTimestampsOptions) SetTimesError!void {
+    return sys.setTimes(io, dir.handle, sub_path, options);
+}
+
 pub const SymLinkError = sys.SymLinkError || Io.Dir.RenameError || sys.OpenDirError || platform.DirSyncError || error{
     /// The link is in place; the directory sync after the rename failed or
     /// was canceled.

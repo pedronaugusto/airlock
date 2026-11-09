@@ -17,6 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `setTimes`: the times of a file, a directory or a link itself, by name, on every platform (std's panics on Windows, and reports a missing name as `Unexpected` on POSIX).
 - `lint_rules` (airlock.zig): what airlock replaces, for a linter that reads it by declaration (glint, design §12): std's raw syncs (`posix.fdatasync`, `posix.syncfs`, `os.linux`'s `fsync`, `fdatasync`, `syncfs` and `IoUring.fsync`, Darwin's `F.FULLFSYNC` and `F.BARRIERFSYNC`, `Io.File.sync`), the symbols every `extern` declaration of them binds (`fsync`, `fdatasync`, `syncfs`, `FlushFileBuffers`, `NtFlushBuffersFile`, `NtFlushBuffersFileEx`), and std's atomic publish (`Io.Dir.createFileAtomic`, `Io.File.Atomic.link` and `replace`), each with its replacement (`syncFile`, `create`, `Pending.commit`). A test compiles every reference where Darwin's constants are declared.
 - `hardLink(io, old_dir, old, new_dir, new)`: a second name for a file, never replacing one, on every platform: POSIX `linkat`, Windows `FileLinkInformation` (std 0.17's `Dir.hardLink` refuses Windows outright). A filesystem without hard links is `error.HardLinksUnsupported` by name. A publish's no-replace fallback links on Windows too.
 - `lock` (`Lock`, `LockOptions`, `LockError`): git's lock-file protocol, from `lockfile.c`.
@@ -36,6 +37,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- On Windows, an exclusive create at a name that is a link makes the name collide, `PathAlreadyExists`, as `O_EXCL` does, where it followed the link and made its target: `Temp.in_place` wrote through a link.
 - `Lock.release` after a commit whose sync failed no longer removes `<path>~pid.lock` through the directory the failed sync had closed. For a nested path that descriptor could already name another directory. The commit had removed the holder file before the sync.
 - `Pending.discard` and every path that lets a temp go remove it under cancel protection: a cancel that landed in the removal left the temp behind, a lock file a stale lock, and was lost. The cancel waits for the task's next cancelation point.
 - `Volume.of` on Linux returns `error.Canceled` for a cancel while it opens or reads `/proc/self/mountinfo`, where it ended the query and named no file system.

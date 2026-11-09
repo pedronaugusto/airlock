@@ -643,12 +643,10 @@ test "in place: a taken name, or a link at it, is PathAlreadyExists; discard rem
     try s.write("taken", "old");
     try testing.expectError(error.PathAlreadyExists, airlock.create(io, s.dir(), "taken", .{ .temp = .in_place }));
     try expectContents(&s, "taken", "old");
-    if (!is_windows) {
-        // The link is never followed: its target is not made.
-        try s.dir().symLink(io, "target", "link", .{});
-        try testing.expectError(error.PathAlreadyExists, airlock.create(io, s.dir(), "link", .{ .temp = .in_place }));
-        try expectContents(&s, "target", null);
-    }
+    // The link is never followed: its target is not made, on Windows as on POSIX.
+    try s.dir().symLink(io, "target", "link", .{});
+    try testing.expectError(error.PathAlreadyExists, airlock.create(io, s.dir(), "link", .{ .temp = .in_place }));
+    try expectContents(&s, "target", null);
     var p = try airlock.create(io, s.dir(), "gone", .{ .temp = .in_place, .mode = .{ .exact = .default_file } });
     p.discard(io);
     p.discard(io);
