@@ -179,6 +179,11 @@ pub const CopyFromOptions = struct {
     /// may still be appending to it. `clone = .always` with a limit stops
     /// the program.
     limit: ?u64 = null,
+    /// The bytes the source holds, as its stat found them: a copy of its bytes that moves any
+    /// other count is `SourceChanged`, never a short file left to publish. (A read of nothing
+    /// is the end of a file, so a source cut or changed under the copy reads as a shorter one.)
+    /// A clone is the file whole at one moment and is not counted.
+    size: ?u64 = null,
 };
 
 pub const CopyFromError = sys.CloneError || sys.RenameError || sys.SetModeError || Io.File.StatError || Io.File.Reader.Error || Io.File.Reader.SeekError || Io.File.Writer.Error || Io.File.Writer.WriteFileError || Io.File.Writer.SeekError || error{
@@ -187,6 +192,9 @@ pub const CopyFromError = sys.CloneError || sys.RenameError || sys.SetModeError 
     CloneUnsupported,
     /// The source ended before `limit`.
     EndOfStream,
+    /// The copy's bytes were not the `size` the source's stat gave: it changed, or a read came
+    /// up short, under the copy. Nothing is published.
+    SourceChanged,
 };
 
 /// Fills the open, unwritten temp from `src`, from its start: a clone of
@@ -211,6 +219,7 @@ pub fn copyFrom(p: *Pending, io: Io, src: Io.File, options: CopyFromOptions) Cop
     };
     out.interface.flush() catch return writeFailure(&out);
     if (options.limit) |n| if (sent != n) return error.EndOfStream;
+    if (options.size) |n| if (sent != n) return error.SourceChanged;
     return .copy;
 }
 
@@ -258,12 +267,13 @@ pub const CopyError = CreateError || CommitError || CopyFromError || Io.File.Ope
 pub fn copyFile(io: Io, src_dir: Io.Dir, src_path: []const u8, dst_dir: Io.Dir, dst_path: []const u8, options: CopyOptions) CopyError!Copied {
     const src = try src_dir.openFile(io, src_path, .{});
     defer src.close(io);
+    const found = try src.stat(io);
     const mode = switch (options.mode) {
-        .source => (try src.stat(io)).permissions,
+        .source => found.permissions,
         .exact => |perm| perm,
     };
     var p = try create(io, dst_dir, dst_path, .{ .temp = .{ .random = options.temp }, .mode = .{ .exact = mode } });
     defer p.discard(io);
-    const by = try p.copyFrom(io, src, .{ .clone = options.clone });
+    const by = try p.copyFrom(io, src, .{ .clone = options.clone, .size = found.size });
     return .{ .committed = try p.commit(io, options.commit), .by = by };
 }

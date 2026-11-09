@@ -142,6 +142,23 @@ test "a limit copies the source's first bytes, and a source shorter than it is E
     try testing.expectError(error.EndOfStream, p.copyFrom(io, from, .{ .limit = 20001 }));
 }
 
+test "a copy whose bytes are not the size its stat gave is SourceChanged, and publishes nothing" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "src", .data = "abc" });
+    const src = try tmp.dir.openFile(io, "src", .{});
+    defer src.close(io);
+    // A source cut short under the copy, as a short read of nothing at its end makes it look.
+    var p = try airlock.create(io, tmp.dir, "dst", .{});
+    defer p.discard(io);
+    try testing.expectError(error.SourceChanged, p.copyFrom(io, src, .{ .clone = .never, .size = 5 }));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "dst", .{}));
+    var q = try airlock.create(io, tmp.dir, "dst", .{});
+    defer q.discard(io);
+    try testing.expectEqual(airlock.By.copy, try q.copyFrom(io, src, .{ .clone = .never, .size = 3 }));
+}
+
 test "on Darwin an exact temp is copied, and clone always refuses it" {
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
