@@ -40,6 +40,7 @@
 //! wrong reading. A real crash test (block-level replay on Linux) checks it
 //! by hand before a release.
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const seam = @import("airlock.testing");
 const level = @import("../level.zig");
@@ -143,7 +144,7 @@ pub const Model = struct {
     }
 
     fn add(m: *Model, e: Effect) void {
-        std.debug.assert(m.count < max_effects);
+        aegis.assert.invariant(m.count < max_effects, "a model holds at most max_effects effects");
         m.effects[m.count] = e;
         m.count += 1;
     }

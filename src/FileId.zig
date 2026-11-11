@@ -14,6 +14,7 @@
 //! `xino` changes inodes at copy-up), and a number can be reused once its
 //! file is gone.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const sys = @import("sys.zig");
 
@@ -79,7 +80,7 @@ test "order is by volume, then by file, and agrees with eql" {
 }
 
 test "a volume number and a device hash are different types, and a file id is read from either" {
-    comptime std.debug.assert(sys.VolumeId != sys.DeviceId);
+    comptime aegis.assert.invariant(sys.VolumeId != sys.DeviceId, "a volume number and a device hash are different types");
     const id: sys.Id = .{ .volume = .fromRaw(7), .file = 9 };
     try std.testing.expectEqual(@as(u64, 7), id.volume.raw());
 }

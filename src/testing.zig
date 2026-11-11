@@ -30,6 +30,7 @@ const Io = std.Io;
 const shakedown = @import("shakedown");
 const seam = @import("seam");
 const assert = @import("aegis").assert;
+const SpinRwGuarded = @import("aegis").SpinRwGuarded;
 
 const os = builtin.target.os.tag;
 
@@ -87,7 +88,7 @@ pub const Options = struct {
     /// `drive` moves it.
     clock: bool = false,
     /// POSIX: count this process's open descriptors at every raw call and
-    /// keep the most seen in `peak_descriptors`.
+    /// keep the most seen, which `Seam.peakDescriptors` gives.
     sample_descriptors: bool = false,
 };
 
@@ -98,22 +99,25 @@ pub const Seam = struct {
     fio: *shakedown.FaultIo,
     /// Whether `fio` is the seam's own (`everyFault` hands one in).
     owns_fio: bool,
-    plan: Plan,
+    /// The plan and the descriptor peak. Raw calls run on several tasks at
+    /// once (a batch's concurrent syncs); the plan is decided, and the
+    /// peak kept, under this.
+    shared: SpinRwGuarded(Shared),
     gate: ?Gate = null,
     gate_taken: std.atomic.Value(bool) = .init(false),
     counters: [16]u32 = undefined,
     fired: [32]Plan.Fired = undefined,
-    /// Raw calls run on several tasks at once (a batch's concurrent
-    /// syncs); the plan is decided, and the descriptor peak kept, under
-    /// this.
-    mutex: std.atomic.Mutex = .unlocked,
     hook: seam.Hook,
     hooked: Hooked,
     /// The clock under `fio`, with `Options.clock`.
     clock: ?*shakedown.Clock = null,
-    /// With `Options.sample_descriptors`: the most descriptors open at any
-    /// raw call since the last `reset`.
-    peak_descriptors: ?usize = null,
+
+    const Shared = struct {
+        plan: Plan,
+        /// With `Options.sample_descriptors`: the most descriptors open at
+        /// any raw call since the last `reset`.
+        peak_descriptors: ?usize,
+    };
 
     /// A seam over a `FaultIo` of its own, on `base`.
     pub fn create(gpa: std.mem.Allocator, base: Io, options: Options) !*Seam {
@@ -143,11 +147,10 @@ pub const Seam = struct {
             .gpa = gpa,
             .fio = fio,
             .owns_fio = false,
-            .plan = undefined,
+            .shared = .init(.{ .plan = undefined, .peak_descriptors = if (options.sample_descriptors) 0 else null }),
             .hook = undefined,
             .hooked = undefined,
         };
-        if (options.sample_descriptors) s.peak_descriptors = 0;
         s.gate = options.gate;
         s.setPlan(options.plan);
         s.hook = .{ .ctx = s, .call = decide, .base = fio.io() };
@@ -179,15 +182,19 @@ pub const Seam = struct {
     /// once a fixture is set up. Not while calls are in flight.
     pub fn setPlan(s: *Seam, entries: []const Plan.Entry) void {
         assert.invariant(entries.len <= s.counters.len, "Seam.setPlan: a plan holds at most 16 entries");
-        s.plan = .init(entries, .{ .steps = s.fio.steps(), .counters = &s.counters, .fired = &s.fired });
+        var shared = s.shared.write();
+        defer shared.deinit();
+        shared.value().plan = .init(entries, .{ .steps = s.fio.steps(), .counters = &s.counters, .fired = &s.fired });
     }
 
     /// Forgets the trace, the counts and the descriptor peak, keeping the
     /// plan, which starts again.
     pub fn reset(s: *Seam) void {
         s.fio.reset();
-        s.plan.reset();
-        if (s.peak_descriptors != null) s.peak_descriptors = 0;
+        var shared = s.shared.write();
+        defer shared.deinit();
+        shared.value().plan.reset();
+        if (shared.value().peak_descriptors != null) shared.value().peak_descriptors = 0;
     }
 
     /// How many times airlock made `call`.
@@ -247,9 +254,17 @@ pub const Seam = struct {
 
     /// Whether the descriptor peak is kept (`Options.sample_descriptors`).
     fn sampling(s: *Seam) bool {
-        while (!s.mutex.tryLock()) std.atomic.spinLoopHint();
-        defer s.mutex.unlock();
-        return s.peak_descriptors != null;
+        var shared = s.shared.read();
+        defer shared.deinit();
+        return shared.value().peak_descriptors != null;
+    }
+
+    /// With `Options.sample_descriptors`, the most descriptors open at any
+    /// raw call since the last `reset`; null without it.
+    pub fn peakDescriptors(s: *Seam) ?usize {
+        var shared = s.shared.read();
+        defer shared.deinit();
+        return shared.value().peak_descriptors;
     }
 
     /// Each raw call is a foreign step of the `FaultIo`: a fault the
@@ -259,9 +274,9 @@ pub const Seam = struct {
         const s: *Seam = @ptrCast(@alignCast(ctx)); // safe: `over` makes the hook with its own seam as ctx
         if (s.sampling()) {
             const open = openDescriptors();
-            while (!s.mutex.tryLock()) std.atomic.spinLoopHint();
-            defer s.mutex.unlock();
-            if (s.peak_descriptors) |peak| s.peak_descriptors = @max(peak, open);
+            var shared = s.shared.write();
+            defer shared.deinit();
+            if (shared.value().peak_descriptors) |peak| shared.value().peak_descriptors = @max(peak, open);
         }
         if (s.gate) |gate| if (gate.call == call and std.mem.endsWith(u8, path orelse "", gate.suffix) and !s.gate_taken.swap(true, .acq_rel)) {
             gate.reached.set(s.hook.base);
@@ -273,9 +288,9 @@ pub const Seam = struct {
             .fail => |err| result = toResult(err),
             else => {},
         } else {
-            while (!s.mutex.tryLock()) std.atomic.spinLoopHint();
-            defer s.mutex.unlock();
-            result = s.plan.decideAt(begun.step, call, path);
+            var shared = s.shared.write();
+            defer shared.deinit();
+            result = shared.value().plan.decideAt(begun.step, call, path);
         }
         const outcome: shakedown.IoEvent.Outcome = if (result) |r| switch (r) {
             .code => |c| .{ .err = codeError(c) },

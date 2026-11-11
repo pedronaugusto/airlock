@@ -23,7 +23,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const aegis = @import("aegis");
 const Io = std.Io;
-const assert = std.debug.assert;
 const sys = @import("sys.zig");
 
 const Scan = @This();
@@ -69,7 +68,7 @@ const Batched = struct { cursor: usize = 0, count: u32 = 0, done: bool = false }
 /// A scan of `dir`, opened for iteration, from its first entry, into
 /// `buffer` (at least `min_buffer_len` bytes). Reads nothing until `next`.
 pub fn init(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
-    assert(buffer.len >= min_buffer_len);
+    aegis.assert.invariant(buffer.len >= min_buffer_len, "a scan's buffer holds min_buffer_len");
     return .{ .dir = dir, .buffer = buffer, .arm = .init({}), .plain = .init(dir, buffer) };
 }
 
@@ -77,7 +76,7 @@ pub fn init(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
 /// what a batch is compared against, and how a result is reproduced on a
 /// volume that takes the other arm.
 pub fn initPlain(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
-    assert(buffer.len >= min_buffer_len);
+    aegis.assert.invariant(buffer.len >= min_buffer_len, "a scan's buffer holds min_buffer_len");
     var s: Scan = .{ .dir = dir, .buffer = buffer, .arm = .init({}), .plain = .init(dir, buffer) };
     _ = s.arm.step(.plain) catch unreachable; // unreachable: a new scan is at its start
     return s;
@@ -120,8 +119,8 @@ pub fn next(s: *Scan, io: Io) Error!?Entry {
                 if (count == 0) return null;
             }
             const parsed = parseEntry(s.buffer[b.cursor..]) orelse return error.Unexpected;
-            assert(parsed.length != 0);
-            assert(parsed.length <= s.buffer.len - b.cursor);
+            aegis.assert.invariant(parsed.length != 0, "a parsed entry moves the cursor");
+            aegis.assert.invariant(parsed.length <= s.buffer.len - b.cursor, "a parsed entry is inside the batch");
             b.cursor += parsed.length;
             b.count -= 1;
             if (isDots(parsed.name)) continue;

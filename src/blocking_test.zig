@@ -1,6 +1,7 @@
 //! Executor integration through shakedown's real-Io seam: publication,
 //! cancellation, fallbacks, fences, kept names, and concurrent batches.
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Io = std.Io;
 const testing = std.testing;
@@ -28,7 +29,7 @@ const Executor = struct {
     }
 
     fn work(e: *Executor, caller: std.Thread.Id, job: *airlock.Blocking.Job) void {
-        std.debug.assert(caller != std.Thread.getCurrentId());
+        aegis.assert.invariant(caller != std.Thread.getCurrentId(), "a blocking job runs on another thread");
         job.execute();
         _ = e.workers.fetchAdd(1, .monotonic);
     }

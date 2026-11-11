@@ -432,7 +432,7 @@ test "pendings in as many directories as slots stay within one descriptor per sl
     h.reset();
     _ = try batch.commit(io, .{ .parallel = parallel });
     // Each pending holds its temp; the batch may add `parallel` more.
-    try testing.expect(h.peak_descriptors.? - before <= count + parallel);
+    try testing.expect(h.peakDescriptors().? - before <= count + parallel);
     try testing.expectEqual(before, seam.openDescriptors());
 }
 
@@ -456,7 +456,7 @@ test "addPath files are opened parallel at a time and closed after their sync" {
     try testing.expect((try batch.commit(io, .{ .parallel = parallel })).atLeast(.data));
     // At most `parallel` open at once, and on macOS one more kept for the
     // volume's flush.
-    try testing.expect(h.peak_descriptors.? - before <= parallel + 1);
+    try testing.expect(h.peakDescriptors().? - before <= parallel + 1);
     try testing.expectEqual(before, seam.openDescriptors());
 }
 

@@ -1066,7 +1066,7 @@ pub const batch_attr = struct {
     };
 
     comptime {
-        std.debug.assert(@sizeOf(List) == 24);
+        aegis.assert.invariant(@sizeOf(List) == 24, "attrlist is 24 bytes, as getattrlistbulk reads it");
     }
 
     const list: List = .{
