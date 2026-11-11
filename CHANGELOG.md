@@ -35,6 +35,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `symLink` and `symLinkOrRefuse` on Windows, where they were `error.OperationUnsupported`: a symbolic link reparse point (std's `Dir.symLink`), renamed by handle over the name without following it, synced as on the other platforms. It needs the right to create symbolic links (`error.PermissionDenied` without it). Windows records whether a link points at a directory: `SymLinkOptions.target_kind` is `.detect` (the target, from the link's directory, as libarchive asks it: a directory makes a directory link, anything else or nothing a file link), `.file` or `.directory`.
 - `Temp.suffix`: the destination's name with a suffix, such as `.lock`, held inline (a name as long as the platform allows).
 
+### Changed
+
+- The README states airlock's stability policy (0.x, tracking Zig 0.17.x; a breaking change only in a minor release, with its CHANGELOG entry; a patch release never breaks).
+
 ### Fixed
 
 - `copyFile` holds a copy of the source's bytes to the size its stat found, and refuses another count as `SourceChanged` (`CopyFromOptions.size`), where a source cut short under the copy, or a short read of nothing, published a torn copy: found by the fault test on Windows, which has no sendfile.

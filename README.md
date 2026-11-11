@@ -10,12 +10,18 @@ what volume a directory is on.
 
 ## Install
 
-Requires Zig 0.17.0. Fetch with `zig fetch --save
+Requires Zig 0.17. Fetch with `zig fetch --save
 git+https://github.com/pedronaugusto/airlock` and add the `airlock` module to
 your module's imports. It depends on `std` and on
 [aegis](https://github.com/pedronaugusto/aegis), of which it uses the `id`,
 `handle` and `assert` namespaces; the dependency brings it, and nothing is
 wired by hand.
+
+## Stability
+
+airlock is 0.x and tracks Zig 0.17.x. A breaking change comes only in a minor release
+(0.6 to 0.7), with a CHANGELOG entry saying what changed and what to write instead; a
+patch release never breaks.
 
 ## Usage
 
