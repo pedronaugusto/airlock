@@ -15,7 +15,8 @@ const Workers = aegis.units.Count(enum { worker }, u32);
 const Executor = struct {
     calls: aegis.Atomic(Calls) = .init(.fromRaw(0)),
     workers: aegis.Atomic(Workers) = .init(.fromRaw(0)),
-    cancel_at: u32 = 0,
+    /// The calls made before the one to cancel: null cancels none.
+    cancel_after: ?Calls = null,
     blocking: airlock.Blocking = .{ .run = run },
 
     fn hook(e: *Executor) *airlock.Blocking {
@@ -25,8 +26,8 @@ const Executor = struct {
     fn run(self: *airlock.Blocking, io: Io, job: *airlock.Blocking.Job) Io.Cancelable!void {
         const e: *Executor = @alignCast(@fieldParentPtr("blocking", self));
         try io.checkCancel();
-        const n = e.calls.fetchAddWrapping(.fromRaw(1), .monotonic).raw() + 1;
-        if (n == e.cancel_at) return error.Canceled;
+        const before = e.calls.fetchAddWrapping(.fromRaw(1), .monotonic);
+        if (e.cancel_after) |after| if (before.eql(after)) return error.Canceled;
         const thread = std.Thread.spawn(.{}, work, .{ e, std.Thread.getCurrentId(), job }) catch @panic("test worker unavailable");
         thread.join();
     }
@@ -64,7 +65,7 @@ test "blocking hook cancellation preserves prepublish and postpublish states" {
     const h = try seam.Seam.create(testing.allocator, testing.io, .{});
     defer h.destroy();
     const io = h.io();
-    var e: Executor = .{ .cancel_at = 1 };
+    var e: Executor = .{ .cancel_after = .fromRaw(0) };
     var p = try airlock.create(io, s.dir(), "dest", .{});
     defer p.discard(io);
     try p.file().writePositionalAll(io, "new", 0);
@@ -73,7 +74,7 @@ test "blocking hook cancellation preserves prepublish and postpublish states" {
     var buffer: [16]u8 = undefined;
     try testing.expect(s.read("dest", &buffer) == null);
     e.calls.store(.fromRaw(0), .monotonic);
-    e.cancel_at = 2;
+    e.cancel_after = .fromRaw(1);
     try testing.expectError(error.PublishedNotDurable, p.commit(io, .{ .blocking = e.hook() }));
     try testing.expectEqual(airlock.Pending.State.published, p.state());
     try testing.expectEqual(error.Canceled, p.cause().?);
