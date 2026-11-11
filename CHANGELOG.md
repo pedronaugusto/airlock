@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `testing.Seam.gate_taken` is an `aegis.Atomic(Seam.GateState)` (`open`, `taken`), where it was a `std.atomic.Value(bool)`; the seam alone sets it.
 - `testing.Seam`'s descriptor peak is `peakDescriptors()`, where it was the field `peak_descriptors`: the seam's plan and peak are held in an `aegis.SpinRwGuarded`, where a raw `std.atomic.Mutex` beside them was taken by hand.
 - `renameUnsynced(io, old_dir, old, new_dir, new, busy_deadline)` is the rename with no sync, git's (Windows' busy retry included), and fails only with `Io.Dir.RenameError`. `rename` is it followed by the directory syncs, and its level is `.data` or `.full`: one that syncs nothing stops the program, where it renamed and returned `.none` under a `RenameError` that still carried `PublishedNotDurable`, which no sync could raise. (relic's `fs.rename`, which held that error `unreachable`.)
 - A `Batch` add takes a slot it is given room for: `addFile`, `addPath`, `addPending`, `addDir`, `addDirPath` and `fence` return nothing, an add past the slots stops the program in every build, and `room()` says how many are left. `AddError` is gone, and so is `BatchFull` from `Batch.Error` (`commit`'s and `commitOrRefuse`'s sets), where no commit could raise it. Every caller sizes its own slots: one that fills a batch commits it when `room()` is 0. (relic's `fs.syncAll`, which held each add and the commit's `BatchFull` `unreachable`; chronicle's backup, which checked its count and carried `BatchFull` in its error set.)
@@ -38,6 +39,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Development: blocking_test's call and worker counters, and `Seam.drive`'s finished flag, are `aegis.Atomic` cells of `units.Count` and a two-state enum, where they were raw `std.atomic.Value`s.
 - The README states airlock's stability policy (0.x, tracking Zig 0.17.x; a breaking change only in a minor release, with its CHANGELOG entry; a patch release never breaks).
 - The contracts left on `std.debug.assert` (a scan's buffer and its entries, the attrlist's size, and the tests' model and blocking checks) are `aegis.assert.invariant`: they hold in every build, where they were undefined behaviour in ReleaseFast.
 

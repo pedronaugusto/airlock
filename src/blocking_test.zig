@@ -9,9 +9,12 @@ const airlock = @import("airlock.zig");
 const seam = @import("airlock.testing");
 const harness = @import("testing/harness.zig");
 
+const Calls = aegis.units.Count(enum { call }, u32);
+const Workers = aegis.units.Count(enum { worker }, u32);
+
 const Executor = struct {
-    calls: std.atomic.Value(u32) = .init(0),
-    workers: std.atomic.Value(u32) = .init(0),
+    calls: aegis.Atomic(Calls) = .init(.fromRaw(0)),
+    workers: aegis.Atomic(Workers) = .init(.fromRaw(0)),
     cancel_at: u32 = 0,
     blocking: airlock.Blocking = .{ .run = run },
 
@@ -22,7 +25,7 @@ const Executor = struct {
     fn run(self: *airlock.Blocking, io: Io, job: *airlock.Blocking.Job) Io.Cancelable!void {
         const e: *Executor = @alignCast(@fieldParentPtr("blocking", self));
         try io.checkCancel();
-        const n = e.calls.fetchAdd(1, .monotonic) + 1;
+        const n = e.calls.fetchAddWrapping(.fromRaw(1), .monotonic).raw() + 1;
         if (n == e.cancel_at) return error.Canceled;
         const thread = std.Thread.spawn(.{}, work, .{ e, std.Thread.getCurrentId(), job }) catch @panic("test worker unavailable");
         thread.join();
@@ -31,7 +34,7 @@ const Executor = struct {
     fn work(e: *Executor, caller: std.Thread.Id, job: *airlock.Blocking.Job) void {
         aegis.assert.invariant(caller != std.Thread.getCurrentId(), "a blocking job runs on another thread");
         job.execute();
-        _ = e.workers.fetchAdd(1, .monotonic);
+        _ = e.workers.fetchAddWrapping(.fromRaw(1), .monotonic);
     }
 };
 
@@ -47,12 +50,12 @@ test "blocking hook runs file and directory syncs elsewhere and none makes no jo
     try file.writePositionalAll(io, "contents", 0);
     _ = try airlock.syncFile(io, file, .{ .level = .none, .blocking = e.hook() });
     _ = try airlock.syncDir(io, s.dir(), .{ .level = .ordered, .blocking = e.hook() });
-    try testing.expectEqual(0, e.calls.load(.monotonic));
+    try testing.expectEqual(0, e.calls.load(.monotonic).raw());
     _ = try airlock.syncFile(io, file, .{ .blocking = e.hook() });
     _ = try airlock.syncDir(io, s.dir(), .{ .blocking = e.hook() });
     _ = try airlock.syncPath(io, s.dir(), "file", .{ .blocking = e.hook() });
-    try testing.expectEqual(h.syncs(), e.workers.load(.monotonic));
-    try testing.expectEqual(3, e.calls.load(.monotonic));
+    try testing.expectEqual(h.syncs(), e.workers.load(.monotonic).raw());
+    try testing.expectEqual(3, e.calls.load(.monotonic).raw());
 }
 
 test "blocking hook cancellation preserves prepublish and postpublish states" {
@@ -69,7 +72,7 @@ test "blocking hook cancellation preserves prepublish and postpublish states" {
     try testing.expectEqual(airlock.Pending.State.open, p.state());
     var buffer: [16]u8 = undefined;
     try testing.expect(s.read("dest", &buffer) == null);
-    e.calls.store(0, .monotonic);
+    e.calls.store(.fromRaw(0), .monotonic);
     e.cancel_at = 2;
     try testing.expectError(error.PublishedNotDurable, p.commit(io, .{ .blocking = e.hook() }));
     try testing.expectEqual(airlock.Pending.State.published, p.state());
@@ -93,11 +96,11 @@ test "blocking hook leaves shakedown refusal retries and final sync failures int
     var e: Executor = .{};
     const reached = try airlock.syncFile(h.io(), file, .{ .blocking = e.hook() });
     try testing.expectEqual(if (builtin.os.tag.isDarwin()) airlock.Reached.written else airlock.Reached.full, reached);
-    try testing.expectEqual(1, e.calls.load(.monotonic));
+    try testing.expectEqual(1, e.calls.load(.monotonic).raw());
     try testing.expectEqual(3, h.syncs());
     h.setPlan(&.{seam.always(first, failed)});
     try testing.expectError(error.InputOutput, airlock.syncFile(h.io(), file, .{ .blocking = e.hook() }));
-    try testing.expectEqual(1, e.calls.load(.monotonic));
+    try testing.expectEqual(1, e.calls.load(.monotonic).raw());
 }
 
 test "blocking hook reaches batch fences kept files and all name operations" {
@@ -126,8 +129,8 @@ test "blocking hook reaches batch fences kept files and all name operations" {
     _ = try airlock.remove(io, s.dir(), "renamed", .{ .sync = sync });
     _ = try airlock.makePath(io, s.dir(), "a/b", .{ .sync = sync });
     if (builtin.os.tag != .windows) _ = try airlock.symLinkOrRefuse(io, s.dir(), "kept", "link", .{ .sync = sync });
-    try testing.expectEqual(h.syncs(), e.workers.load(.monotonic));
-    try testing.expectEqual(e.calls.load(.monotonic), e.workers.load(.monotonic));
+    try testing.expectEqual(h.syncs(), e.workers.load(.monotonic).raw());
+    try testing.expectEqual(e.calls.load(.monotonic).raw(), e.workers.load(.monotonic).raw());
 }
 
 test "blocking hook permits concurrent batch jobs and reads errno on the worker" {
@@ -151,7 +154,7 @@ test "blocking hook permits concurrent batch jobs and reads errno on the worker"
         b.addFile(f.*);
     }
     try testing.expect((try b.commit(io, .{ .parallel = 16, .blocking = e.hook() })).atLeast(.data));
-    try testing.expectEqual(h.syncs(), e.workers.load(.monotonic));
+    try testing.expectEqual(h.syncs(), e.workers.load(.monotonic).raw());
     if (builtin.os.tag == .linux) {
         const sys = @import("sys.zig");
         try testing.expectError(error.BadHandle, sys.linuxFsync(io, e.hook(), -1, .sync_full, null));

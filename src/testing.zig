@@ -30,7 +30,8 @@ const Io = std.Io;
 const shakedown = @import("shakedown");
 const seam = @import("seam");
 const assert = @import("aegis").assert;
-const SpinRwGuarded = @import("aegis").SpinRwGuarded;
+const aegis = @import("aegis");
+const SpinRwGuarded = aegis.SpinRwGuarded;
 
 const os = builtin.target.os.tag;
 
@@ -104,13 +105,20 @@ pub const Seam = struct {
     /// peak kept, under this.
     shared: SpinRwGuarded(Shared),
     gate: ?Gate = null,
-    gate_taken: std.atomic.Value(bool) = .init(false),
+    gate_taken: aegis.Atomic(GateState) = .init(.open),
     counters: [16]u32 = undefined,
     fired: [32]Plan.Fired = undefined,
     hook: seam.Hook,
     hooked: Hooked,
     /// The clock under `fio`, with `Options.clock`.
     clock: ?*shakedown.Clock = null,
+
+    /// Whether a task has taken the gate: the first matching call takes it and stands there, the
+    /// rest pass until `reopen`.
+    pub const GateState = enum(u8) { open, taken };
+
+    /// Where a driven task is: `drive` moves the clock until it is finished.
+    const Progress = enum(u8) { running, finished };
 
     const Shared = struct {
         plan: Plan,
@@ -175,7 +183,7 @@ pub const Seam = struct {
     /// Lets a task standing at the gate go, as `Gate.release` does, and opens
     /// the gate again for the next matching call.
     pub fn reopen(s: *Seam) void {
-        s.gate_taken.store(false, .release);
+        s.gate_taken.store(.open, .release);
     }
 
     /// Replaces the plan, its counts starting again: for faults planned
@@ -233,16 +241,16 @@ pub const Seam = struct {
     pub fn drive(s: *Seam, base: Io, task: anytype) !void {
         const clock = s.clock.?;
         const Task = @TypeOf(task.*);
-        var done: std.atomic.Value(bool) = .init(false);
+        var done: aegis.Atomic(Progress) = .init(.running);
         const Wrapped = struct {
-            fn go(t: *Task, finished: *std.atomic.Value(bool)) void {
+            fn go(t: *Task, finished: *aegis.Atomic(Progress)) void {
                 t.run();
-                finished.store(true, .release);
+                finished.store(.finished, .release);
             }
         };
         var future = try base.concurrent(Wrapped.go, .{ task, &done });
         defer future.await(base);
-        while (!done.load(.acquire)) {
+        while (done.load(.acquire) != .finished) {
             clock.awaitArmed(1, .{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } }) catch |err| switch (err) {
                 // Not sleeping now: running, or done.
                 error.Timeout => continue,
@@ -278,7 +286,7 @@ pub const Seam = struct {
             defer shared.deinit();
             if (shared.value().peak_descriptors) |peak| shared.value().peak_descriptors = @max(peak, open);
         }
-        if (s.gate) |gate| if (gate.call == call and std.mem.endsWith(u8, path orelse "", gate.suffix) and !s.gate_taken.swap(true, .acq_rel)) {
+        if (s.gate) |gate| if (gate.call == call and std.mem.endsWith(u8, path orelse "", gate.suffix) and s.gate_taken.swap(.taken, .acq_rel) == .open) {
             gate.reached.set(s.hook.base);
             gate.release.wait(s.hook.base) catch return .canceled;
         };
