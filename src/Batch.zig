@@ -62,6 +62,16 @@ const is_windows = native_os == .windows;
 const is_linux = native_os == .linux;
 const is_darwin = native_os.isDarwin();
 
+/// The device calls a commit with renames makes on each volume it touches, with the default
+/// `Options` and nothing refused: the table's step 2 and step 5, for the system this is built
+/// for. Darwin orders the data before the renames with a barrier and flushes once; Windows has
+/// no barrier, so it flushes before the renames and again after; Linux and the BSDs flush no
+/// device (`fdatasync`/`fsync` carry it). A caller asserting what its batches cost reads it here.
+pub const device_calls: DeviceCalls = if (is_windows) .{ .full = 2, .barrier = 0 } else if (is_darwin) .{ .full = 1, .barrier = 1 } else .{ .full = 0, .barrier = 0 };
+
+/// Device flushes (`F_FULLFSYNC`, `NtFlushBuffersFile`) and barriers (`F_BARRIERFSYNC`).
+pub const DeviceCalls = struct { full: u32, barrier: u32 };
+
 /// Private: the caller's slot storage.
 slots: []Slot,
 /// Private: how many slots are in use.

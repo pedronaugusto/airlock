@@ -19,6 +19,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Batch.device_calls`: the device flushes and barriers a commit with renames makes on each volume, for the system it is built for (Darwin a barrier and one flush, Windows two flushes, Linux none), so a caller asserting what its batches cost reads the plan from airlock, not a copy of its table.
 - `setTimes`: the times of a file, a directory or a link itself, by name, on every platform (std's panics on Windows, and reports a missing name as `Unexpected` on POSIX).
 - `lint_rules` (airlock.zig): what airlock replaces, for a linter that reads it by declaration (glint, design §12): std's raw syncs (`posix.fdatasync`, `posix.syncfs`, `os.linux`'s `fsync`, `fdatasync`, `syncfs` and `IoUring.fsync`, Darwin's `F.FULLFSYNC` and `F.BARRIERFSYNC`, `Io.File.sync`), the symbols every `extern` declaration of them binds (`fsync`, `fdatasync`, `syncfs`, `FlushFileBuffers`, `NtFlushBuffersFile`, `NtFlushBuffersFileEx`), and std's atomic publish (`Io.Dir.createFileAtomic`, `Io.File.Atomic.link` and `replace`), each with its replacement (`syncFile`, `create`, `Pending.commit`). A test compiles every reference where Darwin's constants are declared.
 - `hardLink(io, old_dir, old, new_dir, new)`: a second name for a file, never replacing one, on every platform: POSIX `linkat`, Windows `FileLinkInformation` (std 0.17's `Dir.hardLink` refuses Windows outright). A filesystem without hard links is `error.HardLinksUnsupported` by name. A publish's no-replace fallback links on Windows too.

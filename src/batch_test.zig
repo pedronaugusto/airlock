@@ -60,16 +60,12 @@ test "three publishes into one directory: the fewest barriers per platform" {
         // Each file's fdatasync, then the directory once.
         try testing.expectEqual(@as(u32, 3), h.count(.sync_data));
         try testing.expectEqual(@as(u32, 1), h.count(.sync_dir));
-    } else if (is_darwin) {
-        // W each, one barrier, W on the directory, one full flush.
-        try testing.expectEqual(@as(u32, 4), h.count(.sync_writeout));
-        try testing.expectEqual(@as(u32, 1), h.count(.sync_barrier));
-        try testing.expectEqual(@as(u32, 1), h.count(.sync_full));
     } else {
-        // NO_SYNC each and on the directory, one flush before the renames
-        // and one after.
+        // W (Darwin) or NO_SYNC (Windows) each and on the directory; the device calls are the
+        // plan Batch publishes: a barrier and one flush on Darwin, two flushes on Windows.
         try testing.expectEqual(@as(u32, 4), h.count(.sync_writeout));
-        try testing.expectEqual(@as(u32, 2), h.count(.sync_full));
+        try testing.expectEqual(airlock.Batch.device_calls.barrier, h.count(.sync_barrier));
+        try testing.expectEqual(airlock.Batch.device_calls.full, h.count(.sync_full));
     }
 }
 
