@@ -87,7 +87,7 @@ pub fn dev(b: *std.Build, tools: type) void {
                 .{ .name = "airlock-bench", .source = "bench/main.zig" },
                 .{ .name = "airlock-macos-batch", .source = "bench/macos_batch.zig" },
             },
-            .imports = benchImports,
+            .imports = tools.preflight.Bench.importsFrom(benchImports),
             .target = target,
             .optimize = optimize,
         },

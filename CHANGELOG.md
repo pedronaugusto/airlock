@@ -39,6 +39,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Pins aegis c8982a8, still 0.2.4: six additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`), the aegis the development build's preflight selects. Nothing airlock calls changed.
 - Development: blocking_test's call and worker counters, and `Seam.drive`'s finished flag, are `aegis.Atomic` cells of `units.Count` and a two-state enum, where they were raw `std.atomic.Value`s.
 - The README states airlock's stability policy (0.x, tracking Zig 0.17.x; a breaking change only in a minor release, with its CHANGELOG entry; a patch release never breaks).
 - The contracts left on `std.debug.assert` (a scan's buffer and its entries, the attrlist's size, and the tests' model and blocking checks) are `aegis.assert.invariant`: they hold in every build, where they were undefined behaviour in ReleaseFast.
