@@ -7,12 +7,8 @@
 //! Every call that may block takes `io: Io` first and never stores it;
 //! nothing allocates; buffers and slot storage belong to the caller.
 
-const std = @import("std");
-const builtin = @import("builtin");
-const seam = @import("seam");
 const level = @import("level.zig");
 const platform = @import("platform.zig");
-const Staged = @import("Staged.zig");
 const names = @import("names.zig");
 
 /// An application-supplied executor for raw blocking syncs.
@@ -162,41 +158,6 @@ pub const Volume = @import("Volume.zig");
 pub const Scan = @import("Scan.zig");
 /// A scan of a directory from its first entry.
 pub const scan = Scan.init;
-
-/// What airlock replaces, for a linter that reads it by declaration (glint, design §12): std's raw
-/// syncs and the symbols every `extern` declaration of them binds, which say nothing of what
-/// reached the disk, and std's atomic publish, which syncs no directory. Every package that
-/// imports airlock is held to it (P006), airlock itself save each replacement and what only it
-/// reaches. A whole-system `sync` is no file's durability, and is not listed.
-pub const lint_rules = .{
-    .version = 1,
-    .replaces = .{
-        .{ .std = std.posix.fdatasync, .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
-        .{ .std = std.posix.syncfs, .with = syncFile, .why = "durability belongs to airlock: syncFile and syncDir say what a sync reached, file by file" },
-        .{ .std = std.os.linux.fsync, .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
-        .{ .std = std.os.linux.fdatasync, .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
-        .{ .std = std.os.linux.syncfs, .with = syncFile, .why = "durability belongs to airlock: syncFile and syncDir say what a sync reached, file by file" },
-        .{ .std = std.os.linux.IoUring.fsync, .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
-        .{ .std = std.c.F.FULLFSYNC, .with = syncFile, .why = "durability belongs to airlock: syncFile asks Darwin's full sync at the level it is given, and says what it reached" },
-        .{ .std = std.c.F.BARRIERFSYNC, .with = syncFile, .why = "durability belongs to airlock: syncFile asks Darwin's barrier at the level it is given, and says what it reached" },
-        .{ .std = std.Io.File.sync, .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
-        .{ .std = std.Io.Dir.createFileAtomic, .with = create, .why = "durability belongs to airlock: create and commit publish a file and sync its directory" },
-        .{ .std = std.Io.File.Atomic.link, .with = Pending.commit, .why = "durability belongs to airlock: commit publishes a file and syncs its directory" },
-        .{ .std = std.Io.File.Atomic.replace, .with = Pending.commit, .why = "durability belongs to airlock: commit publishes a file and syncs its directory" },
-        .{ .symbol = "fsync", .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
-        .{ .symbol = "fdatasync", .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
-        .{ .symbol = "syncfs", .with = syncFile, .why = "durability belongs to airlock: syncFile and syncDir say what a sync reached, file by file" },
-        .{ .symbol = "FlushFileBuffers", .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
-        .{ .symbol = "NtFlushBuffersFile", .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
-        .{ .symbol = "NtFlushBuffersFileEx", .with = syncFile, .why = "durability belongs to airlock: syncFile says what a sync reached" },
-    },
-    .door = .{ syncMapped, syncDir, syncPath, rename, remove, makePath, symLink, symLinkOrRefuse, Staged.commit, Batch.commit, Batch.commitOrRefuse, seam.hookedSync },
-};
-
-test "lint_rules names declarations that are there" {
-    // Darwin's sync constants are Darwin's alone: the list compiles where they are declared.
-    if (comptime builtin.os.tag.isDarwin()) _ = lint_rules;
-}
 
 test {
     _ = level;

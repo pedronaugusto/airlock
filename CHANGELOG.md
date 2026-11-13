@@ -21,7 +21,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `Batch.device_calls`: the device flushes and barriers a commit with renames makes on each volume, for the system it is built for (Darwin a barrier and one flush, Windows two flushes, Linux none), so a caller asserting what its batches cost reads the plan from airlock, not a copy of its table.
 - `setTimes`: the times of a file, a directory or a link itself, by name, on every platform (std's panics on Windows, and reports a missing name as `Unexpected` on POSIX).
-- `lint_rules` (airlock.zig): what airlock replaces, for a linter that reads it by declaration (glint, design §12): std's raw syncs (`posix.fdatasync`, `posix.syncfs`, `os.linux`'s `fsync`, `fdatasync`, `syncfs` and `IoUring.fsync`, Darwin's `F.FULLFSYNC` and `F.BARRIERFSYNC`, `Io.File.sync`), the symbols every `extern` declaration of them binds (`fsync`, `fdatasync`, `syncfs`, `FlushFileBuffers`, `NtFlushBuffersFile`, `NtFlushBuffersFileEx`), and std's atomic publish (`Io.Dir.createFileAtomic`, `Io.File.Atomic.link` and `replace`), each with its replacement (`syncFile`, `create`, `Pending.commit`). A test compiles every reference where Darwin's constants are declared.
 - `hardLink(io, old_dir, old, new_dir, new)`: a second name for a file, never replacing one, on every platform: POSIX `linkat`, Windows `FileLinkInformation` (std 0.17's `Dir.hardLink` refuses Windows outright). A filesystem without hard links is `error.HardLinksUnsupported` by name. A publish's no-replace fallback links on Windows too.
 - `lock` (`Lock`, `LockOptions`, `LockError`): git's lock-file protocol, from `lockfile.c`.
   - `<path>.lock` is taken exclusively. `Contention.wait` tries again with git's backoff: the attempt squared in milliseconds, capped at a second, a quarter either way at random. Each wait is a cancellation point, and `error.LockHeld` comes once the wait is spent.
@@ -40,7 +39,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Pins aegis c8982a8, still 0.2.4: six additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`), the aegis the development build's preflight selects. Nothing airlock calls changed.
+- Pins aegis 1243edb (`wip-aegis-review8`: governed internals named `aegis_<name>`, version 2 of its `lint_rules`, `bounded.Array.len` and the rename's other leftovers fixed) and preflight wip/vocab-6-2 132fb17 (glint 0.8). Nothing airlock calls changed. airlock declares no `lint_rules` of its own: the durability door is preflight's default policy (glint P006, its owners airlock and reactor), which names every entry the unreleased version-1 list did.
 - Development: blocking_test's call and worker counters, and `Seam.drive`'s finished flag, are `aegis.Atomic` cells of `units.Count` and a two-state enum, where they were raw `std.atomic.Value`s.
 - The README states airlock's stability policy (0.x, tracking Zig 0.17.x; a breaking change only in a minor release, with its CHANGELOG entry; a patch release never breaks).
 - The contracts left on `std.debug.assert` (a scan's buffer and its entries, the attrlist's size, and the tests' model and blocking checks) are `aegis.assert.invariant`: they hold in every build, where they were undefined behaviour in ReleaseFast.
