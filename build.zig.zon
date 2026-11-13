@@ -27,8 +27,8 @@
         },
 
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=wip/vocab-6-2#132fb179c8d48656838f4a723464a3bf33fc86aa",
-            .hash = "preflight-0.18.6-LX1Zwl6bGAD-3NgYyKIpC39xdsNIbgYirxz21Xk0qWoY",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=wip/vocab-7-1#ea21ccbc13f623080de71a9e18fa9adf69797294",
+            .hash = "preflight-0.18.6-LX1ZwmKbGACVxsEV2FrAd-Tc9hNvLTCkk4Uk_r2uKQuk",
         },
     },
 }
