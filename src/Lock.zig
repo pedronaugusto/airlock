@@ -176,7 +176,7 @@ fn mark(l: *Lock, io: Io, holder: Holder) (HolderError || error{NameTooLong})!vo
             const f = try staged.parent.dir().createFile(io, name, .{ .truncate = true });
             defer f.close(io);
             var text: [32]u8 = undefined;
-            const line = std.mem.print(&text, "pid {d}\n", .{sys.processId()}) catch unreachable; // safe: "pid " and ten digits fit
+            const line = std.mem.print(&text, "pid {d}\n", .{sys.processId()}) catch unreachable; // glint-ignore: Z026 -- "pid ", ten digits and a newline fit in 32 bytes
             try f.writePositionalAll(io, line, 0);
         },
     }
@@ -192,6 +192,7 @@ fn unmark(l: *Lock, io: Io) void {
     // descriptor may now be another's. A commit removed the holder file
     // before it; one left beside no lock is harmless, as above.
     const parent = staged.parent.get() orelse return;
+    // glint-ignore: Z026 -- a name with no room for its holder suffix had no holder file written beside it
     const holder_name = holderName(staged.baseName()) catch return;
     const name = holder_name.constItems();
     // glint-ignore: Z026 -- a holder file left behind is read only beside a held lock, and the next lock writes or removes it

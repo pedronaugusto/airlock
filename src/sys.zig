@@ -1259,10 +1259,13 @@ fn linuxMountType(io: Io, key: MountKey, out: *VolumeInfo) Io.Cancelable!void {
         _ = fields.next() orelse continue;
         const device = fields.next() orelse continue;
         switch (key) {
+            // glint-ignore: Z026 -- a line whose id field is no number names no mount of this id
             .id => |id| if ((std.fmt.parseInt(u64, first, 10) catch continue) != id) continue,
             .device => |d| {
                 const colon = std.mem.findScalar(u8, device, ':') orelse continue;
+                // glint-ignore: Z026 -- a line whose device field is no number names no mount of this device
                 const major = std.fmt.parseInt(u32, device[0..colon], 10) catch continue;
+                // glint-ignore: Z026 -- a line whose device field is no number names no mount of this device
                 const minor = std.fmt.parseInt(u32, device[colon + 1 ..], 10) catch continue;
                 if (major != d.major or minor != d.minor) continue;
             },

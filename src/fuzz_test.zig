@@ -155,7 +155,7 @@ fn gitReadPid(text: []const u8) ?GitPid {
     var end = text.len;
     while (end > 0 and pid.isSpace(text[end - 1])) end -= 1;
     var line = text[0..end];
-    if (std.mem.indexOfScalar(u8, line, 0)) |nul| line = line[0..nul];
+    if (std.mem.findScalar(u8, line, 0)) |nul| line = line[0..nul];
     if (!std.mem.startsWith(u8, line, "pid ")) return null;
     var at: usize = "pid ".len;
     while (at < line.len and pid.isSpace(line[at])) at += 1;
