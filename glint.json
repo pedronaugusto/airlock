@@ -1,6 +1,8 @@
 {
   "seams": [
     { "file": "src/sys.zig", "rules": ["A009", "P007"], "reason": "every raw call airlock makes: each system's sync, rename, unlink, close, identity, clone and map-flush calls, declared as the system documents them, and the mount table read to tell a refusal from a failure" },
+    { "file": "src/Lock.zig", "rules": ["A009"], "reason": "heldBy reads the holder file git and airlock write beside a lock, its one input, handed straight to aegis.input.Untrusted and pid.parse" },
+    { "file": "src/Pending.zig", "rules": ["A009"], "reason": "copyFrom moves a source file's bytes into the temp, never reading them as anything: a copy, not an input" },
     { "file": "src/seam.zig", "rules": ["P007"], "reason": "the seam in front of every raw call: a call's code is the system's own, an errno on POSIX and an NTSTATUS on Windows" }
   ]
 }
