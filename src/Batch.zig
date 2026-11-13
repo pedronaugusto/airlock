@@ -399,7 +399,7 @@ fn Run(comptime fallback: Fallback) type {
         /// then stands for its volume's flush.
         fn openParent(r: *Self, s: *Slot, earlier: []const Slot) E!void {
             const p = s.pending.?;
-            s.root = p.root.handle;
+            s.root = p.root.get().handle;
             s.path = p.parentSubPath() orelse "";
             if (findParent(earlier, s)) |shared| {
                 s.handle = shared;

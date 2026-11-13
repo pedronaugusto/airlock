@@ -28,14 +28,14 @@ fn releaseDir(d: *Io.Dir, io: Io) void {
 /// through `move`.
 pub const Parent = union(enum) {
     owned: Dir,
-    lent: Io.Dir,
+    lent: aegis.own.Unowned(Io.Dir),
     closed,
 
     /// The directory that holds `sub_path`: `root` itself, lent, or the
     /// directory it names, opened.
     pub fn open(io: Io, root: Io.Dir, sub_path: []const u8) sys.OpenDirError!Parent {
         const base_start = paths.baseStart(sub_path);
-        if (base_start == 0) return .{ .lent = root };
+        if (base_start == 0) return .{ .lent = .of(root) };
         return .{ .owned = .init(.{ .handle = try sys.openDir(io, root.handle, paths.parentPath(sub_path, base_start)) }) };
     }
 
@@ -43,7 +43,7 @@ pub const Parent = union(enum) {
     pub fn get(p: *Parent) ?Io.Dir {
         return switch (p.*) {
             .owned => |*d| d.borrow().*,
-            .lent => |d| d,
+            .lent => |d| d.get(),
             .closed => null,
         };
     }
@@ -52,7 +52,7 @@ pub const Parent = union(enum) {
     pub fn dir(p: *Parent) Io.Dir {
         return switch (p.*) {
             .owned => |*d| d.borrow().*,
-            .lent => |d| d,
+            .lent => |d| d.get(),
             .closed => aegis.assert.never("held.Parent.dir: the directory was let go"),
         };
     }

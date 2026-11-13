@@ -201,7 +201,7 @@ fn makeMissing(io: Io, dir: Io.Dir, sub_path: []const u8, options: MakePathOptio
             else => |e| return e,
         }
     } else null;
-    var parent: Parent = if (deepest) |handle| .{ .owned = .init(.{ .handle = handle }) } else .{ .lent = dir };
+    var parent: Parent = if (deepest) |handle| .{ .owned = .init(.{ .handle = handle }) } else .{ .lent = .of(dir) };
     defer parent.close(io);
     var components: paths.Components = .{ .path = sub_path, .at = start, .end = end };
     while (components.next()) |name| {

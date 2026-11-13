@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `Scan.dir`, and a pending's `root` (the directory its destination is named relative to), are `aegis.own.Unowned(std.Io.Dir)`, where each was the `std.Io.Dir`: the caller opened it and closes it, and airlock never does. Read one with `.get()`.
 - `testing.Seam.gate_taken` is an `aegis.Atomic(Seam.GateState)` (`open`, `taken`), where it was a `std.atomic.Value(bool)`; the seam alone sets it.
 - `testing.Seam`'s descriptor peak is `peakDescriptors()`, where it was the field `peak_descriptors`: the seam's plan and peak are held in an `aegis.SpinRwGuarded`, where a raw `std.atomic.Mutex` beside them was taken by hand.
 - `renameUnsynced(io, old_dir, old, new_dir, new, busy_deadline)` is the rename with no sync, git's (Windows' busy retry included), and fails only with `Io.Dir.RenameError`. `rename` is it followed by the directory syncs, and its level is `.data` or `.full`: one that syncs nothing stops the program, where it renamed and returned `.none` under a `RenameError` that still carried `PublishedNotDurable`, which no sync could raise. (relic's `fs.rename`, which held that error `unreachable`.)

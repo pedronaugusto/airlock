@@ -6,7 +6,8 @@
 //! a caller's to take.
 const Blocking = @import("Blocking.zig");
 const std = @import("std");
-const assert = @import("aegis").assert;
+const aegis = @import("aegis");
+const assert = aegis.assert;
 const builtin = @import("builtin");
 const Io = std.Io;
 const sys = @import("sys.zig");
@@ -33,8 +34,8 @@ cause: ?anyerror = null,
 /// airlock opened, or `root`, lent. A batch lets an opened one go, and
 /// lends its own at the rename.
 parent: held.Parent,
-/// The directory the caller named the destination relative to.
-root: Io.Dir,
+/// The directory the caller named the destination relative to, lent: the caller closes it.
+root: aegis.own.Unowned(Io.Dir),
 /// The destination as the caller named it, borrowed.
 dest: []const u8,
 /// Where the base name starts in `dest`.
@@ -159,7 +160,7 @@ pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOpt
     var p: Staged = .{
         .file = null,
         .parent = try .open(io, dir, dest_sub_path),
-        .root = dir,
+        .root = .of(dir),
         .dest = dest_sub_path,
         .base_start = base_start,
         .exact = &.{},
@@ -574,7 +575,7 @@ fn removeTemp(p: *Staged, io: Io) void {
     var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const parent = p.parentSubPath() orelse "";
     const held_parent = p.parent.get();
-    const dir = if (held_parent) |d| d.handle else p.root.handle;
+    const dir = if (held_parent) |d| d.handle else p.root.get().handle;
     const name: ?[]const u8 = if (held_parent != null or parent.len == 0) p.tempName() else std.mem.print(&buffer, "{s}/{s}", .{ parent, p.tempName() }) catch null;
     if (is_windows and p.file != null) {
         // By handle: the name is what a hook sees, and a route deletes by.
@@ -820,7 +821,7 @@ pub fn dropParent(p: *Staged, io: Io) void {
 /// The batch's handle on the parent from here on, lent.
 pub fn adoptParent(p: *Staged, parent: Io.Dir) void {
     assert.invariant(p.parent != .owned, "Staged.adoptParent: a parent airlock opened is still held");
-    p.parent = .{ .lent = parent };
+    p.parent = .{ .lent = .of(parent) };
 }
 
 /// Renames a synced temp as `publish` says: true if renamed, false if

@@ -27,7 +27,8 @@ const sys = @import("sys.zig");
 
 const Scan = @This();
 
-dir: Io.Dir,
+/// The directory scanned, lent: the caller opened it and closes it.
+dir: aegis.own.Unowned(Io.Dir),
 buffer: []align(@alignOf(usize)) u8,
 /// Which way the scan reads, chosen by the first `next`.
 arm: Arms.Runtime(void),
@@ -69,7 +70,7 @@ pub const Batched = struct { cursor: usize = 0, count: u32 = 0, done: bool = fal
 /// `buffer` (at least `min_buffer_len` bytes). Reads nothing until `next`.
 pub fn init(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
     aegis.assert.invariant(buffer.len >= min_buffer_len, "a scan's buffer holds min_buffer_len");
-    return .{ .dir = dir, .buffer = buffer, .arm = .init({}), .plain = .init(dir, buffer) };
+    return .{ .dir = .of(dir), .buffer = buffer, .arm = .init({}), .plain = .init(dir, buffer) };
 }
 
 /// A scan that reads the directory the ordinary way on every platform:
@@ -77,7 +78,7 @@ pub fn init(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
 /// volume that takes the other arm.
 pub fn initPlain(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
     aegis.assert.invariant(buffer.len >= min_buffer_len, "a scan's buffer holds min_buffer_len");
-    var s: Scan = .{ .dir = dir, .buffer = buffer, .arm = .init({}), .plain = .init(dir, buffer) };
+    var s: Scan = .{ .dir = .of(dir), .buffer = buffer, .arm = .init({}), .plain = .init(dir, buffer) };
     _ = s.arm.step(.plain) catch unreachable; // glint-ignore: Z026 -- a new scan is at its start
     return s;
 }
@@ -94,7 +95,7 @@ pub fn isBatched(s: *const Scan) bool {
 pub fn next(s: *Scan, io: Io) Error!?Entry {
     while (true) switch (s.arm.current()) {
         .start => {
-            if (batch_supported) switch (try sys.readBatch(io, s.dir.handle, s.buffer, true)) {
+            if (batch_supported) switch (try sys.readBatch(io, s.dir.get().handle, s.buffer, true)) {
                 .entries => |count| {
                     s.batch = .{ .count = count, .done = count == 0 };
                     _ = s.arm.step(.batched) catch unreachable; // glint-ignore: Z026 -- at the start
@@ -103,14 +104,14 @@ pub fn next(s: *Scan, io: Io) Error!?Entry {
                 .unsupported, .routed => {},
             };
             // A batch call the volume refused may have written the buffer.
-            s.plain = .init(s.dir, s.buffer);
+            s.plain = .init(s.dir.get(), s.buffer);
             _ = s.arm.step(.plain) catch unreachable; // glint-ignore: Z026 -- at the start
         },
         .batch => {
             const b = &s.batch;
             if (b.count == 0) {
                 if (b.done) return null;
-                const batch = try sys.readBatch(io, s.dir.handle, s.buffer, false);
+                const batch = try sys.readBatch(io, s.dir.get().handle, s.buffer, false);
                 const count = switch (batch) {
                     .entries => |n| n,
                     .unsupported, .routed => return error.Unexpected,
@@ -126,7 +127,7 @@ pub fn next(s: *Scan, io: Io) Error!?Entry {
             if (isDots(parsed.name)) continue;
             if (parsed.stat) |stat| return .{ .name = parsed.name, .stat = stat };
             // The volume answered this entry short: its stat, the ordinary way.
-            const stat = statOf(io, s.dir, parsed.name) catch |err| switch (err) {
+            const stat = statOf(io, s.dir.get(), parsed.name) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => |e| return e,
             };
@@ -135,7 +136,7 @@ pub fn next(s: *Scan, io: Io) Error!?Entry {
         .plain => {
             const entry = try s.plain.next(io) orelse return null;
             if (isDots(entry.name)) continue;
-            const stat = statOf(io, s.dir, entry.name) catch |err| switch (err) {
+            const stat = statOf(io, s.dir.get(), entry.name) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => |e| return e,
             };
