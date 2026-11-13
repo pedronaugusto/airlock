@@ -8,7 +8,8 @@ const Blocking = @import("Blocking.zig");
 const sys = @import("sys.zig");
 const platform = @import("platform.zig");
 const level_mod = @import("level.zig");
-const assert = @import("aegis").assert;
+const aegis = @import("aegis");
+const assert = aegis.assert;
 const Staged = @import("Staged.zig");
 const paths = @import("paths.zig");
 const Parent = @import("held.zig").Parent;
@@ -33,7 +34,7 @@ pub const RenameOptions = struct {
     sync: SyncOptions = .{},
     /// Windows: how long to retry a rename a scanner or indexer is
     /// blocking. 0 = once.
-    busy_deadline: Io.Duration = .fromMilliseconds(2000),
+    busy_deadline: Io.Duration = platform.default_busy_deadline,
     /// Filled in when the call returns `error.PublishedNotDurable`.
     diagnostics: ?*Diagnostics = null,
 };
@@ -395,8 +396,12 @@ fn linkSync(comptime fallback: Fallback, io: Io, blocking: ?*Blocking, dir: Io.D
 pub const PruneOptions = struct {
     /// Only temps last modified at least this long ago go, so the temps
     /// another process is writing now stay.
-    older_than: Io.Duration = .fromSeconds(3600),
+    older_than: Io.Duration = aegis.units.Duration(.second, i64).fromRaw(3600).convert(.nanosecond, i96, .exact).toIoDuration(),
 };
+
+/// A file's time and the span since it, on the real clock in nanoseconds.
+const Real = aegis.units.Instant(.real, .nanosecond, i96);
+const Span = aegis.units.Duration(.nanosecond, i96);
 
 pub const PruneError = Io.Dir.Iterator.Error || sys.StatPathError || sys.UnlinkError;
 
@@ -407,7 +412,8 @@ pub const PruneError = Io.Dir.Iterator.Error || sys.StatPathError || sys.UnlinkE
 /// temp that comes back after a crash goes on the next prune.
 pub fn pruneTemps(io: Io, dir: Io.Dir, prefix: []const u8, options: PruneOptions) PruneError!u32 {
     if (prefix.len > Staged.max_prefix or paths.baseStart(prefix) != 0) return error.BadPathName;
-    const now = Io.Timestamp.now(io, .real);
+    const now = Real.fromTimestamp(Io.Timestamp.now(io, .real), .exact);
+    const older_than = Span.fromIoDuration(options.older_than, .exact);
     var removed: u32 = 0;
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
@@ -418,7 +424,7 @@ pub fn pruneTemps(io: Io, dir: Io.Dir, prefix: []const u8, options: PruneOptions
             error.FileNotFound => continue,
             else => |e| return e,
         };
-        if (now.nanoseconds - stat.mtime.nanoseconds < options.older_than.nanoseconds) continue;
+        if (Real.fromTimestamp(stat.mtime, .exact).saturatingDurationTo(now).compare(older_than) == .lt) continue;
         sys.unlink(io, dir.handle, entry.name) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => |e| return e,

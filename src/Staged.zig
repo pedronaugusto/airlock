@@ -435,7 +435,7 @@ pub const CommitOptions = struct {
     publish: Publish = .replace,
     /// Windows: how long to retry a rename a scanner or indexer is
     /// blocking. 0 = once.
-    busy_deadline: Io.Duration = .fromMilliseconds(2000),
+    busy_deadline: Io.Duration = platform.default_busy_deadline,
     /// As `SyncOptions.barrier`: Darwin orders the temp with a barrier and
     /// flushes the device once, at the directory.
     barrier: bool = true,
