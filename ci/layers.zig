@@ -10,6 +10,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/level.zig",
         "src/sys.zig",
         "src/paths.zig",
+        "src/pid.zig",
     } },
     .{ .name = "platform", .patterns = &.{
         "src/platform.zig",

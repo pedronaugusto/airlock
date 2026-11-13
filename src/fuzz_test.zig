@@ -1,11 +1,15 @@
 //! Fuzz targets for what airlock takes apart: a caller's path. Every name
 //! airlock makes durable is found in one (its base, its parent, the
 //! directories `makePath` walks), so the walk over its bytes is a parser.
-//! And for what it copies: a file of any size, with holes anywhere.
+//! A lock's holder file, which another process wrote: `Lock.heldBy` promises
+//! git's reading of it. And for what it copies: a file of any size, with
+//! holes anywhere.
 //!
 //! Each path target holds the same contract: any path gives indexes inside
 //! it and slices of it, never a read past either end, and the parts it
-//! gives are the parts a plain split would. The copy target holds that a
+//! gives are the parts a plain split would. The holder target holds that
+//! airlock names the process git's `read_lock_pid` names, wherever git's is
+//! one a system gives, and none elsewhere. The copy target holds that a
 //! copy, cloned or not, is the source byte for byte. They are shakedown
 //! `check` properties: `zig build test` runs seeded cases, and `zig build
 //! test --fuzz` searches.
@@ -17,6 +21,7 @@ const gen = shakedown.gen;
 const Case = shakedown.Case;
 const Source = shakedown.Source;
 const paths = @import("paths.zig");
+const pid = @import("pid.zig");
 const airlock = @import("airlock.zig");
 
 /// A path whose bytes lean to the ones that matter: separators, dots,
@@ -114,6 +119,97 @@ fn fuzzComponents(_: void, c: *Case) !void {
         try testing.expectEqualStrings(expected[seen], name);
     }
     try testing.expectEqual(n, seen);
+}
+
+/// A holder file's bytes, leaning to what git's reading turns on: `pid `,
+/// digits, C's white space, signs, a digit separator, NUL, and now and then
+/// anything; up to past git's 32 bytes.
+fn holderInto(s: *Source, out: []u8) []u8 {
+    var len: usize = 0;
+    if (gen.int(s, u2) != 0) {
+        @memcpy(out[0.."pid ".len], "pid ");
+        len = "pid ".len;
+    }
+    const end = gen.intRange(s, usize, len, out.len);
+    for (out[len..end]) |*b| b.* = switch (gen.int(s, u4)) {
+        0...6 => '0' + gen.intRange(s, u8, 0, 9),
+        7 => ' ',
+        8 => "\t\n\x0b\x0c\r"[gen.intRange(s, usize, 0, 4)],
+        9 => '+',
+        10 => '-',
+        11 => '_',
+        12 => 0,
+        13 => '9',
+        else => gen.int(s, u8),
+    };
+    return out[0..end];
+}
+
+/// git 2.56's `read_lock_pid` (lockfile.c) over the same bytes: right-trimmed
+/// of `isspace`, a C string to its first NUL, `pid `, then `strtoumax` in base
+/// 10 (white space, a sign, digits, the maximum on overflow, a `-` wrapping),
+/// the rest of the string empty and the value nonzero.
+const GitPid = struct { value: u64, negative: bool };
+
+fn gitReadPid(text: []const u8) ?GitPid {
+    var end = text.len;
+    while (end > 0 and pid.isSpace(text[end - 1])) end -= 1;
+    var line = text[0..end];
+    if (std.mem.indexOfScalar(u8, line, 0)) |nul| line = line[0..nul];
+    if (!std.mem.startsWith(u8, line, "pid ")) return null;
+    var at: usize = "pid ".len;
+    while (at < line.len and pid.isSpace(line[at])) at += 1;
+    var negative = false;
+    if (at < line.len and (line[at] == '+' or line[at] == '-')) {
+        negative = line[at] == '-';
+        at += 1;
+    }
+    const digits = at;
+    var value: u64 = 0;
+    var overflow = false;
+    while (at < line.len and line[at] >= '0' and line[at] <= '9') : (at += 1) {
+        const times = @mulWithOverflow(value, 10);
+        const plus = @addWithOverflow(times[0], line[at] - '0');
+        if (times[1] != 0 or plus[1] != 0) overflow = true else value = plus[0];
+    }
+    // No digits: strtoumax ends where it began, at a byte that is there.
+    if (at == digits or at != line.len) return null;
+    if (overflow) value = std.math.maxInt(u64) else if (negative) value = 0 -% value;
+    if (value == 0) return null;
+    return .{ .value = value, .negative = negative };
+}
+
+test "a holder file names the process git's reading names, or none" {
+    try shakedown.check(testing.allocator, {}, fuzzHolder, .{});
+}
+
+fn fuzzHolder(_: void, c: *Case) !void {
+    var buffer: [pid.max_len + 8]u8 = undefined;
+    const text = holderInto(c.source, &buffer);
+    const ours: ?u32 = if (pid.parse({}, text)) |read| read.pid else |_| null;
+    const git = if (text.len > pid.max_len) null else gitReadPid(text);
+    const expected: ?u32 = if (git) |g| (if (g.negative or g.value > std.math.maxInt(u32)) null else @intCast(g.value)) else null;
+    try testing.expectEqual(expected, ours);
+}
+
+test "a holder file read as git reads it, by example" {
+    const cases = [_]struct { []const u8, ?u32 }{
+        .{ "pid 4242\n", 4242 }, // what git writes
+        .{ "pid  42", 42 }, // strtoumax skips white space
+        .{ "pid +42", 42 },
+        .{ "pid 42\x0b\x0c", 42 }, // isspace, trimmed
+        .{ "pid 42\x00tail", 42 }, // a C string ends at its NUL
+        .{ "pid 4_2", null }, // no digit separators
+        .{ "pid -1", null }, // git's wraps; no process is -1
+        .{ "pid 0", null },
+        .{ "pid 4294967296", null }, // past u32
+        .{ "pid 42                          x", null }, // past git's 32 bytes
+        .{ "pid", null },
+    };
+    for (cases) |case| {
+        const got: ?u32 = if (pid.parse({}, case[0])) |read| read.pid else |_| null;
+        try testing.expectEqual(case[1], got);
+    }
 }
 
 test "a copy is its source byte for byte, or its first bytes, at any size and with holes anywhere" {

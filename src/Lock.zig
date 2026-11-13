@@ -13,6 +13,7 @@ const Io = std.Io;
 const Pending = @import("Pending.zig");
 const Staged = @import("Staged.zig");
 const sys = @import("sys.zig");
+const pid = @import("pid.zig");
 
 const Lock = @This();
 
@@ -199,13 +200,14 @@ fn unmark(l: *Lock, io: Io) void {
 
 /// What a held lock says of its holder.
 pub const Held = struct {
-    /// The process id its holder file names; null when it has none, or one
-    /// that does not read as git's `pid <n>`.
+    /// The process id its holder file names, read as git's `read_lock_pid`
+    /// reads it; null when it has none, or one that names no process (see
+    /// pid.zig: a sign other than `+`, past u32, 0, or a file past 32 bytes).
     pid: ?u32,
 };
 
 /// The holder of `<path>.lock` in `dir`, or null when the lock is not held.
-/// git's `read_lock_pid`: `<path>~pid.lock`, at most 32 bytes, `pid <n>`.
+/// git's `read_lock_pid`: `<path>~pid.lock`, `pid <n>`, as pid.zig reads it.
 pub fn heldBy(io: Io, dir: Io.Dir, path: []const u8) (Io.Dir.AccessError || error{NameTooLong})!?Held {
     var lock_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const lock_name = std.mem.print(&lock_buffer, "{s}.lock", .{path}) catch return error.NameTooLong;
@@ -215,18 +217,9 @@ pub fn heldBy(io: Io, dir: Io.Dir, path: []const u8) (Io.Dir.AccessError || erro
     };
     var pid_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const pid_name = std.mem.print(&pid_buffer, "{s}~pid.lock", .{path}) catch return error.NameTooLong;
-    var contents: [32]u8 = undefined;
+    // One byte past git's longest, so a longer file is seen as one and names none.
+    var contents: [pid.max_len + 1]u8 = undefined;
     const text = dir.readFile(io, pid_name, &contents) catch return .{ .pid = null };
-    const read = aegis.input.Untrusted([]const u8).init(text).parse({}, parsePid) catch return .{ .pid = null };
+    const read = aegis.input.Untrusted([]const u8).init(text).parse({}, pid.parse) catch return .{ .pid = null };
     return .{ .pid = read.pid };
-}
-
-const Pid = struct { pid: u32 };
-
-fn parsePid(_: void, text: []const u8) error{NotAPid}!Pid {
-    const line = std.mem.trimEnd(u8, text, " \t\n\r");
-    if (!std.mem.startsWith(u8, line, "pid ")) return error.NotAPid;
-    const pid = std.fmt.parseInt(u32, line[4..], 10) catch return error.NotAPid;
-    if (pid == 0) return error.NotAPid;
-    return .{ .pid = pid };
 }

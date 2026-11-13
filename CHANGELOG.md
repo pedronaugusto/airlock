@@ -17,6 +17,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `SymLinkError` loses `OperationUnsupported`: Windows makes symbolic links.
 
+### Fixed
+
+- `Lock.heldBy` reads a holder file as git's `read_lock_pid` does, as its documentation said: white space after `pid ` and C's vertical tab and form feed at the end are taken, a NUL ends the text, and a digit separator (`pid 4_2`) names no process, where `std.fmt.parseInt` took it. A holder file longer than git's 32 bytes names none, where a longer one was cut to its first 32 bytes and could read as another pid. A `-`, a value past u32 and 0 name none, where git's reading would. A shakedown property holds the reading to a model of git's over generated holder files.
+
 ### Added
 
 - `Batch.device_calls`: the device flushes and barriers a commit with renames makes on each volume, for the system it is built for (Darwin a barrier and one flush, Windows two flushes, Linux none), so a caller asserting what its batches cost reads the plan from airlock, not a copy of its table.
