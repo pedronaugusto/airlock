@@ -9,7 +9,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    b.modules.put(b.graph.arena, "airlock", airlockModule(b, target, optimize)) catch @panic("OOM");
+    // The module a dependent imports as `airlock`, declared where every reader of this file
+    // finds it.
+    wire(b, b.addModule("airlock", .{ .root_source_file = b.path("src/airlock.zig"), .target = target, .optimize = optimize }), target, optimize);
 }
 
 /// airlock's development: its tests, example and benchmarks under preflight's
@@ -119,19 +121,20 @@ pub fn testing(airlock: *std.Build.Dependency, shakedown: *std.Build.Module) *st
 /// `airlock` and the seam module it imports, built for `target` and
 /// `optimize`.
 fn airlockModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Module {
+    const module = b.createModule(.{ .root_source_file = b.path("src/airlock.zig"), .target = target, .optimize = optimize });
+    wire(b, module, target, optimize);
+    return module;
+}
+
+/// The airlock module's imports: its seam, a module of its own, and aegis.
+fn wire(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {
     const seam = b.createModule(.{
         .root_source_file = b.path("src/seam.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const module = b.createModule(.{
-        .root_source_file = b.path("src/airlock.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "seam", .module = seam }},
-    });
+    module.addImport("seam", seam);
     module.addImport("aegis", aegisModule(b, target, optimize));
-    return module;
 }
 
 /// aegis, from which airlock takes ids for the volume and device numbers, typed
