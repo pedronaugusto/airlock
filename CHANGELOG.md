@@ -23,6 +23,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Batch.Kind`, `Batch.Volume` and `Scan.Batched` are public: the types of fields a public struct already held, which glint's Z012 refuses to leave private. Nothing about them changed.
 - `Batch.device_calls`: the device flushes and barriers a commit with renames makes on each volume, for the system it is built for (Darwin a barrier and one flush, Windows two flushes, Linux none), so a caller asserting what its batches cost reads the plan from airlock, not a copy of its table.
 - `setTimes`: the times of a file, a directory or a link itself, by name, on every platform (std's panics on Windows, and reports a missing name as `Unexpected` on POSIX).
 - `hardLink(io, old_dir, old, new_dir, new)`: a second name for a file, never replacing one, on every platform: POSIX `linkat`, Windows `FileLinkInformation` (std 0.17's `Dir.hardLink` refuses Windows outright). A filesystem without hard links is `error.HardLinksUnsupported` by name. A publish's no-replace fallback links on Windows too.

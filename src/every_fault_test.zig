@@ -24,7 +24,8 @@ const is_linux = os == .linux;
 const is_darwin = os.isDarwin();
 const is_tested_os = is_linux or is_darwin or is_windows;
 
-const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, sync_mapped, rename, remove, batch, batch_two_dirs, sym_link, make_path, copy, lock };
+/// The operation a fault case runs.
+pub const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, sync_mapped, rename, remove, batch, batch_two_dirs, sym_link, make_path, copy, lock };
 
 /// The error classes tried at each of airlock's calls: a refusal where the
 /// call has one, a failure, a full disk, an interruption, a cancel, and on

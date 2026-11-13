@@ -60,7 +60,8 @@ pub fn native() Platform {
 const max_effects = 24;
 const Mask = u32;
 
-const Effect = struct {
+/// One effect the model records, in the order the platform makes it durable.
+pub const Effect = struct {
     /// A temp's contents; a rename onto a destination; a symbolic link's
     /// creation, which is a directory entry and its target together.
     kind: enum { data, name, link },

@@ -21,7 +21,8 @@ const Seam = seam.Seam;
 const os = builtin.target.os.tag;
 const is_tested_os = os == .linux or os.isDarwin() or os == .windows;
 
-const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs, copy_batch, sym_link, make_path, copy, clone, lock };
+/// The operation a crash case runs.
+pub const Kind = enum { replace, create_new, keep_existing, ordered, sync_file, rename, remove, batch, batch_two_dirs, copy_batch, sym_link, make_path, copy, clone, lock };
 
 /// The simulated disk's names, as this platform's file systems compare them.
 const names: @FieldType(shakedown.Sim.Fs.Options, "names") = if (os.isDarwin()) .darwin else if (os == .windows) .windows else .posix;

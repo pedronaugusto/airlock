@@ -88,7 +88,8 @@ const SlotTag = struct {};
 /// The slot (in add order) whose call failed, and its error.
 pub const Failure = struct { slot: SlotIndex, cause: anyerror };
 
-const Kind = enum(u8) { file, path, pending, dir, dir_path, fence };
+/// What a slot holds, and so what its commit does with it.
+pub const Kind = enum(u8) { file, path, pending, dir, dir_path, fence };
 
 /// One entry of a batch. Opaque; the caller only provides the storage.
 pub const Slot = struct {
@@ -295,7 +296,7 @@ fn poison(b: *Batch, io: Io) void {
 }
 
 /// A volume a batch flushes once: its key and a handle on it.
-const Volume = struct {
+pub const Volume = struct {
     volume: sys.VolumeId,
     device: sys.DeviceId,
     /// A handle on the volume to flush through, and whether it is a

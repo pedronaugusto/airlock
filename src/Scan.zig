@@ -63,7 +63,7 @@ const Arms = aegis.state.Machine(Arm, enum { batched, plain }, .{ .initial = .st
 
 /// Batches: `count` entries left in the buffer from `cursor` on, and
 /// another call when they run out unless the last one was empty.
-const Batched = struct { cursor: usize = 0, count: u32 = 0, done: bool = false };
+pub const Batched = struct { cursor: usize = 0, count: u32 = 0, done: bool = false };
 
 /// A scan of `dir`, opened for iteration, from its first entry, into
 /// `buffer` (at least `min_buffer_len` bytes). Reads nothing until `next`.
