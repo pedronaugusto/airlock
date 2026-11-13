@@ -316,7 +316,7 @@ pub const Backoff = struct {
         // Per mille of the next wait: 500 to 1499.
         const jitter = 500 + @as(i96, std.mem.readInt(u16, &bytes, .little) % 1000);
         const next: Span = .fromIoDuration(b.next, .exact);
-        const scaled = next.saturatingMul(jitter).divTrunc(1000) catch unreachable; // unreachable: a positive divisor
+        const scaled = next.saturatingMul(jitter).divTrunc(1000) catch unreachable; // glint-ignore: Z026 -- a positive divisor
         const left = now.saturatingDurationTo(deadline);
         const nap = if (scaled.compare(left) == .lt) scaled else left;
         try io.sleep(nap.toIoDuration(), .awake);

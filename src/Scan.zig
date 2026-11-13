@@ -78,7 +78,7 @@ pub fn init(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
 pub fn initPlain(dir: Io.Dir, buffer: []align(@alignOf(usize)) u8) Scan {
     aegis.assert.invariant(buffer.len >= min_buffer_len, "a scan's buffer holds min_buffer_len");
     var s: Scan = .{ .dir = dir, .buffer = buffer, .arm = .init({}), .plain = .init(dir, buffer) };
-    _ = s.arm.step(.plain) catch unreachable; // unreachable: a new scan is at its start
+    _ = s.arm.step(.plain) catch unreachable; // glint-ignore: Z026 -- a new scan is at its start
     return s;
 }
 
@@ -97,14 +97,14 @@ pub fn next(s: *Scan, io: Io) Error!?Entry {
             if (batch_supported) switch (try sys.readBatch(io, s.dir.handle, s.buffer, true)) {
                 .entries => |count| {
                     s.batch = .{ .count = count, .done = count == 0 };
-                    _ = s.arm.step(.batched) catch unreachable; // unreachable: at the start
+                    _ = s.arm.step(.batched) catch unreachable; // glint-ignore: Z026 -- at the start
                     continue;
                 },
                 .unsupported, .routed => {},
             };
             // A batch call the volume refused may have written the buffer.
             s.plain = .init(s.dir, s.buffer);
-            _ = s.arm.step(.plain) catch unreachable; // unreachable: at the start
+            _ = s.arm.step(.plain) catch unreachable; // glint-ignore: Z026 -- at the start
         },
         .batch => {
             const b = &s.batch;

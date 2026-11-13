@@ -1081,7 +1081,7 @@ pub const batch_attr = struct {
 };
 
 const darwin_batch = struct {
-    // aegis: boundary(A019): libc's getattrlistbulk, declared as the system documents it, called only from this file
+    // glint-ignore: P007 -- boundary: libc's getattrlistbulk, declared as the system documents it, called only from this file
     extern "c" fn getattrlistbulk(dirfd: c_int, alist: *const anyopaque, attr_buf: [*]u8, attr_buf_size: usize, options: u64) c_int;
 };
 
@@ -1172,9 +1172,9 @@ const DarwinStatfs = extern struct {
 };
 
 const darwin_statfs = struct {
-    // aegis: boundary(A019): libc's fstatfs, declared as the system documents it, called only from this file
+    // glint-ignore: P007 -- boundary: libc's fstatfs, declared as the system documents it, called only from this file
     extern "c" fn fstatfs(fd: posix.fd_t, buf: *DarwinStatfs) c_int;
-    // aegis: boundary(A019): libc's fstatfs$INODE64, declared as the system documents it, called only from this file
+    // glint-ignore: P007 -- boundary: libc's fstatfs$INODE64, declared as the system documents it, called only from this file
     extern "c" fn @"fstatfs$INODE64"(fd: posix.fd_t, buf: *DarwinStatfs) c_int;
 };
 
@@ -1343,7 +1343,7 @@ pub const FlushEx = enum(u32) {
     no_sync = flush_no_sync,
 };
 
-// aegis: boundary(A019): ntdll's NtFlushBuffersFileEx, declared as the system documents it, called only from this file
+// glint-ignore: P007 -- boundary: ntdll's NtFlushBuffersFileEx, declared as the system documents it, called only from this file
 extern "ntdll" fn NtFlushBuffersFileEx(
     FileHandle: windows.HANDLE,
     Flags: windows.ULONG,
@@ -2295,17 +2295,17 @@ pub fn cloneAt(io: Io, src: Handle, dir: Handle, name: []const u8) CloneError!Cl
 
 fn msyncRaw(address: [*]const u8, len: usize) if (is_linux) usize else c_int {
     if (is_linux) return linux.msync(address, len, linux.MSF.SYNC);
-    return std.c.msync(@ptrCast(@alignCast(address)), len, std.c.MSF.SYNC); // aegis: boundary(A019): msync takes a page-aligned address, and writeMapped is handed whole pages
+    return std.c.msync(@ptrCast(@alignCast(address)), len, std.c.MSF.SYNC); // glint-ignore: P007 -- boundary: msync takes a page-aligned address, and writeMapped is handed whole pages
 }
 
 fn ntFlushVirtual(address: [*]const u8, len: usize) windows.NTSTATUS {
-    var base: ?*anyopaque = @constCast(address); // aegis: boundary(A019): NtFlushVirtualMemory takes the base as an in-out pointer and writes back only the page it rounded to; the memory is read, never written
+    var base: ?*anyopaque = @constCast(address); // glint-ignore: P007 -- boundary: NtFlushVirtualMemory takes the base as an in-out pointer and writes back only the page it rounded to; the memory is read, never written
     var size = len;
     var iosb: windows.IO_STATUS_BLOCK = std.mem.zeroes(windows.IO_STATUS_BLOCK);
     return NtFlushVirtualMemory(windows.GetCurrentProcess(), &base, &size, &iosb);
 }
 
-// aegis: boundary(A019): ntdll's NtFlushVirtualMemory, which kernel32's FlushViewOfFile calls, declared as ntdll exports it, called only from this file
+// glint-ignore: P007 -- boundary: ntdll's NtFlushVirtualMemory, which kernel32's FlushViewOfFile calls, declared as ntdll exports it, called only from this file
 extern "ntdll" fn NtFlushVirtualMemory(
     ProcessHandle: windows.HANDLE,
     BaseAddress: *?*anyopaque,
@@ -2345,7 +2345,7 @@ pub fn writeMapped(io: Io, blocking: ?*Blocking, memory: []const u8, path: ?[]co
 const clone_nofollow: u32 = 0x0001;
 const clone_noownercopy: u32 = 0x0002;
 
-// aegis: boundary(A019): libc's fclonefileat, declared as the system documents it, called only from this file
+// glint-ignore: P007 -- boundary: libc's fclonefileat, declared as the system documents it, called only from this file
 extern "c" fn fclonefileat(srcfd: c_int, dst_dirfd: c_int, dst: [*:0]const u8, flags: u32) c_int;
 
 fn cloneOutcome(e: posix.E) CloneError!Cloned {
