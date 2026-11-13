@@ -1,0 +1,6 @@
+{
+  "seams": [
+    { "file": "src/sys.zig", "rules": ["A009", "P007"], "reason": "every raw call airlock makes: each system's sync, rename, unlink, close, identity, clone and map-flush calls, declared as the system documents them, and the mount table read to tell a refusal from a failure" },
+    { "file": "src/seam.zig", "rules": ["P007"], "reason": "the seam in front of every raw call: a call's code is the system's own, an errno on POSIX and an NTSTATUS on Windows" }
+  ]
+}
