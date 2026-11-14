@@ -45,7 +45,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Pins aegis 6cce448 (governed internals named `aegis_<name>`, SlotPool's keyed form among them, version 2 of its `lint_rules`, `bounded.Array.len` and the rename's other leftovers fixed) and preflight ci-standard 942a017 (glint 0.8 at 7b72b4d9, on the same aegis). Nothing airlock calls changed. airlock declares no `lint_rules` of its own: the durability door is preflight's default policy (glint P006, its owners airlock and reactor), which names every entry the unreleased version-1 list did.
+- Pins aegis 2dd07e6 (governed internals named `aegis_<name>`, SlotPool's keyed form among them, version 2 of its `lint_rules`, `bounded.Array.len` and the rename's other leftovers fixed, `Secret.make`, `eql` and `compare` on the int types) and preflight ci-standard c2f1d77 (glint 0.8 at 46645396). Nothing airlock calls changed. airlock declares no `lint_rules` of its own: the durability door is preflight's default policy (glint P006, its owners airlock and reactor), which names every entry the unreleased version-1 list did.
 - Development: blocking_test's call and worker counters, and `Seam.drive`'s finished flag, are `aegis.Atomic` cells of `units.Count` and a two-state enum, where they were raw `std.atomic.Value`s.
 - The README states airlock's stability policy (0.x, tracking Zig 0.17.x; a breaking change only in a minor release, with its CHANGELOG entry; a patch release never breaks).
 - The contracts left on `std.debug.assert` (a scan's buffer and its entries, the attrlist's size, and the tests' model and blocking checks) are `aegis.assert.invariant`: they hold in every build, where they were undefined behaviour in ReleaseFast.
