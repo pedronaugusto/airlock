@@ -132,6 +132,8 @@ fn full(io: Io, blocking: ?*Blocking, fd: sys.Handle, call: sys.Call, subject: ?
 fn plain(io: Io, blocking: ?*Blocking, fd: sys.Handle, call: sys.Call, subject: ?[]const u8, reached: Reached) Io.File.SyncError!Reached {
     sys.plainFsync(io, blocking, fd, call, subject) catch |err| return switch (err) {
         error.Refused => .none,
+        // A file, or Darwin's directory, is never a path-only handle.
+        error.BadHandle => error.Unexpected,
         else => |e| e,
     };
     return reached;
@@ -263,8 +265,21 @@ pub fn dirSync(io: Io, blocking: ?*Blocking, handle: sys.Handle, busy: Io.Durati
         };
         return .{ .reached = .full, .refused = false };
     }
-    const reached = if (is_darwin) try full(io, blocking, handle, .sync_dir, subject) else try plain(io, blocking, handle, .sync_dir, subject, .full);
-    return .{ .reached = reached, .refused = reached != .full };
+    if (is_darwin) {
+        const reached = try full(io, blocking, handle, .sync_dir, subject);
+        return .{ .reached = reached, .refused = reached != .full };
+    }
+    // The BSDs: fsync is their full sync. FreeBSD has path-only handles, as
+    // Linux does, which fsync refuses with EBADF: those are reopened.
+    sys.plainFsync(io, blocking, handle, .sync_dir, subject) catch |err| switch (err) {
+        error.Refused => return .{ .reached = .none, .refused = true },
+        error.BadHandle => {
+            if (try sys.isPathOnly(io, handle)) return reopened(io, blocking, handle, subject);
+            return error.Unexpected;
+        },
+        else => |e| return e,
+    };
+    return .{ .reached = .full, .refused = false };
 }
 
 /// `dirSync` of `"."` reopened relative to `handle`, once.

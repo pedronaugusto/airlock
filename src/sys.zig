@@ -217,7 +217,9 @@ pub fn barrierFsync(io: Io, blocking: ?*Blocking, fd: posix.fd_t, path: ?[]const
 
 /// Plain `fsync` on Darwin and the BSDs: a writeout, or the end of a chain.
 /// Darwin's does not flush the device; the BSDs' is their full sync.
-pub fn plainFsync(io: Io, blocking: ?*Blocking, fd: posix.fd_t, call: Call, path: ?[]const u8) SyncError!void {
+/// `BadHandle` is fsync's EBADF, which a path-only handle (`O_PATH`, as std
+/// opens a directory it will not iterate) gets where the system has them.
+pub fn plainFsync(io: Io, blocking: ?*Blocking, fd: posix.fd_t, call: Call, path: ?[]const u8) (SyncError || error{BadHandle})!void {
     const kind: seam.Flush = if (is_darwin or call == .sync_writeout) .writeout else .full;
     const e = if (is_linux)
         try retryingSync(io, blocking, call, path, fd, kind, linux.fsync, .{fd})
@@ -226,6 +228,7 @@ pub fn plainFsync(io: Io, blocking: ?*Blocking, fd: posix.fd_t, call: Call, path
     return switch (e) {
         .SUCCESS => {},
         .INVAL, .ROFS => error.Refused,
+        .BADF => error.BadHandle,
         else => if (isNotSupported(e)) error.Refused else syncFailure(e),
     };
 }
@@ -255,10 +258,20 @@ fn linuxGetfl(fd: posix.fd_t) usize {
     return linux.fcntl(fd, linux.F.GETFL, 0);
 }
 
-/// Linux: whether `fd` is an `O_PATH` handle (or `AT_FDCWD`), which a
-/// directory sync must reopen. Any other answer means the handle is bad.
+fn cGetfl(fd: posix.fd_t) c_int {
+    return std.c.fcntl(fd, std.c.F.GETFL);
+}
+
+/// Whether the system has path-only handles (`O_PATH`: Linux, FreeBSD),
+/// which std opens a directory as when it will not iterate it.
+pub const has_path_only = !is_windows and @hasField(posix.O, "PATH");
+
+/// Whether `fd` is an `O_PATH` handle (or `AT_FDCWD`), which a directory
+/// sync must reopen. Any other answer means the handle is bad.
 pub fn isPathOnly(io: Io, fd: posix.fd_t) Io.Cancelable!bool {
-    if (fd == linux.AT.FDCWD) return true;
+    if (!has_path_only) return false;
+    if (fd == posix.AT.FDCWD) return true;
+    if (!is_linux) return isPathOnlyC(io, fd);
     while (true) {
         try io.checkCancel();
         switch (try decide(io, .getfl, null)) {
@@ -279,6 +292,29 @@ pub fn isPathOnly(io: Io, fd: posix.fd_t) Io.Cancelable!bool {
             .INTR => continue,
             else => return false,
         }
+    }
+}
+
+/// `isPathOnly` through libc's `fcntl` (FreeBSD).
+fn isPathOnlyC(io: Io, fd: posix.fd_t) Io.Cancelable!bool {
+    while (true) {
+        try io.checkCancel();
+        switch (try decide(io, .getfl, null)) {
+            .system => {},
+            .code => |code| {
+                if (code == .INTR) continue;
+                return false;
+            },
+            // A routed sync fails with a bad handle only for a bad handle.
+            .route => return false,
+        }
+        const rc = cGetfl(fd);
+        if (rc >= 0) {
+            const flags: posix.O = @bitCast(@as(u32, @bitCast(rc))); // safe: F_GETFL returns the open flags
+            return flags.PATH;
+        }
+        if (posix.errno(rc) == .INTR) continue;
+        return false;
     }
 }
 
