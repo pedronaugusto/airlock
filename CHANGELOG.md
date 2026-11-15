@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- Adding past a `Batch`'s slots is the caller's error, which `Batch.room` (how many more adds the slots hold) lets it avoid, where it was `error.BatchFull`: `Batch.addDir`, `Batch.addDirPath`, `Batch.addFile`, `Batch.addPath`, `Batch.addPending`, `Batch.fence` return `void` where they returned `error{BatchFull}!void`, `Batch.AddError` is gone, and `error.BatchFull` left `Batch.commit`, `Batch.commitOrRefuse`, `Batch.CommitOrRefuseError`, `Batch.Slot.err`. A slot's `Batch.Slot.kind` is the public `Batch.Kind` and `Batch.Slot.owned` is gone (named here as preflight's release check reads them from ci-standard f991816 on; the check before it passed airlock's build without them).
+- `Temp` and `Pending.Temp` have a `suffix` arm, `Scan` holds `plain` and `batch` beside its `arm` (`Scan.arm` is an `Arms.Runtime(void)`), and `SymLinkOrRefuseError` no longer holds `error.OperationUnsupported`: `Temp`, `Pending.Temp`, `Scan`, `Scan.arm`, `SymLinkOrRefuseError`.
 - `Scan.dir`, and a pending's `root` (the directory its destination is named relative to), are `aegis.own.Unowned(std.Io.Dir)`, where each was the `std.Io.Dir`: the caller opened it and closes it, and airlock never does. Read one with `.get()`.
 - `testing.Seam.gate_taken` is an `aegis.Atomic(Seam.GateState)` (`open`, `taken`), where it was a `std.atomic.Value(bool)`; the seam alone sets it.
 - `testing.Seam`'s descriptor peak is `peakDescriptors()`, where it was the field `peak_descriptors`: the seam's plan and peak are held in an `aegis.SpinRwGuarded`, where a raw `std.atomic.Mutex` beside them was taken by hand.
