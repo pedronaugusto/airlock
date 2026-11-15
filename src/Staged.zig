@@ -13,6 +13,7 @@ const Io = std.Io;
 const sys = @import("sys.zig");
 const paths = @import("paths.zig");
 const held = @import("held.zig");
+const diagnostics_mod = @import("diagnostics.zig");
 const platform = @import("platform.zig");
 const level_mod = @import("level.zig");
 const Level = level_mod.Level;
@@ -56,6 +57,8 @@ writeback_bytes: u32 = 0,
 /// The writer `writer` hands out, once it has: from then on the staged
 /// file does not move, since the writer points into it.
 writer_state: ?Writer = null,
+/// `CreateOptions.diagnostics`, borrowed: where a name left behind is told.
+diagnostics: ?*diagnostics_mod.Diagnostics = null,
 
 pub const State = enum {
     /// Created, written to, not yet synced.
@@ -68,7 +71,8 @@ pub const State = enum {
     /// `keep_existing` found the name taken and left it alone.
     kept,
     /// A sync or a write failed: the contents are unknown, the temp is
-    /// gone, and only `discard` is valid.
+    /// removed (a removal that failed is `Diagnostics.left`), and only
+    /// `discard` is valid.
     poisoned,
     /// Nothing is left: discarded, or a create that found the name taken.
     discarded,
@@ -139,6 +143,12 @@ pub const CreateOptions = struct {
     /// bytes written through `writer`, so the final sync has little left to
     /// do. 0 = off.
     writeback_bytes: u32 = 0,
+    /// Filled in with `left` when the pending cannot remove a name it made:
+    /// its temp, after a create, a sync or a write that failed or at
+    /// `discard`; the temp a no-replace publish by hard link leaves as a
+    /// second name for the file it published; a clone made beside the temp.
+    /// Borrowed until the pending ends.
+    diagnostics: ?*diagnostics_mod.Diagnostics = null,
 };
 
 pub const CreateError = sys.OpenFileError || sys.SetModeError || sys.StatPathError || error{
@@ -165,6 +175,7 @@ pub fn create(io: Io, dir: Io.Dir, dest_sub_path: []const u8, options: CreateOpt
         .base_start = base_start,
         .exact = &.{},
         .writeback_bytes = options.writeback_bytes,
+        .diagnostics = options.diagnostics,
     };
     errdefer p.parent.close(io);
     const create_mode: Io.File.Permissions = switch (options.mode) {
@@ -198,6 +209,7 @@ pub fn move(p: *Staged) Staged {
         .file_reached = p.file_reached,
         .writeback_bytes = p.writeback_bytes,
         .writer_state = null,
+        .diagnostics = p.diagnostics,
     };
 }
 
@@ -579,14 +591,21 @@ fn removeTemp(p: *Staged, io: Io) void {
     const name: ?[]const u8 = if (held_parent != null or parent.len == 0) p.tempName() else std.mem.print(&buffer, "{s}/{s}", .{ parent, p.tempName() }) catch null;
     if (is_windows and p.file != null) {
         // By handle: the name is what a hook sees, and a route deletes by.
-        // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-        sys.dispose(io, p.tempFile().handle, dir, name orelse p.tempName()) catch {};
+        sys.dispose(io, p.tempFile().handle, dir, name orelse p.tempName()) catch |err| p.leave(err);
         p.closeFile(io);
         return;
     }
     p.closeFile(io);
-    // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-    sys.unlink(io, dir, name orelse return) catch {};
+    // A parent path and temp name together longer than a path may be: the
+    // temp cannot be named from the caller's directory.
+    const path = name orelse return p.leave(error.NameTooLong);
+    sys.unlink(io, dir, path) catch |err| p.leave(err);
+}
+
+/// Tells the caller's diagnostics, where it gave them, that a name the
+/// pending made is still there, and why.
+pub fn leave(p: *const Staged, err: diagnostics_mod.LeftError) void {
+    diagnostics_mod.noteLeft(p.diagnostics, err);
 }
 
 /// Whether `cloneFrom` can make this temp a clone: never one written in
@@ -626,8 +645,7 @@ pub fn cloneFrom(p: *Staged, io: Io, src: sys.Handle) (sys.CloneError || sys.Ren
     };
     const name = drawn.constItems();
     sys.rename(io, p.parent.dir().handle, name, p.parent.dir().handle, p.tempName()) catch |err| {
-        // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-        sys.unlink(io, p.parent.dir().handle, name) catch {};
+        sys.unlink(io, p.parent.dir().handle, name) catch |left| p.leave(left);
         return err;
     };
     // The temp's name is the clone's from here; its old handle, the empty
@@ -743,10 +761,10 @@ fn linkFallback(p: *Staged, io: Io, publish: Publish) CommitError!Renamed {
         },
         else => |e| return e,
     };
-    // The new name holds the file; the temp's name is a leftover
-    // `pruneTemps` removes if this fails.
-    // glint-ignore: Z026 -- the published name holds the file; a leftover temp name is prunable by its prefix
-    sys.unlink(io, parent, p.tempName()) catch {};
+    // The new name holds the file, published: a temp name this cannot
+    // remove is a second name for it, told to the caller and, when random,
+    // `pruneTemps`'s to remove.
+    sys.unlink(io, parent, p.tempName()) catch |err| p.leave(err);
     return .renamed;
 }
 

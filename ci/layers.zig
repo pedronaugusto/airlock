@@ -20,6 +20,9 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/Scan.zig",
         "src/held.zig",
     } },
+    .{ .name = "diagnostics", .patterns = &.{
+        "src/diagnostics.zig",
+    } },
     .{ .name = "staging", .patterns = &.{
         "src/Staged.zig",
     } },

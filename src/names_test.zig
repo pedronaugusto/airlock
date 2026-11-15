@@ -326,6 +326,20 @@ test "symLink leaves nothing behind when the rename fails" {
     try testing.expectEqual(@as(usize, 0), (try s.entries(".")).count);
 }
 
+test "symLink tells its diagnostics of a temp link it made and could not remove" {
+    if (is_windows or !is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{ seam.fail(.rename, 1, .ACCES), seam.always(.unlink, .PERM) } });
+    defer h.destroy();
+    var diagnostics: airlock.Diagnostics = .{};
+    try testing.expectError(error.AccessDenied, airlock.symLink(h.io(), s.dir(), "release-1", "current", .{ .diagnostics = &diagnostics }));
+    try testing.expectEqual(@as(?airlock.LeftError, error.PermissionDenied), diagnostics.left);
+    try testing.expectEqual(@as(?airlock.SyncAfterError, null), diagnostics.cause);
+    // The temp link is there, under the prefix `pruneTemps` removes by.
+    try testing.expectEqual(@as(usize, 1), (try s.entries(".")).prefixed);
+}
+
 test "pruneTemps removes old random temps and nothing else" {
     if (!is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();

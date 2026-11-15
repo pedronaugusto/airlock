@@ -14,6 +14,7 @@ const Pending = @import("Pending.zig");
 const Staged = @import("Staged.zig");
 const sys = @import("sys.zig");
 const pid = @import("pid.zig");
+const diagnostics_mod = @import("diagnostics.zig");
 
 const Lock = @This();
 
@@ -48,6 +49,10 @@ pub const Options = struct {
     mode: Pending.Mode = .default,
     /// Open the lock for reading as well.
     read: bool = false,
+    /// Filled in with `left` when the lock cannot remove a name it made:
+    /// the lock file itself (which then still holds the lock) or its holder
+    /// file. Borrowed until the lock ends.
+    diagnostics: ?*diagnostics_mod.Diagnostics = null,
 };
 
 /// Taking a lock failed.
@@ -115,7 +120,7 @@ fn create(io: Io, dir: Io.Dir, path: []const u8, options: Options) Error!Pending
     var waited: Span = .fromRaw(0);
     var attempt: u32 = 0;
     while (true) {
-        if (Pending.create(io, dir, path, .{ .temp = .{ .suffix = ".lock" }, .mode = options.mode, .read = options.read })) |pending| {
+        if (Pending.create(io, dir, path, .{ .temp = .{ .suffix = ".lock" }, .mode = options.mode, .read = options.read, .diagnostics = options.diagnostics })) |pending| {
             return pending;
         } else |err| switch (err) {
             // Windows keeps the name of a deleted file while another process
@@ -205,8 +210,9 @@ fn unmark(l: *Lock, io: Io) void {
     const parent = staged.parent.get() orelse return;
     const holder_name = holderName(staged.baseName()) catch aegis.assert.never("Lock.unmark: a taken lock's holder name fit, take having refused one with no room for it");
     const name = holder_name.constItems();
-    // glint-ignore: Z026 -- a holder file left behind is read only beside a held lock, and the next lock writes or removes it
-    parent.deleteFile(io, name) catch {};
+    // One left behind is read only beside a held lock, and the next lock
+    // writes or removes it: told to the caller all the same.
+    parent.deleteFile(io, name) catch |err| staged.leave(err);
 }
 
 /// What a held lock says of its holder.
