@@ -6,6 +6,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
+/// Where a run says what it could not clean up: standard error, by std's log.
+const log = std.log.scoped(.relic);
 
 pub fn syncFile(io: Io, file: Io.File) Io.File.SyncError!void {
     try file.sync(io);
@@ -37,7 +39,7 @@ pub fn batch(io: Io, dir: Io.Dir, files: []const Io.File) !void {
         file.close(io);
         // A barrier left behind fails the next batch's exclusive create:
         // said where the run's diagnostics go.
-        dir.deleteFile(io, name) catch |err| std.debug.print("relic: the barrier file {s} is left: {t}\n", .{ name, err });
+        dir.deleteFile(io, name) catch |err| log.warn("the barrier file {s} is left: {t}", .{ name, err });
     }
     try file.sync(io);
 }
@@ -49,7 +51,7 @@ pub fn atomicWrite(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8)
     var name_buf: [64]u8 = undefined;
     const temp = try std.mem.print(&name_buf, "tmp_{x}", .{&raw});
     const file = try dir.createFile(io, temp, .{ .exclusive = true });
-    errdefer dir.deleteFile(io, temp) catch |err| std.debug.print("relic: the temp {s} is left: {t}\n", .{ temp, err });
+    errdefer dir.deleteFile(io, temp) catch |err| log.warn("the temp {s} is left: {t}", .{ temp, err });
     {
         // Closed once, before the rename, whether the writes failed or not.
         defer file.close(io);

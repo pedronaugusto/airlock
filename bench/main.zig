@@ -25,6 +25,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
+/// Where a run says what it could not clean up: standard error, by std's log.
+const log = std.log.scoped(.@"airlock-bench");
 const airlock = @import("airlock");
 const seam = @import("airlock.testing");
 const primitives = @import("primitives.zig");
@@ -229,7 +231,7 @@ pub fn main(init: std.process.Init) !void {
     var scratch_buffer: [64]u8 = undefined;
     const scratch = try std.mem.print(&scratch_buffer, "airlock-bench-{x}", .{&random});
     try parent.createDir(io, scratch, .default_dir);
-    defer parent.deleteTree(io, scratch) catch |err| std.debug.print("airlock-bench: the scratch directory {s} under {s} is left: {t}\n", .{ scratch, target, err });
+    defer parent.deleteTree(io, scratch) catch |err| log.warn("the scratch directory {s} under {s} is left: {t}", .{ scratch, target, err });
     var root = try parent.openDir(io, scratch, .{});
     defer root.close(io);
 
@@ -257,7 +259,7 @@ pub fn main(init: std.process.Init) !void {
         try root.createDir(io, "row", .default_dir);
         ctx.dir = try root.openDir(io, "row", .{ .iterate = true });
         // A row left behind fails the next row's create.
-        defer root.deleteTree(io, "row") catch |err| std.debug.print("airlock-bench: the row directory under {s}/{s} is left: {t}\n", .{ target, scratch, err });
+        defer root.deleteTree(io, "row") catch |err| log.warn("the row directory under {s}/{s} is left: {t}", .{ target, scratch, err });
         defer ctx.dir.close(io);
         ctx.file = try ctx.dir.createFile(io, "probe", .{ .read = true });
         defer ctx.file.close(io);
