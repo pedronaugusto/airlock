@@ -193,6 +193,29 @@ test "a failed sync poisons: the temp is gone, the destination untouched, no ren
     try testing.expectEqual(@as(u32, 1), h.count(temp_sync));
 }
 
+test "a failed sync whose temp cannot be removed tells the pending's diagnostics, and a clean one tells nothing" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const removal: Call = if (is_windows) .dispose else .unlink;
+    const refusal: seam.Code = if (is_windows) .ACCESS_DENIED else .ACCES;
+    const h = try Seam.create(testing.allocator, testing.io, .{ .plan = &.{ seam.always(temp_sync, io_error), seam.always(removal, refusal) } });
+    defer h.destroy();
+    var diagnostics: airlock.Diagnostics = .{};
+    var p = try airlock.create(h.io(), s.dir(), "HEAD", .{ .diagnostics = &diagnostics });
+    defer p.discard(h.io());
+    try testing.expectError(error.InputOutput, p.commit(h.io(), .{}));
+    try testing.expectEqual(airlock.Pending.State.poisoned, p.state());
+    try testing.expectEqual(@as(?airlock.LeftError, error.AccessDenied), diagnostics.left);
+    try testing.expectEqual(@as(usize, 1), (try s.entries(".")).prefixed);
+
+    // Where every removal is made, nothing is told.
+    var clean: airlock.Diagnostics = .{};
+    var q = try airlock.create(testing.io, s.dir(), "other", .{ .diagnostics = &clean });
+    q.discard(testing.io);
+    try testing.expectEqual(@as(?airlock.LeftError, null), clean.left);
+}
+
 test "EIO from close is a failed sync, and EINTR from close is closed" {
     if (is_windows or !is_tested_os) return error.SkipZigTest;
     var s: harness.Scratch = .init();

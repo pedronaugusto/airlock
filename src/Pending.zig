@@ -41,6 +41,7 @@ pub const CommitError = Staged.CommitError;
 pub const CommitOrRefuseError = Staged.CommitOrRefuseError;
 /// Where a pending is in its publish.
 pub const State = Staged.State;
+const Diagnostics = @import("diagnostics.zig").Diagnostics;
 
 /// Creates the temp for `dest_sub_path`, relative to `dir`. A nested
 /// destination ("refs/heads/main") has its directory opened once here and
@@ -122,8 +123,9 @@ pub fn commitOrRefuse(p: *Pending, io: Io, options: CommitOptions) CommitOrRefus
 }
 
 /// Idempotent; meant for `defer`. Before the publish it closes the temp and
-/// removes its name; after, it closes whatever is still open and never
-/// unlinks, so it cannot remove a name someone else now owns.
+/// removes its name (a removal that fails is `CreateOptions.diagnostics`'
+/// `left`); after, it closes whatever is still open and never unlinks, so
+/// it cannot remove a name someone else now owns.
 pub fn discard(p: *Pending, io: Io) void {
     p.staged.discard(io);
 }
@@ -247,6 +249,9 @@ pub const CopyOptions = struct {
     /// The random temp's prefix, as `Temp.random` takes it.
     temp: []const u8 = ".",
     commit: CommitOptions = .{},
+    /// Filled in with `left` when the copy cannot remove a temp it made, as
+    /// `CreateOptions.diagnostics` is. Borrowed for the call.
+    diagnostics: ?*Diagnostics = null,
 };
 
 /// What a copy came to.
@@ -272,7 +277,7 @@ pub fn copyFile(io: Io, src_dir: Io.Dir, src_path: []const u8, dst_dir: Io.Dir, 
         .source => found.permissions,
         .exact => |perm| perm,
     };
-    var p = try create(io, dst_dir, dst_path, .{ .temp = .{ .random = options.temp }, .mode = .{ .exact = mode } });
+    var p = try create(io, dst_dir, dst_path, .{ .temp = .{ .random = options.temp }, .mode = .{ .exact = mode }, .diagnostics = options.diagnostics });
     defer p.discard(io);
     const by = try p.copyFrom(io, src, .{ .clone = options.clone, .size = found.size });
     return .{ .committed = try p.commit(io, options.commit), .by = by };

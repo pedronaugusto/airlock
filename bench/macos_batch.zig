@@ -75,15 +75,13 @@ pub fn main(init: std.process.Init) !void {
     var name_buffer: [64]u8 = undefined;
     const name = try std.mem.print(&name_buffer, "airlock-strategies-{x}", .{&random});
     try parent.createDir(io, name, .default_dir);
-    // glint-ignore: Z026 -- scratch removal after the row; a leftover is in the run directory
-    defer parent.deleteTree(io, name) catch {};
+    defer parent.deleteTree(io, name) catch |err| std.debug.print("airlock-macos-batch: the scratch directory {s} under {s} is left: {t}\n", .{ name, config.target, err });
     var root = try parent.openDir(io, name, .{});
     defer root.close(io);
     const other_parent: ?Io.Dir = if (config.other_target) |target| try Io.Dir.cwd().createDirPathOpen(io, target, .{}) else null;
     defer if (other_parent) |dir| dir.close(io);
     if (other_parent) |dir| try dir.createDir(io, name, .default_dir);
-    // glint-ignore: Z026 -- scratch removal after the row; a leftover is in the run directory
-    defer if (other_parent) |dir| dir.deleteTree(io, name) catch {};
+    defer if (other_parent) |dir| dir.deleteTree(io, name) catch |err| std.debug.print("airlock-macos-batch: the scratch directory {s} under --other-dir is left: {t}\n", .{ name, err });
     const other_root: ?Io.Dir = if (other_parent) |dir| try dir.openDir(io, name, .{}) else null;
     defer if (other_root) |dir| dir.close(io);
     var output_buffer: [4096]u8 = undefined;

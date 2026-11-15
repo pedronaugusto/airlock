@@ -75,8 +75,11 @@ pub const By = Pending.By;
 pub const CopyFromOptions = Pending.CopyFromOptions;
 pub const CopyFromError = Pending.CopyFromError;
 
-/// Where a call puts the error behind `error.PublishedNotDurable`.
+/// Where a call puts the error behind `error.PublishedNotDurable`, and why
+/// a name airlock made could not be removed.
 pub const Diagnostics = names.Diagnostics;
+/// What a removal of a name airlock made can fail with: `Diagnostics.left`.
+pub const LeftError = names.LeftError;
 /// The errors a sync after a name changed can fail with.
 pub const SyncAfterError = names.SyncAfterError;
 /// The directory syncs and the Windows retry of `rename` and `remove`.

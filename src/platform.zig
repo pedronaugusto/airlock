@@ -64,9 +64,11 @@ const aegis = @import("aegis");
 const Awake = aegis.units.Instant(.awake, .nanosecond, i96);
 /// A span on it.
 const Span = aegis.units.Duration(.nanosecond, i96);
+/// A backoff's waits before their jitter: whole milliseconds.
+const Millis = aegis.units.Duration(.millisecond, i64);
 /// The longest a backoff waits between tries.
-const longest_wait: Span = aegis.units.Duration(.millisecond, i64).fromRaw(100).convert(.nanosecond, i96, .exact);
-const first_wait: Span = aegis.units.Duration(.millisecond, i64).fromRaw(1).convert(.nanosecond, i96, .exact);
+const longest_wait: Millis = .fromRaw(100);
+const first_wait: Millis = .fromRaw(1);
 const level_mod = @import("level.zig");
 const Level = level_mod.Level;
 const Reached = level_mod.Reached;
@@ -314,10 +316,11 @@ pub fn flushDir(io: Io, blocking: ?*Blocking, flush: sys.Handle, subject: ?[]con
 /// are `io.sleep`, so a cancel ends them and a test clock drives them.
 pub const Backoff = struct {
     deadline: Io.Timestamp,
-    next: Io.Duration,
+    /// The next wait before its jitter, in whole milliseconds.
+    next: Millis,
 
     pub fn start(io: Io, limit: Io.Duration) Backoff {
-        return .{ .deadline = Io.Timestamp.now(io, .awake).addDuration(limit), .next = first_wait.toIoDuration() };
+        return .{ .deadline = Io.Timestamp.now(io, .awake).addDuration(limit), .next = first_wait };
     }
 
     /// Sleeps before the next try and returns true, or returns false once
@@ -328,15 +331,15 @@ pub const Backoff = struct {
         if (now.compare(deadline) != .lt) return false;
         var bytes: [2]u8 = undefined;
         io.random(&bytes);
-        // Per mille of the next wait: 500 to 1499.
-        const jitter = 500 + @as(i96, std.mem.readInt(u16, &bytes, .little) % 1000);
-        const next: Span = .fromIoDuration(b.next, .exact);
-        const scaled = next.saturatingMul(jitter).divTrunc(1000) catch unreachable; // glint-ignore: Z026 -- a positive divisor
+        // Per mille of the next wait, 500 to 1499: so many microseconds for
+        // each of its milliseconds.
+        const jitter = 500 + @as(i64, std.mem.readInt(u16, &bytes, .little) % 1000);
+        const scaled: Span = aegis.units.Duration(.microsecond, i64).fromRaw(jitter).saturatingMul(b.next.raw()).convert(.nanosecond, i96, .exact);
         const left = now.saturatingDurationTo(deadline);
         const nap = if (scaled.compare(left) == .lt) scaled else left;
         try io.sleep(nap.toIoDuration(), .awake);
-        const doubled = next.saturatingMul(2);
-        b.next = (if (doubled.compare(longest_wait) == .lt) doubled else longest_wait).toIoDuration();
+        const doubled = b.next.saturatingMul(2);
+        b.next = if (doubled.compare(longest_wait) == .lt) doubled else longest_wait;
         return true;
     }
 };

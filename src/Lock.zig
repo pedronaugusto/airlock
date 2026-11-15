@@ -14,6 +14,7 @@ const Pending = @import("Pending.zig");
 const Staged = @import("Staged.zig");
 const sys = @import("sys.zig");
 const pid = @import("pid.zig");
+const diagnostics_mod = @import("diagnostics.zig");
 
 const Lock = @This();
 
@@ -48,6 +49,10 @@ pub const Options = struct {
     mode: Pending.Mode = .default,
     /// Open the lock for reading as well.
     read: bool = false,
+    /// Filled in with `left` when the lock cannot remove a name it made:
+    /// the lock file itself (which then still holds the lock) or its holder
+    /// file. Borrowed until the lock ends.
+    diagnostics: ?*diagnostics_mod.Diagnostics = null,
 };
 
 /// Taking a lock failed.
@@ -115,7 +120,7 @@ fn create(io: Io, dir: Io.Dir, path: []const u8, options: Options) Error!Pending
     var waited: Span = .fromRaw(0);
     var attempt: u32 = 0;
     while (true) {
-        if (Pending.create(io, dir, path, .{ .temp = .{ .suffix = ".lock" }, .mode = options.mode, .read = options.read })) |pending| {
+        if (Pending.create(io, dir, path, .{ .temp = .{ .suffix = ".lock" }, .mode = options.mode, .read = options.read, .diagnostics = options.diagnostics })) |pending| {
             return pending;
         } else |err| switch (err) {
             // Windows keeps the name of a deleted file while another process
@@ -161,6 +166,18 @@ fn holderName(base: []const u8) error{NameTooLong}!HolderName {
     return out;
 }
 
+/// A holder file's line, `pid <n>\n`, sized for the longest process id.
+const holder_prefix = "pid ";
+const HolderLine = [holder_prefix.len + std.fmt.count("{d}", .{std.math.maxInt(u32)}) + 1]u8;
+
+/// The holder file's line for `id`, written into `text`, as git writes it.
+fn holderLine(text: *HolderLine, id: u32) []const u8 {
+    @memcpy(text[0..holder_prefix.len], holder_prefix);
+    const digits = std.fmt.printInt(text[holder_prefix.len..], id, 10, .lower, .{});
+    text[holder_prefix.len + digits] = '\n';
+    return text[0 .. holder_prefix.len + digits + 1];
+}
+
 /// Writes the holder file, or removes one a crash left: while this lock is
 /// held, any holder file beside it is this lock's to keep or drop.
 fn mark(l: *Lock, io: Io, holder: Holder) (HolderError || error{NameTooLong})!void {
@@ -175,9 +192,8 @@ fn mark(l: *Lock, io: Io, holder: Holder) (HolderError || error{NameTooLong})!vo
         .pid_file => {
             const f = try staged.parent.dir().createFile(io, name, .{ .truncate = true });
             defer f.close(io);
-            var text: [32]u8 = undefined;
-            const line = std.mem.print(&text, "pid {d}\n", .{sys.processId()}) catch unreachable; // glint-ignore: Z026 -- "pid ", ten digits and a newline fit in 32 bytes
-            try f.writePositionalAll(io, line, 0);
+            var text: HolderLine = undefined;
+            try f.writePositionalAll(io, holderLine(&text, sys.processId()), 0);
         },
     }
 }
@@ -192,11 +208,11 @@ fn unmark(l: *Lock, io: Io) void {
     // descriptor may now be another's. A commit removed the holder file
     // before it; one left beside no lock is harmless, as above.
     const parent = staged.parent.get() orelse return;
-    // glint-ignore: Z026 -- a name with no room for its holder suffix had no holder file written beside it
-    const holder_name = holderName(staged.baseName()) catch return;
+    const holder_name = holderName(staged.baseName()) catch aegis.assert.never("Lock.unmark: a taken lock's holder name fit, take having refused one with no room for it");
     const name = holder_name.constItems();
-    // glint-ignore: Z026 -- a holder file left behind is read only beside a held lock, and the next lock writes or removes it
-    parent.deleteFile(io, name) catch {};
+    // One left behind is read only beside a held lock, and the next lock
+    // writes or removes it: told to the caller all the same.
+    parent.deleteFile(io, name) catch |err| staged.leave(err);
 }
 
 /// What a held lock says of its holder.
@@ -223,4 +239,10 @@ pub fn heldBy(io: Io, dir: Io.Dir, path: []const u8) (Io.Dir.AccessError || erro
     const text = dir.readFile(io, pid_name, &contents) catch return .{ .pid = null };
     const read = aegis.input.Untrusted([]const u8).init(text).parse({}, pid.parse) catch return .{ .pid = null };
     return .{ .pid = read.pid };
+}
+
+test "a holder line is git's, for the shortest and the longest process id" {
+    var text: HolderLine = undefined;
+    try std.testing.expectEqualStrings("pid 1\n", holderLine(&text, 1));
+    try std.testing.expectEqualStrings("pid 4294967295\n", holderLine(&text, std.math.maxInt(u32)));
 }

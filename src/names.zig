@@ -20,15 +20,14 @@ const Fallback = level_mod.Fallback;
 
 const is_windows = builtin.target.os.tag == .windows;
 
-/// The errors behind `error.PublishedNotDurable`: the name changed, and the
-/// sync that would make the change durable failed.
-pub const SyncAfterError = platform.DirSyncError || sys.StatIdError;
-
-/// Where a call puts what `error.PublishedNotDurable` hides.
-pub const Diagnostics = struct {
-    /// The error of the sync after the name changed.
-    cause: ?SyncAfterError = null,
-};
+const diagnostics_mod = @import("diagnostics.zig");
+/// The errors behind `error.PublishedNotDurable`.
+pub const SyncAfterError = diagnostics_mod.SyncAfterError;
+/// Where a call puts what its result hides.
+pub const Diagnostics = diagnostics_mod.Diagnostics;
+/// What a removal of a name airlock made can fail with.
+pub const LeftError = diagnostics_mod.LeftError;
+const noteLeft = diagnostics_mod.noteLeft;
 
 pub const RenameOptions = struct {
     sync: SyncOptions = .{},
@@ -235,7 +234,9 @@ pub const SymLinkOptions = struct {
     /// The temp link's prefix, as `Temp.random`: at most 32 bytes, no
     /// separator.
     temp_prefix: []const u8 = ".",
-    /// Filled in when the call returns `error.PublishedNotDurable`.
+    /// Filled in when the call returns `error.PublishedNotDurable`
+    /// (`cause`), or failed after making its temp link and could not remove
+    /// it (`left`).
     diagnostics: ?*Diagnostics = null,
     /// What the link points at, which Windows records in it: a directory
     /// link is entered, a file link opened. `detect` asks the target, from
@@ -345,14 +346,12 @@ fn linkAs(comptime fallback: Fallback, io: Io, dir: Io.Dir, target: []const u8, 
         // refuses the sync leaves no such order, so it is refused, or
         // reported, before the rename.
         reached = linkSync(fallback, io, options.sync.blocking, parent.dir()) catch |err| {
-            // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-            sys.unlink(io, parent.dir().handle, temp) catch {};
+            sys.unlink(io, parent.dir().handle, temp) catch |left| noteLeft(options.diagnostics, left);
             return err;
         };
     }
     renameUnsynced(io, parent.dir(), temp, parent.dir(), base, platform.default_busy_deadline) catch |err| {
-        // glint-ignore: Z026 -- cleanup after a failure the caller already gets
-        sys.unlink(io, parent.dir().handle, temp) catch {};
+        sys.unlink(io, parent.dir().handle, temp) catch |left| noteLeft(options.diagnostics, left);
         return err;
     };
     if (@backingInt(level) < @backingInt(Level.data)) return reached;

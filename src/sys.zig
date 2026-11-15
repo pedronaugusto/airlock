@@ -370,8 +370,8 @@ pub fn close(io: Io, handle: Handle, path: ?[]const u8) Io.File.SyncError!void {
     };
 }
 
-/// Close a handle whose close the hook answered: through the route, if
-/// there is one, otherwise on the system.
+/// Close a handle whose close the hook answered, or one `release` drops:
+/// through the route, if there is one, otherwise on the system.
 fn closeRouted(io: Io, handle: Handle) void {
     if (seam.hookOf(io)) |hook| if (hook.route) |route| return closeThrough(route.io, handle);
     if (is_windows) {
@@ -384,10 +384,13 @@ fn closeRouted(io: Io, handle: Handle) void {
 }
 
 /// `close` where its answer changes nothing: a handle being dropped after
-/// another failure, or one airlock only read through.
+/// another failure, or one airlock only read through. The hook is asked as
+/// `close` asks it, and the handle goes exactly once, as std's `close` lets
+/// a file go: through the route, if there is one, otherwise on the system,
+/// with no answer to map, since a close that reports is `close`.
 pub fn release(io: Io, handle: Handle) void {
-    // glint-ignore: Z026 -- a handle dropped after another failure; that failure is the one the caller gets
-    close(io, handle, null) catch {};
+    _ = decide(io, .close, null) catch .system;
+    closeRouted(io, handle);
 }
 
 fn openatRaw(dir: posix.fd_t, path: [*:0]const u8, flags: posix.O, mode: posix.mode_t) if (raw_descriptors) usize else c_int {
@@ -1311,6 +1314,24 @@ fn statxMountRaw(fd: posix.fd_t, buf: *linux.Statx) usize {
 const MountKey = union(enum) {
     id: u64,
     device: struct { major: u32, minor: u32 },
+
+    /// The most bytes `field` writes: a u64's digits, or two u32s' and a colon.
+    const max_field = @max(std.fmt.count("{d}", .{std.math.maxInt(u64)}), 2 * std.fmt.count("{d}", .{std.math.maxInt(u32)}) + 1);
+
+    /// The key as the mount table prints it, in decimal with no leading
+    /// zeros (`%i`, and `%u:%u` for a device): a line is the key's when its
+    /// field is these bytes, so no field is parsed.
+    fn field(key: MountKey, buffer: *[max_field]u8) []const u8 {
+        switch (key) {
+            .id => |id| return buffer[0..std.fmt.printInt(buffer, id, 10, .lower, .{})],
+            .device => |d| {
+                const major = std.fmt.printInt(buffer, d.major, 10, .lower, .{});
+                buffer[major] = ':';
+                const minor = std.fmt.printInt(buffer[major + 1 ..], d.minor, 10, .lower, .{});
+                return buffer[0 .. major + 1 + minor];
+            },
+        }
+    }
 };
 
 /// The type `/proc/self/mountinfo` gives the mount `key` finds, or nothing
@@ -1322,6 +1343,8 @@ fn linuxMountType(io: Io, key: MountKey, out: *VolumeInfo) Io.Cancelable!void {
         else => return,
     };
     defer file.close(io);
+    var key_buffer: [MountKey.max_field]u8 = undefined;
+    const sought = key.field(&key_buffer);
     var buffer: [4096]u8 = undefined;
     var reader = file.readerStreaming(io, &buffer);
     while (true) {
@@ -1339,18 +1362,11 @@ fn linuxMountType(io: Io, key: MountKey, out: *VolumeInfo) Io.Cancelable!void {
         const first = fields.next() orelse continue;
         _ = fields.next() orelse continue;
         const device = fields.next() orelse continue;
-        switch (key) {
-            // glint-ignore: Z026 -- a line whose id field is no number names no mount of this id
-            .id => |id| if ((std.fmt.parseInt(u64, first, 10) catch continue) != id) continue,
-            .device => |d| {
-                const colon = std.mem.findScalar(u8, device, ':') orelse continue;
-                // glint-ignore: Z026 -- a line whose device field is no number names no mount of this device
-                const major = std.fmt.parseInt(u32, device[0..colon], 10) catch continue;
-                // glint-ignore: Z026 -- a line whose device field is no number names no mount of this device
-                const minor = std.fmt.parseInt(u32, device[colon + 1 ..], 10) catch continue;
-                if (major != d.major or minor != d.minor) continue;
-            },
-        }
+        const written = switch (key) {
+            .id => first,
+            .device => device,
+        };
+        if (!std.mem.eql(u8, written, sought)) continue;
         while (fields.next()) |field| if (std.mem.eql(u8, field, "-")) {
             out.setName(fields.next() orelse return);
             return;
@@ -2453,4 +2469,12 @@ fn cloneOutcome(e: posix.E) CloneError!Cloned {
         if (@hasField(posix.E, name) and e == @field(posix.E, name)) return .refused;
     }
     return openFileFailure(e);
+}
+
+test "a mount key is the field the mount table prints for it" {
+    var buffer: [MountKey.max_field]u8 = undefined;
+    try std.testing.expectEqualStrings("29", (MountKey{ .id = 29 }).field(&buffer));
+    try std.testing.expectEqualStrings("18446744073709551615", (MountKey{ .id = std.math.maxInt(u64) }).field(&buffer));
+    try std.testing.expectEqualStrings("8:1", (MountKey{ .device = .{ .major = 8, .minor = 1 } }).field(&buffer));
+    try std.testing.expectEqualStrings("4294967295:4294967295", (MountKey{ .device = .{ .major = std.math.maxInt(u32), .minor = std.math.maxInt(u32) } }).field(&buffer));
 }
