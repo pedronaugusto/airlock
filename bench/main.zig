@@ -221,7 +221,7 @@ pub fn main(init: std.process.Init) !void {
 
     const cwd = Io.Dir.cwd();
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout = Io.File.stdout().writer(io, &stdout_buffer);
+    var stdout = Io.File.stdout().writerStreaming(io, &stdout_buffer);
 
     // --dir is a disk selection, never a tree to delete. Own only a fresh child.
     var parent = try cwd.createDirPathOpen(io, target, .{});

@@ -87,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
     const other_root: ?Io.Dir = if (other_parent) |dir| try dir.openDir(io, name, .{}) else null;
     defer if (other_root) |dir| dir.close(io);
     var output_buffer: [4096]u8 = undefined;
-    var output = Io.File.stdout().writer(io, &output_buffer);
+    var output = Io.File.stdout().writerStreaming(io, &output_buffer);
     const strategies = std.meta.tags(Strategy);
     for (0..config.rounds) |round| {
         for (0..strategies.len) |offset| {
