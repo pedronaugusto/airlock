@@ -229,8 +229,7 @@ pub fn main(init: std.process.Init) !void {
     var scratch_buffer: [64]u8 = undefined;
     const scratch = try std.mem.print(&scratch_buffer, "airlock-bench-{x}", .{&random});
     try parent.createDir(io, scratch, .default_dir);
-    // glint-ignore: Z026 -- scratch removal after the row; a leftover is in the run directory
-    defer parent.deleteTree(io, scratch) catch {};
+    defer parent.deleteTree(io, scratch) catch |err| std.debug.print("airlock-bench: the scratch directory {s} under {s} is left: {t}\n", .{ scratch, target, err });
     var root = try parent.openDir(io, scratch, .{});
     defer root.close(io);
 
@@ -257,8 +256,8 @@ pub fn main(init: std.process.Init) !void {
         const row = full;
         try root.createDir(io, "row", .default_dir);
         ctx.dir = try root.openDir(io, "row", .{ .iterate = true });
-        // glint-ignore: Z026 -- scratch removal after the row; a leftover is in the run directory
-        defer root.deleteTree(io, "row") catch {};
+        // A row left behind fails the next row's create.
+        defer root.deleteTree(io, "row") catch |err| std.debug.print("airlock-bench: the row directory under {s}/{s} is left: {t}\n", .{ target, scratch, err });
         defer ctx.dir.close(io);
         ctx.file = try ctx.dir.createFile(io, "probe", .{ .read = true });
         defer ctx.file.close(io);

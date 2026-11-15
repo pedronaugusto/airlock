@@ -35,8 +35,9 @@ pub fn batch(io: Io, dir: Io.Dir, files: []const Io.File) !void {
     const file = try dir.createFile(io, name, .{ .exclusive = true });
     defer {
         file.close(io);
-        // glint-ignore: Z026 -- the entry is scratch the row removes; a leftover is in the run directory
-        dir.deleteFile(io, name) catch {};
+        // A barrier left behind fails the next batch's exclusive create:
+        // said where the run's diagnostics go.
+        dir.deleteFile(io, name) catch |err| std.debug.print("relic: the barrier file {s} is left: {t}\n", .{ name, err });
     }
     try file.sync(io);
 }
@@ -48,8 +49,7 @@ pub fn atomicWrite(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8)
     var name_buf: [64]u8 = undefined;
     const temp = try std.mem.print(&name_buf, "tmp_{x}", .{&raw});
     const file = try dir.createFile(io, temp, .{ .exclusive = true });
-    // glint-ignore: Z026 -- the entry is scratch the row removes; a leftover is in the run directory
-    errdefer dir.deleteFile(io, temp) catch {};
+    errdefer dir.deleteFile(io, temp) catch |err| std.debug.print("relic: the temp {s} is left: {t}\n", .{ temp, err });
     {
         // Closed once, before the rename, whether the writes failed or not.
         defer file.close(io);
