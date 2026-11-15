@@ -82,15 +82,17 @@ test "blocking hook cancellation preserves prepublish and postpublish states" {
 }
 
 test "blocking hook leaves shakedown refusal retries and final sync failures intact" {
-    const first: seam.Call = if (builtin.os.tag.isDarwin()) .sync_full else .sync_data;
+    // The BSDs' chain is one call, their plain fsync, so a refusal of it has
+    // no fallback to count: there the plan only interrupts it once.
+    const bsd = !builtin.os.tag.isDarwin() and builtin.os.tag != .linux and builtin.os.tag != .windows;
+    const first: seam.Call = if (builtin.os.tag.isDarwin()) .sync_full else if (bsd) .sync_plain else .sync_data;
     const refused: seam.Code = if (builtin.os.tag == .windows) .INVALID_PARAMETER else .INVAL;
     const interrupted: seam.Code = if (builtin.os.tag == .windows) .CANCELLED else .INTR;
     const failed: seam.Code = if (builtin.os.tag == .windows) .IO_DEVICE_ERROR else .IO;
     var s: harness.Scratch = .init();
     defer s.cleanup();
-    const h = try seam.Seam.create(testing.allocator, testing.io, .{
-        .plan = &.{ seam.fail(first, 1, interrupted), seam.fail(first, 2, refused) },
-    });
+    const plan: []const seam.Plan.Entry = if (bsd) &.{seam.fail(first, 1, interrupted)} else &.{ seam.fail(first, 1, interrupted), seam.fail(first, 2, refused) };
+    const h = try seam.Seam.create(testing.allocator, testing.io, .{ .plan = plan });
     defer h.destroy();
     const file = try s.dir().createFile(h.io(), "file", .{});
     defer file.close(h.io());
@@ -98,7 +100,7 @@ test "blocking hook leaves shakedown refusal retries and final sync failures int
     const reached = try airlock.syncFile(h.io(), file, .{ .blocking = e.hook() });
     try testing.expectEqual(if (builtin.os.tag.isDarwin()) airlock.Reached.written else airlock.Reached.full, reached);
     try testing.expectEqual(1, e.calls.load(.monotonic).raw());
-    try testing.expectEqual(3, h.syncs());
+    try testing.expectEqual(if (bsd) 2 else 3, h.syncs());
     h.setPlan(&.{seam.always(first, failed)});
     try testing.expectError(error.InputOutput, airlock.syncFile(h.io(), file, .{ .blocking = e.hook() }));
     try testing.expectEqual(1, e.calls.load(.monotonic).raw());

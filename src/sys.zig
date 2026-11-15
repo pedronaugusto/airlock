@@ -1221,6 +1221,51 @@ fn darwinFstatfs(fd: posix.fd_t, buf: *DarwinStatfs) c_int {
 /// Darwin's `MNT_LOCAL`: the volume is stored on this machine.
 const darwin_mnt_local = 0x1000;
 
+/// FreeBSD's `struct statfs` (FreeBSD 12 on, 64-bit inodes), the one its
+/// libc's `fstatfs` fills.
+const FreebsdStatfs = extern struct {
+    version: u32,
+    type: u32,
+    flags: u64,
+    bsize: u64,
+    iosize: u64,
+    blocks: u64,
+    bfree: u64,
+    bavail: i64,
+    files: u64,
+    ffree: i64,
+    syncwrites: u64,
+    asyncwrites: u64,
+    syncreads: u64,
+    asyncreads: u64,
+    nvnodelistsize: u32,
+    spare0: u32,
+    spare: [9]u64,
+    namemax: u32,
+    owner: u32,
+    fsid: [2]i32,
+    charspare: [80]u8,
+    fstypename: [16]u8,
+    mntfromname: [1024]u8,
+    mntonname: [1024]u8,
+};
+
+comptime {
+    if (native_os == .freebsd) aegis.assert.invariant(@sizeOf(FreebsdStatfs) == 2344, "@sizeOf(FreebsdStatfs) == 2344");
+}
+
+const freebsd_statfs = struct {
+    // libc's fstatfs, declared as the system documents it, called only from this file
+    extern "c" fn fstatfs(fd: posix.fd_t, buf: *FreebsdStatfs) c_int;
+};
+
+fn freebsdFstatfs(fd: posix.fd_t, buf: *FreebsdStatfs) c_int {
+    return freebsd_statfs.fstatfs(fd, buf);
+}
+
+/// FreeBSD's `MNT_LOCAL`: the volume is stored on this machine.
+const freebsd_mnt_local = 0x1000;
+
 /// Linux's `struct statfs` as far as its type: a word on 64-bit targets
 /// but s390x's, where it is 32 bits, as it is in `statfs64` on 32-bit
 /// ones. The rest of the buffer is room for what the kernel writes.
@@ -1342,6 +1387,17 @@ pub fn volumeOf(io: Io, dir: Handle) VolumeError!VolumeInfo {
             .{ .id = mount.mnt_id }
         else
             .{ .device = .{ .major = mount.dev_major, .minor = mount.dev_minor } }, &info);
+        return info;
+    }
+    if (native_os == .freebsd) {
+        var buf: FreebsdStatfs = std.mem.zeroes(FreebsdStatfs);
+        const e = switch (try retrying(io, .statfs, null, freebsdFstatfs, .{ dir, &buf })) {
+            .code => |c| c,
+            .route => return .{ .remote = false },
+        };
+        if (e != .SUCCESS) return statFailure(e);
+        var info: VolumeInfo = .{ .remote = buf.flags & freebsd_mnt_local == 0 };
+        info.setName(std.mem.sliceTo(&buf.fstypename, 0));
         return info;
     }
     if (!is_darwin) return error.Unexpected;
