@@ -334,8 +334,8 @@ pub fn close(io: Io, handle: Handle, path: ?[]const u8) Io.File.SyncError!void {
     };
 }
 
-/// Close a handle whose close the hook answered: through the route, if
-/// there is one, otherwise on the system.
+/// Close a handle whose close the hook answered, or one `release` drops:
+/// through the route, if there is one, otherwise on the system.
 fn closeRouted(io: Io, handle: Handle) void {
     if (seam.hookOf(io)) |hook| if (hook.route) |route| return closeThrough(route.io, handle);
     if (is_windows) {
@@ -348,10 +348,13 @@ fn closeRouted(io: Io, handle: Handle) void {
 }
 
 /// `close` where its answer changes nothing: a handle being dropped after
-/// another failure, or one airlock only read through.
+/// another failure, or one airlock only read through. The hook is asked as
+/// `close` asks it, and the handle goes exactly once, as std's `close` lets
+/// a file go: through the route, if there is one, otherwise on the system,
+/// with no answer to map, since a close that reports is `close`.
 pub fn release(io: Io, handle: Handle) void {
-    // glint-ignore: Z026 -- a handle dropped after another failure; that failure is the one the caller gets
-    close(io, handle, null) catch {};
+    _ = decide(io, .close, null) catch .system;
+    closeRouted(io, handle);
 }
 
 fn openatRaw(dir: posix.fd_t, path: [*:0]const u8, flags: posix.O, mode: posix.mode_t) if (raw_descriptors) usize else c_int {
