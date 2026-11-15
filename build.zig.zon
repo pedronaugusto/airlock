@@ -27,8 +27,8 @@
         },
 
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=ci-standard#f991816b108a21e4508924e3c220fcc36615aa77",
-            .hash = "preflight-0.18.6-LX1Zwnv-GwCkV_vbReMV3ld3WZ9xyw7vAG1gSja5eupx",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=ci-standard#158c1763b4142ac13715fb2b89d11fd46a1b4bed",
+            .hash = "preflight-0.18.6-LX1ZwskrHABgr9REQqYovipaEjRJIeV0GZNu-1rrr3dR",
         },
     },
 }
