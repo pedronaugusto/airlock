@@ -102,6 +102,17 @@ pub const MakePathError = names.MakePathError;
 pub const Made = names.Made;
 /// Creates the missing directories of a path and syncs each new entry.
 pub const makePath = names.makePath;
+/// A path from untrusted input resolved beneath a root directory: no `..`,
+/// no absolute path, no link entered on the way.
+pub const resolve = names.resolve;
+pub const Resolved = names.Resolved;
+pub const ResolveOptions = names.ResolveOptions;
+pub const ResolveError = names.ResolveError;
+pub const Refusal = names.Refusal;
+/// Why a path escapes its root (`Refusal.why`).
+pub const Escape = @import("paths.zig").Escape;
+/// Whether a path escapes by its text alone, with no file system asked.
+pub const escapes = @import("paths.zig").escapes;
 /// What `hardLink` can fail with.
 pub const HardLinkError = names.HardLinkError;
 /// A second name for a file, never replacing one: `linkat`, or Windows's

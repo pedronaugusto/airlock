@@ -708,6 +708,68 @@ pub fn unlink(io: Io, dir: Handle, name: []const u8) UnlinkError!void {
     };
 }
 
+pub const OpenDirNoFollowError = OpenDirError || error{
+    /// The name is a symbolic link, or on Windows a junction: refused,
+    /// never entered.
+    IsLink,
+};
+
+/// `openDir` of one name in `dir`, but a link there is refused, never
+/// entered: `O_NOFOLLOW` on POSIX (`ELOOP`, or `EMLINK` on FreeBSD), and on
+/// Windows the reparse point itself opened and its tag read. Any other
+/// reparse point (a cloud placeholder) is the directory it is.
+pub fn openDirNoFollow(io: Io, dir: Handle, name: []const u8) OpenDirNoFollowError!Handle {
+    if (is_windows) return openDirNoFollowWindows(io, dir, name);
+    return openDirNoFollowPosix(io, dir, name) catch |err| switch (err) {
+        // `ENOTDIR` for a link too where the directory is checked first
+        // (macOS): the name itself, not followed, says which. Asked after,
+        // it changes only which refusal is reported.
+        error.NotDir => if (statPath(io, dir, name, false)) |full|
+            (if (full.kind == .sym_link) error.IsLink else error.NotDir)
+        else |_|
+            // Not asked: it is not a directory either way.
+            error.NotDir,
+        else => |e| e,
+    };
+}
+
+fn openDirNoFollowPosix(io: Io, dir: Handle, name: []const u8) OpenDirNoFollowError!Handle {
+    const path = try posix.toPosixPath(name);
+    var flags: posix.O = .{ .ACCMODE = .RDONLY, .CLOEXEC = true };
+    flags.DIRECTORY = true;
+    flags.NOFOLLOW = true;
+    while (true) {
+        try io.checkCancel();
+        switch (try decide(io, .open_dir, name)) {
+            .system => {},
+            .code => |code| {
+                if (code == .INTR) continue;
+                return noFollowFailure(code);
+            },
+            .route => |route| return (dirOf(dir).openDir(route.io, name, .{ .follow_symlinks = false }) catch |err| return switch (err) {
+                error.SymLinkLoop => error.IsLink,
+                else => |e| e,
+            }).handle,
+        }
+        const rc = openatRaw(dir, &path, flags, 0);
+        const e = errnoOf(rc);
+        switch (e) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            else => return noFollowFailure(e),
+        }
+    }
+}
+
+fn noFollowFailure(e: posix.E) OpenDirNoFollowError {
+    return switch (e) {
+        .LOOP => error.IsLink,
+        // FreeBSD's word for `O_NOFOLLOW` meeting a link.
+        .MLINK => if (builtin.target.os.tag == .freebsd) error.IsLink else openDirFailure(e),
+        else => openDirFailure(e),
+    };
+}
+
 pub const MakeDirError = Io.Dir.CreateDirError || error{InputOutput};
 
 fn mkdiratRaw(dir: posix.fd_t, path: [*:0]const u8, mode: posix.mode_t) if (is_linux) usize else c_int {
@@ -1603,8 +1665,12 @@ pub fn openDirWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, flush_
         .code => |c| c,
         .route => |route| return (try dirOf(root).openDir(route.io, if (sub_path.len == 0) "." else sub_path, .{})).handle,
     };
+    if (status != .SUCCESS) return openDirFailureNt(status);
+    return handle;
+}
+
+fn openDirFailureNt(status: windows.NTSTATUS) OpenDirError {
     return switch (status) {
-        .SUCCESS => handle,
         .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => error.FileNotFound,
         .NOT_A_DIRECTORY => error.NotDir,
         .ACCESS_DENIED, .SHARING_VIOLATION => error.AccessDenied,
@@ -1617,6 +1683,41 @@ pub fn openDirWindows(io: Io, root: windows.HANDLE, sub_path: []const u8, flush_
         .DELETE_PENDING => error.AccessDenied,
         else => if (isDeviceFailureNt(status)) error.InputOutput else windows.unexpectedStatus(status),
     };
+}
+
+/// `openDirWindows` of one name, the reparse point itself opened: a
+/// symbolic link's or a junction's tag is `IsLink`, the handle closed.
+fn openDirNoFollowWindows(io: Io, root: windows.HANDLE, name: []const u8) OpenDirNoFollowError!windows.HANDLE {
+    const access: windows.ACCESS_MASK = .{
+        .STANDARD = .{ .SYNCHRONIZE = true },
+        .SPECIFIC = .{ .FILE_DIRECTORY = .{ .LIST = true, .ADD_FILE = true, .TRAVERSE = true, .READ_ATTRIBUTES = true } },
+    };
+    var handle: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
+    const status = switch (try retryingNt(io, .open_dir, name, ntCreate, .{
+        &handle,                                  access,
+        root,                                     name,
+        windows.FILE.ATTRIBUTE{ .NORMAL = true }, windows.FILE.SHARE.VALID_FLAGS,
+        windows.FILE.CREATE_DISPOSITION.OPEN,     windows.FILE.MODE{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT, .OPEN_REPARSE_POINT = true },
+    })) {
+        .code => |c| c,
+        .route => |route| return (dirOf(root).openDir(route.io, name, .{ .follow_symlinks = false }) catch |err| return switch (err) {
+            error.SymLinkLoop => error.IsLink,
+            else => |e| e,
+        }).handle,
+    };
+    if (status != .SUCCESS) return openDirFailureNt(status);
+    errdefer release(io, handle);
+    var tag: windows.FILE.ATTRIBUTE_TAG_INFO = std.mem.zeroes(windows.FILE.ATTRIBUTE_TAG_INFO);
+    switch (ntQueryInfo(handle, std.mem.asBytes(&tag), .AttributeTag)) {
+        .SUCCESS => {},
+        else => |s| return if (isDeviceFailureNt(s)) error.InputOutput else windows.unexpectedStatus(s),
+    }
+    const reparse_point: windows.DWORD = 0x400; // FILE_ATTRIBUTE_REPARSE_POINT
+    const raw: u32 = @bitCast(tag.ReparseTag);
+    const is_link = tag.FileAttributes & reparse_point != 0 and
+        (raw == @as(u32, @bitCast(windows.IO_REPARSE_TAG.SYMLINK)) or raw == @as(u32, @bitCast(windows.IO_REPARSE_TAG.MOUNT_POINT)));
+    if (is_link) return error.IsLink;
+    return handle;
 }
 
 fn symLinkWindows(io: Io, target: []const u8, root: windows.HANDLE, name: []const u8, kind: LinkKind) SymLinkError!void {

@@ -396,3 +396,72 @@ test "a filesystem without hard links refuses one by name" {
     var buffer: [4]u8 = undefined;
     try testing.expectEqual(@as(?[]const u8, null), s.read("b", &buffer));
 }
+
+test "a path from untrusted input resolves beneath its root, its missing directories made and synced on request" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const h = try Seam.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    const io = h.io();
+    // Missing, and not asked to make them.
+    try testing.expectError(error.FileNotFound, airlock.resolve(io, s.dir(), .init("a/b/c.txt"), .{}));
+    var r = try airlock.resolve(io, s.dir(), .init("a//./b/c.txt"), .{ .create = .{} });
+    try testing.expectEqualStrings("c.txt", r.name);
+    // Each directory made is synced into its parent before anything goes under it.
+    try testing.expectEqual(@as(u32, 2), h.count(.sync_dir));
+    var file = try r.dir().createFile(testing.io, r.name, .{});
+    file.close(testing.io);
+    r.close(io);
+    var buffer: [4]u8 = undefined;
+    try testing.expectEqualStrings("", s.read("a/b/c.txt", &buffer).?);
+    // One component: the root itself, which closing leaves open.
+    var top = try airlock.resolve(io, s.dir(), .init("top"), .{});
+    try testing.expectEqual(s.dir().handle, top.dir().handle);
+    top.close(io);
+    _ = try s.dir().statFile(testing.io, "a", .{});
+    // A file where a directory is named.
+    try testing.expectError(error.NotDir, airlock.resolve(io, s.dir(), .init("a/b/c.txt/d"), .{ .create = .{} }));
+}
+
+test "a path that leaves its root is refused, by its text or by a link in it, and says where" {
+    if (!is_tested_os) return error.SkipZigTest;
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    const io = testing.io;
+    var refusal: airlock.Refusal = undefined;
+    const Case = struct { path: []const u8, why: airlock.Escape, component: []const u8 };
+    const cases = [_]Case{
+        .{ .path = "../outside", .why = .parent, .component = ".." },
+        .{ .path = "a/../../outside", .why = .parent, .component = ".." },
+        .{ .path = "/etc/passwd", .why = .absolute, .component = "/" },
+        .{ .path = "./", .why = .empty, .component = "./" },
+        .{ .path = "a/b\x00/c", .why = .nul, .component = "b\x00" },
+    };
+    for (cases) |c| {
+        try testing.expectError(error.Escapes, airlock.resolve(io, s.dir(), .init(c.path), .{ .create = .{}, .refusal = &refusal }));
+        try testing.expectEqual(c.why, refusal.why);
+        try testing.expectEqualStrings(c.component, refusal.component);
+    }
+    // Nothing was made for any of them.
+    try testing.expectEqual(0, (try s.entries("")).count);
+    // A link in the tree is never entered, wherever it points: outside the
+    // root, or to a directory inside it.
+    try s.dir().createDirPath(io, "inside/deeper");
+    s.dir().symLink(io, "..", "up", .{ .is_directory = true }) catch |err| switch (err) {
+        // Windows without the right to make links.
+        error.PermissionDenied, error.AccessDenied => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    try s.dir().symLink(io, "inside", "across", .{ .is_directory = true });
+    try s.dir().symLink(io, "../up", "inside/back", .{ .is_directory = true });
+    for ([_][]const u8{ "up/escaped", "across/deeper/x", "inside/back/x" }) |path| {
+        try testing.expectError(error.Escapes, airlock.resolve(io, s.dir(), .init(path), .{ .create = .{}, .refusal = &refusal }));
+        try testing.expectEqual(airlock.Escape.link, refusal.why);
+    }
+    try testing.expectEqualStrings("back", refusal.component);
+    // A link as the last component is the caller's name to act on.
+    var leaf = try airlock.resolve(io, s.dir(), .init("inside/back"), .{});
+    defer leaf.close(io);
+    try testing.expectEqualStrings("back", leaf.name);
+}

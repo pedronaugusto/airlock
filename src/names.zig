@@ -226,6 +226,119 @@ fn makeMissing(io: Io, dir: Io.Dir, sub_path: []const u8, options: MakePathOptio
 }
 
 // ---------------------------------------------------------------------
+// A path beneath a root
+// ---------------------------------------------------------------------
+
+/// Why and where a path was refused: the component, a slice of the path.
+pub const Refusal = struct { why: paths.Escape, component: []const u8 };
+
+pub const ResolveOptions = struct {
+    /// Create the directories the path names that are missing, each synced
+    /// into its parent as `makePath` syncs (an extractor's); null: a missing
+    /// one is `error.FileNotFound`.
+    create: ?SyncOptions = null,
+    /// Filled in when the call returns `error.Escapes`.
+    refusal: ?*Refusal = null,
+    /// Filled in when the call returns `error.PublishedNotDurable`.
+    diagnostics: ?*Diagnostics = null,
+};
+
+pub const ResolveError = sys.OpenDirError || sys.MakeDirError || platform.DirSyncError || error{
+    /// The path leaves the root: by its text (absolute, `..`, and on
+    /// Windows a drive, a stream, a device or a stripped end) or through a
+    /// symbolic link (on Windows a junction too) in a directory component.
+    /// `ResolveOptions.refusal` says which and where.
+    Escapes,
+    /// A directory was created; the sync of the directory that received it
+    /// failed or was canceled.
+    PublishedNotDurable,
+};
+
+/// A path resolved beneath a root: the directory its last component is
+/// named in, held, and that name.
+pub const Resolved = struct {
+    /// Private: the directory, the root itself lent or one opened.
+    parent: Parent,
+    /// The last component: what the caller creates, opens, renames or
+    /// removes in `dir()`. It may itself be a link: airlock's own calls on
+    /// it replace the name in one step and never write through it; a caller
+    /// opening it says not to follow one.
+    name: []const u8,
+
+    /// The directory `name` is in.
+    pub fn dir(r: *Resolved) Io.Dir {
+        return r.parent.dir();
+    }
+
+    /// Closes the directory, when it is not the root.
+    pub fn close(r: *Resolved, io: Io) void {
+        r.parent.close(io);
+    }
+};
+
+/// Resolves `path`, from untrusted input (an archive's member, a patch's
+/// file), beneath `root`: refused (`error.Escapes`) unless every component
+/// stays below it, by its text (`paths.escapes`) and on disk, each directory
+/// opened from the one before without following a link, so a link planted
+/// in the tree (an archive's earlier member) is never entered, and nothing
+/// can be swapped in between the check and the use. With
+/// `options.create`, the missing directories are created on the way.
+pub fn resolve(io: Io, root: Io.Dir, path: aegis.input.Untrusted([]const u8), options: ResolveOptions) ResolveError!Resolved {
+    const text = path.readForParse();
+    if (paths.escapes(text)) |e| return refuse(options.refusal, e.why, text[e.start..e.end]);
+    const end = paths.trimmedEnd(text);
+    var count: usize = 0;
+    var name: []const u8 = "";
+    var each: paths.Components = .{ .path = text, .at = 0, .end = end };
+    while (each.next()) |c| {
+        name = c;
+        count += 1;
+    }
+    assert.invariant(count != 0, "a path that does not escape names something");
+    var parent: Parent = .{ .lent = .of(root) };
+    errdefer parent.close(io);
+    var components: paths.Components = .{ .path = text, .at = 0, .end = end };
+    var created: u32 = 0;
+    for (0..count - 1) |_| {
+        const component = components.next() orelse unreachable; // count is how many there are
+        const child = sys.openDirNoFollow(io, parent.dir().handle, component) catch |err| switch (err) {
+            error.IsLink => return refuse(options.refusal, .link, component),
+            error.FileNotFound => missing: {
+                const sync = options.create orelse return error.FileNotFound;
+                if (sys.makeDir(io, parent.dir().handle, component)) {
+                    created += 1;
+                } else |e| switch (e) {
+                    error.PathAlreadyExists => {},
+                    else => |x| return x,
+                }
+                if (@backingInt(sync.level) >= @backingInt(Level.data)) {
+                    // Whoever created it, its entry is synced before
+                    // anything goes under it, as `makePath` does.
+                    _ = syncOne(io, sync.blocking, parent.dir(), platform.default_busy_deadline) catch |e| {
+                        if (created == 0) return e;
+                        return notDurable(options.diagnostics, e);
+                    };
+                }
+                break :missing sys.openDirNoFollow(io, parent.dir().handle, component) catch |e| switch (e) {
+                    error.IsLink => return refuse(options.refusal, .link, component),
+                    else => |x| return x,
+                };
+            },
+            error.SymLinkLoop => return refuse(options.refusal, .link, component),
+            else => |e| return e,
+        };
+        parent.close(io);
+        parent = .{ .owned = .init(.{ .handle = child }) };
+    }
+    return .{ .parent = parent.move(), .name = name };
+}
+
+fn refuse(refusal: ?*Refusal, why: paths.Escape, component: []const u8) error{Escapes} {
+    if (refusal) |r| r.* = .{ .why = why, .component = component };
+    return error.Escapes;
+}
+
+// ---------------------------------------------------------------------
 // Symbolic links
 // ---------------------------------------------------------------------
 

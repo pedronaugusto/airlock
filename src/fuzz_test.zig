@@ -15,6 +15,7 @@
 //! test --fuzz` searches.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const shakedown = @import("shakedown");
 const gen = shakedown.gen;
@@ -263,4 +264,44 @@ fn fuzzCopy(dir: std.Io.Dir, c: *Case) !void {
     const got = try dir.readFileAlloc(io, "dst", gpa, .unlimited);
     defer gpa.free(got);
     try testing.expectEqualSlices(u8, expected, got);
+}
+
+test "a path escapes exactly when a component says so, and the one it names is inside it" {
+    try shakedown.check(testing.allocator, {}, fuzzEscapes, .{});
+}
+
+fn fuzzEscapes(_: void, c: *Case) !void {
+    var buffer: [48]u8 = undefined;
+    const path = pathInto(c.source, &buffer);
+    // The model: the components, each judged alone.
+    var named = false;
+    var bad = false;
+    var at: usize = 0;
+    while (at < path.len) {
+        while (at < path.len and paths.isSeparator(path[at])) at += 1;
+        var j = at;
+        while (j < path.len and !paths.isSeparator(path[j])) j += 1;
+        const name = path[at..j];
+        at = j;
+        if (name.len == 0 or std.mem.eql(u8, name, ".")) continue;
+        named = true;
+        if (std.mem.eql(u8, name, "..") or std.mem.findScalar(u8, name, 0) != null) bad = true;
+    }
+    const rooted = path.len != 0 and paths.isSeparator(path[0]);
+    const found = paths.escapes(path) orelse {
+        try testing.expect(named and !bad and !rooted);
+        return;
+    };
+    try testing.expect(found.start <= found.end and found.end <= path.len);
+    const component = path[found.start..found.end];
+    switch (found.why) {
+        .absolute => try testing.expect(rooted and found.start == 0),
+        .parent => try testing.expectEqualStrings("..", component),
+        .nul => try testing.expect(std.mem.findScalar(u8, component, 0) != null),
+        .empty => try testing.expect(!named),
+        .colon, .device, .trailing => try testing.expect(builtin.target.os.tag == .windows),
+        .link => return error.TestUnexpectedResult,
+    }
+    // Off Windows, only what the model sees escapes.
+    if (builtin.target.os.tag != .windows) try testing.expect(bad or rooted or !named);
 }

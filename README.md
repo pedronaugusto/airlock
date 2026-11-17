@@ -146,6 +146,16 @@ removes the random temps a crash or a kill left, by prefix and age, and nothing
 else: only names a random temp can have, last modified long enough ago that no
 other process is still writing them.
 
+`resolve` takes a path from untrusted input, an archive's member or a patch's
+file, and resolves it beneath a root directory: no absolute path, no `..`, and
+on Windows no drive, stream or device name; then each directory is opened from
+the one before without following a link, so a link planted in the tree (an
+earlier member of the same archive) is never entered, wherever it points, and
+nothing can be swapped in between the check and the use. It hands back the
+directory the last component is named in and that name, for the caller to
+create, open or rename there; with `create`, the missing directories are made
+and synced on the way, as `makePath` makes them.
+
 `copyFile` copies a file durably: into a temp next to the destination, as a
 copy-on-write clone where the filesystem makes one (Linux `FICLONE`, Darwin
 `fclonefileat`), else through std's file writer, which copies in the kernel
