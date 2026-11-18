@@ -171,3 +171,47 @@ cannot establish an idle-hardware durability or throughput target. The Windows
 symlink rows run where the runner may create symbolic links. The macOS strategy program emits no rows on
 Windows because its strategies require Darwin primitives. Raw primitive
 refusals remain refusal records, without fabricated latencies.
+
+## Decisions the calls do not show
+
+- **One lock-file protocol, git's**: an exclusive `<path>.lock` made by `Temp.exact`, git's backoff, an optional
+  holder file (`<path>~pid.lock`, `core.lockfilePid`), committed as the new file or released. A held lock is
+  `error.LockHeld`; a stale one is reported, never broken, because breaking a lock on a guess (a reused pid,
+  another host) loses data. Advisory locks stay std's (`File.Lock`).
+- **Refusal is a call of its own.** Only the `...OrRefuse` calls hold `LevelUnavailable` in their error sets, and
+  on Darwin and Windows they fail before anything is published (on Linux a directory sync's refusal is seen only
+  after the rename). Every other call degrades and says so in `Reached`: a call that cannot refuse has no error to
+  ignore.
+- **Fall back only on refusal codes.** EINTR is retried for syncs, opens and renames, with a cancel check, and
+  never for `close`, which Linux completes even when it reports EINTR, so a retry could close another thread's
+  file. Everything else is final: an EIO is never answered with a weaker call (fsyncgate).
+- **Directories are synced on every OS.** Windows flushes one by reopening it with `FILE_ADD_FILE|SYNCHRONIZE`.
+  Linux accepts an `O_PATH` directory: on EBADF airlock reads `F_GETFL`, and only for `O_PATH` (or `AT_FDCWD`)
+  reopens `"."` relative to it; any other EBADF is returned, so a reused descriptor number is never synced.
+- **A Windows rename goes through the temp file's own handle** (`FileRenameInfoEx` with `REPLACE_IF_EXISTS`,
+  POSIX semantics, read-only ignored), retried under contention with jittered backoff until a deadline (2 s by
+  default). NTFS reports "the target is open" as `ACCESS_DENIED`, so a real denial costs the deadline too.
+  Renaming by path, as std does, gives a scanner a window.
+- **Every sync, rename, unlink, close and identity call goes through `src/sys.zig`.** std cannot carry the
+  refusal codes: its POSIX sync treats `EINVAL`, `EBADF` and `EROFS` as bugs, and its Windows sync turns every
+  unlisted status into `Unexpected`. std's `File.sync` and `createFileAtomic` are never used for durability, and
+  preflight's durability rules hold every family package to that: one door.
+- **Not used:** `O_TMPFILE` (it saves no call, needs `/proc` or a capability, cannot replace a name, and btrfs
+  needs another flush after `linkat`) and `syncfs` (it flushes other processes' data and reports errors only
+  since Linux 5.8).
+- **Syncing by path** (`syncPath`, `Batch.addPath`) stays for checkout-sized work that cannot keep every
+  descriptor open, with its limit: a freshly opened descriptor can miss a writeback error reported elsewhere.
+  `Pending` always syncs the handle that wrote.
+- **A lone `keep_existing` commit** that finds the name taken reports `kept` at `.none`: nothing airlock did made
+  the existing file durable. A batch syncs it.
+
+## Left out
+
+Lock leases refreshed by mtime (they break locks on a timer); write-ahead logs, group commit and record framing
+(airlock syncs, it does not decide when); persistent file identity across remounts; a copy-on-write clone on its
+own (it is a durable copy's fast path, never unsynced); preserving xattrs, ACLs and owner on replace
+(`ReplaceFileW` is not atomic); mapping files (std maps them; airlock makes a mapped range durable).
+
+Not yet verified against a primary source: what APFS does with `F_BARRIERFSYNC` on a third-party drive without
+barrier support (`SyncOptions.barrier = false` closes that window at two full syncs per replace), and the BSD
+rows, tier 2 and not in CI.
