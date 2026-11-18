@@ -22,6 +22,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Windows: a rename that replaces a read-only target returns a cancel that lands while it clears the target's attribute, where it reported the target as denied; a read-only file opened for a flush gets its attribute back even when a cancel lands then, the cancel kept for the caller's next cancelation point, where the file could stay writable and the open read as denied.
 - `Volume` reads a FreeBSD volume with `fstatfs`, its type name and whether it is local (`MNT_LOCAL`), where it failed with an unexpected error on every system but Linux, Darwin and Windows.
 - A directory sync on FreeBSD reopens a path-only handle and syncs that, as on Linux: std opens a directory it will not iterate with `O_PATH`, which FreeBSD's fsync refuses with EBADF, so `syncDir` and every publish's directory sync failed there with an unexpected error.
 - `Lock.heldBy` reads a holder file as git's `read_lock_pid` does, as its documentation said: white space after `pid ` and C's vertical tab and form feed at the end are taken, a NUL ends the text, and a digit separator (`pid 4_2`) names no process, where `std.fmt.parseInt` took it. A holder file longer than git's 32 bytes names none, where a longer one was cut to its first 32 bytes and could read as another pid. A `-`, a value past u32 and 0 name none, where git's reading would. A shakedown property holds the reading to a model of git's over generated holder files.

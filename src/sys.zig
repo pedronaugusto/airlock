@@ -1801,7 +1801,13 @@ fn openReadOnlyForSync(io: Io, root: windows.HANDLE, sub_path: []const u8) OpenF
     writable.READONLY = false;
     if (try setAttributes(io, attributes, writable) != .SUCCESS) return error.AccessDenied;
     const opened = openByName(io, root, sub_path, .sync);
-    const restored = setAttributes(io, attributes, info.FileAttributes) catch .CANCELLED;
+    // Putting the attribute back is cleanup: a cancel must not leave the file
+    // writable, so it waits for the caller's next cancelation point.
+    const restored = restored: {
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
+        break :restored setAttributes(io, attributes, info.FileAttributes) catch .CANCELLED;
+    };
     const handle = try opened;
     if (restored != .SUCCESS) {
         release(io, handle);
@@ -1811,15 +1817,18 @@ fn openReadOnlyForSync(io: Io, root: windows.HANDLE, sub_path: []const u8) OpenF
 }
 
 /// Clears the read-only attribute of `name` in `root`, and says whether it
-/// was set.
-fn clearReadOnly(io: Io, root: windows.HANDLE, name: []const u8) bool {
-    const attributes = openAttributes(io, root, name) catch return false;
+/// was set. A cancel is returned, never read as "not read-only".
+fn clearReadOnly(io: Io, root: windows.HANDLE, name: []const u8) Io.Cancelable!bool {
+    const attributes = openAttributes(io, root, name) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     defer release(io, attributes);
     const info = basicInformation(attributes) orelse return false;
     if (!info.FileAttributes.READONLY) return false;
     var writable = info.FileAttributes;
     writable.READONLY = false;
-    const status = setAttributes(io, attributes, writable) catch return false;
+    const status = try setAttributes(io, attributes, writable);
     return status == .SUCCESS;
 }
 
@@ -2138,7 +2147,7 @@ pub fn renameByHandle(io: Io, handle: windows.HANDLE, from_dir: windows.HANDLE, 
         status = statusOf(try retryingNt(io, .rename, name, ntRenameByHandle, .{ handle, root, name, replace, false }), .NOT_SUPPORTED);
         // The legacy rename will not replace a read-only target: clear the
         // attribute once and rename again.
-        if (status == .ACCESS_DENIED and replace and clearReadOnly(io, root, name)) {
+        if (status == .ACCESS_DENIED and replace and try clearReadOnly(io, root, name)) {
             status = statusOf(try retryingNt(io, .rename, name, ntRenameByHandle, .{ handle, root, name, replace, false }), .NOT_SUPPORTED);
         }
     }
