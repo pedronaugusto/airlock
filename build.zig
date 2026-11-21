@@ -47,7 +47,11 @@ pub fn dev(b: *std.Build, tools: type) void {
     tests.root_module.addImport("shakedown", shakedown.module("shakedown"));
 
     const test_step = b.step("test", "Run the tests, the example and benchmark startup");
-    test_step.dependOn(&b.addRunArtifact(tests).step);
+    const unit_run = b.addRunArtifact(tests);
+    test_step.dependOn(&unit_run.step);
+    // The suite alone: what the hardened profile fuzzes and runs under
+    // ThreadSanitizer.
+    b.step("unit", "Run the airlock suite alone").dependOn(&unit_run.step);
 
     const check_step = b.step("check", "Compile the tests and the example without running them");
     check_step.dependOn(&tests.step);
@@ -84,6 +88,9 @@ pub fn dev(b: *std.Build, tools: type) void {
     tools.preflight.addCi(b, p, .{
         .tests = test_step,
         .portable_tests = true,
+        // The release tier runs the suite with safety on, fuzzes its
+        // properties and runs it under ThreadSanitizer.
+        .hardened = .{ .fuzz_step = "unit", .tsan_step = "unit" },
         .bench = .{
             .programs = &.{
                 .{ .name = "airlock-bench", .source = "bench/main.zig" },
