@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-21
+
 ### Breaking
 
 - Adding past a `Batch`'s slots is the caller's error, which `Batch.room` (how many more adds the slots hold) lets it avoid, where it was `error.BatchFull`: `Batch.addDir`, `Batch.addDirPath`, `Batch.addFile`, `Batch.addPath`, `Batch.addPending`, `Batch.fence` return `void` where they returned `error{BatchFull}!void`, `Batch.AddError` is gone, and `error.BatchFull` left `Batch.commit`, `Batch.commitOrRefuse`, `Batch.CommitOrRefuseError`, `Batch.Slot.err`. A slot's `Batch.Slot.kind` is the public `Batch.Kind` and `Batch.Slot.owned` is gone (named here as preflight's release check reads them from ci-standard f991816 on; the check before it passed airlock's build without them).
@@ -17,15 +19,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `Batch` add takes a slot it is given room for: `addFile`, `addPath`, `addPending`, `addDir`, `addDirPath` and `fence` return nothing, an add past the slots stops the program in every build, and `room()` says how many are left. `AddError` is gone, and so is `BatchFull` from `Batch.Error` (`commit`'s and `commitOrRefuse`'s sets), where no commit could raise it. Every caller sizes its own slots: one that fills a batch commits it when `room()` is 0. (relic's `fs.syncAll`, which held each add and the commit's `BatchFull` `unreachable`; chronicle's backup, which checked its count and carried `BatchFull` in its error set.)
 - On aegis 0.3.0, which has one way to lend (`borrow`): `Pending.file()` and `Lock.file()` return the `std.Io.File`, lent by value, where they returned `aegis.own.Lent(Io.File)`. The pending (or the lock) still closes it; glint's lending rule keeps a holder from closing it. Migration: drop `.get()`.
 - A pending holds its temp and its directory in aegis owners (`own.OwnedIo`), each released once, where it kept them by value beside open flags. `Pending.file()` and `Lock.file()` take `*Pending` and `*Lock`, since a lend binds the owner. An owner binds where it is first used, and a Debug build stops a pending used at one address and then at another: `Pending.move()` and `Lock.move()` give it a new address, for one used and then returned by value or stored elsewhere (not once `writer` handed out a writer, which points into it). Migration: a pending whose file was lent before it is returned or stored goes through `move()`. (relic's `LockFile.open`, which lent the file to its writer and then returned the pending in the lock.)
-
 - `SymLinkError` loses `OperationUnsupported`: Windows makes symbolic links.
-
-### Fixed
-
-- Windows: a rename that replaces a read-only target returns a cancel that lands while it clears the target's attribute, where it reported the target as denied; a read-only file opened for a flush gets its attribute back even when a cancel lands then, the cancel kept for the caller's next cancelation point, where the file could stay writable and the open read as denied.
-- `Volume` reads a FreeBSD volume with `fstatfs`, its type name and whether it is local (`MNT_LOCAL`), where it failed with an unexpected error on every system but Linux, Darwin and Windows.
-- A directory sync on FreeBSD reopens a path-only handle and syncs that, as on Linux: std opens a directory it will not iterate with `O_PATH`, which FreeBSD's fsync refuses with EBADF, so `syncDir` and every publish's directory sync failed there with an unexpected error.
-- `Lock.heldBy` reads a holder file as git's `read_lock_pid` does, as its documentation said: white space after `pid ` and C's vertical tab and form feed at the end are taken, a NUL ends the text, and a digit separator (`pid 4_2`) names no process, where `std.fmt.parseInt` took it. A holder file longer than git's 32 bytes names none, where a longer one was cut to its first 32 bytes and could read as another pid. A `-`, a value past u32 and 0 name none, where git's reading would. A shakedown property holds the reading to a model of git's over generated holder files.
 
 ### Added
 
@@ -63,6 +57,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Windows: a rename that replaces a read-only target returns a cancel that lands while it clears the target's attribute, where it reported the target as denied; a read-only file opened for a flush gets its attribute back even when a cancel lands then, the cancel kept for the caller's next cancelation point, where the file could stay writable and the open read as denied.
+- `Volume` reads a FreeBSD volume with `fstatfs`, its type name and whether it is local (`MNT_LOCAL`), where it failed with an unexpected error on every system but Linux, Darwin and Windows.
+- A directory sync on FreeBSD reopens a path-only handle and syncs that, as on Linux: std opens a directory it will not iterate with `O_PATH`, which FreeBSD's fsync refuses with EBADF, so `syncDir` and every publish's directory sync failed there with an unexpected error.
+- `Lock.heldBy` reads a holder file as git's `read_lock_pid` does, as its documentation said: white space after `pid ` and C's vertical tab and form feed at the end are taken, a NUL ends the text, and a digit separator (`pid 4_2`) names no process, where `std.fmt.parseInt` took it. A holder file longer than git's 32 bytes names none, where a longer one was cut to its first 32 bytes and could read as another pid. A `-`, a value past u32 and 0 name none, where git's reading would. A shakedown property holds the reading to a model of git's over generated holder files.
 - `copyFile` holds a copy of the source's bytes to the size its stat found, and refuses another count as `SourceChanged` (`CopyFromOptions.size`), where a source cut short under the copy, or a short read of nothing, published a torn copy: found by the fault test on Windows, which has no sendfile.
 - `copyFrom` and `copyFile` report a failed `sendfile` or seek as itself, where they stopped the program on a null: a full disk during a copy on Linux or Windows crashed. `CopyFromError` holds those errors.
 - On Windows, an exclusive create at a name that is a link makes the name collide, `PathAlreadyExists`, as `O_EXCL` does, where it followed the link and made its target: `Temp.in_place` wrote through a link.
