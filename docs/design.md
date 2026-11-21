@@ -156,21 +156,14 @@ through shakedown; those instrumented timings are separate from timed rows. The 
 is still backed by the internal disk, so it is a second filesystem, not an
 independent external-device test. `--smoke` takes no measurements on any OS.
 
-## Manual hosted Windows benchmarks
+## Where the timings are taken
 
-Dispatch its own workflow with
-`gh workflow run windows-bench.yml --ref <branch-or-main>`.
-It runs the own suite with Zig 0.17.0 and explicit ReleaseFast on
-`windows-latest`, retaining all emitted JSONL, stderr, exit status and runner
-metadata as an Actions artifact. It changes neither the preflight planner nor
-its fast/merge/release matrices. Ordinary CI still compiles and smoke-runs only.
-
-These are **indicative hosted-runner numbers, not a target check**. Shared CPU,
-virtual storage and load vary; this manual job has no timing thresholds and
-cannot establish an idle-hardware durability or throughput target. The Windows
-symlink rows run where the runner may create symbolic links. The macOS strategy program emits no rows on
-Windows because its strategies require Darwin primitives. Raw primitive
-refusals remain refusal records, without fabricated latencies.
+On a quiet machine, never on hosted runners: shared CPU, virtual storage and
+load cannot establish a durability or throughput target, so CI compiles and
+smoke-runs the benchmarks only. On Windows, the symlink rows run where the
+process may create symbolic links, and the macOS strategy program emits no rows
+because its strategies require Darwin primitives. Raw primitive refusals remain
+refusal records, without fabricated latencies.
 
 ## Decisions the calls do not show
 
