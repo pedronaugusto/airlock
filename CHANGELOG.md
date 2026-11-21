@@ -59,6 +59,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Development: the benches write standard output through a streaming writer, where a positional one wrote it at an offset (a run's rows appended to a file were written over from its start), and say a scratch directory, row, temp or barrier file left behind through std's log.
 - The README states airlock's stability policy (0.x, tracking Zig 0.17.x; a breaking change only in a minor release, with its CHANGELOG entry; a patch release never breaks).
 - The contracts left on `std.debug.assert` (a scan's buffer and its entries, the attrlist's size, and the tests' model and blocking checks) are `aegis.assert.invariant`: they hold in every build, where they were undefined behaviour in ReleaseFast.
+- Pins aegis 0.4.0.
 
 ### Fixed
 
