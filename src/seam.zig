@@ -8,7 +8,9 @@
 //! carries a hook, and the test module is the one place that builds one.
 //! The `Io` carries it as a layer whose `fileSync` is `hookedSync` and
 //! whose state is a `HookedState`. A layered vtable is a copy per layer
-//! type, so a raw call compares the slot, never the vtable's address.
+//! type, so a raw call compares the slot, never the vtable's address. The
+//! layer's `fileClose` and `dirClose` take a handle's close, std's or an
+//! aegis owner's, to the hook as `close`.
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -144,6 +146,31 @@ pub fn hookedSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
     // std.Io hands its vtable's functions the userdata the Io was made with, and an Io whose fileSync is hookedSync carries a HookedState
     const state: *HookedState = @ptrCast(@alignCast(userdata.?));
     return file.sync(state.hook.base);
+}
+
+/// The hooked layer's `fileClose`: each close is asked of the hook as
+/// `close` asks it, and the file goes exactly once, through the route if
+/// there is one, otherwise through the hook's base. A close reports
+/// nothing, so the hook's answer changes nothing but what it records.
+pub fn hookedFileClose(userdata: ?*anyopaque, files: []const Io.File) void {
+    // as hookedSync: an Io whose fileClose is hookedFileClose carries a HookedState
+    const state: *HookedState = @ptrCast(@alignCast(userdata.?));
+    const hook = state.hook;
+    for (files) |file| {
+        _ = hook.call(hook.ctx, .close, null);
+        file.close(if (hook.route) |route| route.io else hook.base);
+    }
+}
+
+/// The hooked layer's `dirClose`, as `hookedFileClose`.
+pub fn hookedDirClose(userdata: ?*anyopaque, dirs: []const Io.Dir) void {
+    // as hookedSync: an Io whose dirClose is hookedDirClose carries a HookedState
+    const state: *HookedState = @ptrCast(@alignCast(userdata.?));
+    const hook = state.hook;
+    for (dirs) |dir| {
+        _ = hook.call(hook.ctx, .close, null);
+        dir.close(if (hook.route) |route| route.io else hook.base);
+    }
 }
 
 /// The hook `io` carries, if it carries one: one compare.

@@ -7,26 +7,13 @@ const aegis = @import("aegis");
 const sys = @import("sys.zig");
 const paths = @import("paths.zig");
 
-/// A file airlock opened: released once, by `deinit(io)`. A failure its
-/// close must report is taken out first (`take`) and closed by hand.
-///
-/// airlock's own owner, not aegis's `own.File`: it releases through
-/// airlock's seam (`sys.release`), where a test's fault hook and route see
-/// the close, and it never leaves airlock, so the shared type would drop the
-/// seam and buy nothing. `Dir` is airlock's for the same reason.
-pub const File = aegis.own.OwnedIo(Io.File, releaseFile);
+/// A file airlock opened: released once, by `deinit(io)`, through `io`,
+/// where a test's seam sees the close. A failure its close must report is
+/// taken out first (`take`) and closed by hand.
+pub const File = aegis.own.File;
 
-/// A directory airlock opened: released once, by `deinit(io)`. airlock's
-/// own owner, not aegis's `own.Dir`, as `File` says.
-pub const Dir = aegis.own.OwnedIo(Io.Dir, releaseDir);
-
-fn releaseFile(f: *Io.File, io: Io) void {
-    sys.release(io, f.handle);
-}
-
-fn releaseDir(d: *Io.Dir, io: Io) void {
-    sys.release(io, d.handle);
-}
+/// A directory airlock opened: released once, by `deinit(io)`, as `File`.
+pub const Dir = aegis.own.Dir;
 
 /// The directory a name is in: one airlock opened and closes, the caller's
 /// (or a batch's) lent to it, or none once it was let go. Its owner binds

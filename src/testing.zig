@@ -44,7 +44,7 @@ pub const Result = seam.Result;
 /// Faults by airlock call: the n-th `sync_data`, say.
 pub const Plan = shakedown.Plan(Call, Result);
 
-const Hooked = shakedown.Layer(seam.HookedState, .{ .fileSync = seam.hookedSync });
+const Hooked = shakedown.Layer(seam.HookedState, .{ .fileSync = seam.hookedSync, .fileClose = seam.hookedFileClose, .dirClose = seam.hookedDirClose });
 
 /// The platform's I/O error, as the code a raw call returns.
 pub const io_error: Code = if (os == .windows) .IO_DEVICE_ERROR else .IO;

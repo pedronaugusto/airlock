@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 const Io = std.Io;
+const aegis = @import("aegis");
 const airlock = @import("airlock.zig");
 const harness = @import("testing/harness.zig");
 const seam = @import("airlock.testing");
@@ -351,4 +352,21 @@ test "a map std made as a buffer is written back positionally, then synced" {
     try testing.expectEqual(@as(u32, 0), h.count(.write_mapped));
     var buffer: [8]u8 = undefined;
     try testing.expectEqualStrings("CONtents", s.read("data", &buffer).?);
+}
+
+test "a handle closed through a seam's Io, by std or by its aegis owner, is the hook's close" {
+    var s: harness.Scratch = .init();
+    defer s.cleanup();
+    try s.write("data", "contents");
+    const h = try Seam.create(testing.allocator, testing.io, .{});
+    defer h.destroy();
+    const io = h.io();
+    const file = try s.dir().openFile(io, "data", .{});
+    file.close(io);
+    try expectCalls(h, &.{.close});
+    var owned: aegis.own.File = .init(try s.dir().openFile(io, "data", .{}));
+    owned.deinit(io);
+    var dir: aegis.own.Dir = .init(try s.dir().openDir(io, ".", .{}));
+    dir.deinit(io);
+    try expectCalls(h, &.{ .close, .close, .close });
 }
