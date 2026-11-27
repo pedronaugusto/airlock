@@ -398,7 +398,8 @@ test "a filesystem without hard links refuses one by name" {
 }
 
 test "a path from untrusted input resolves beneath its root, its missing directories made and synced on request" {
-    if (!is_tested_os) return error.SkipZigTest;
+    // On every platform: a path's staying beneath its root asks no platform's
+    // durability rows, the BSDs' among them.
     var s: harness.Scratch = .init();
     defer s.cleanup();
     const h = try Seam.create(testing.allocator, testing.io, .{});
@@ -425,7 +426,8 @@ test "a path from untrusted input resolves beneath its root, its missing directo
 }
 
 test "a path that leaves its root is refused, by its text or by a link in it, and says where" {
-    if (!is_tested_os) return error.SkipZigTest;
+    // On every platform: a path's staying beneath its root asks no platform's
+    // durability rows, the BSDs' among them.
     var s: harness.Scratch = .init();
     defer s.cleanup();
     const io = testing.io;
