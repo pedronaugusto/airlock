@@ -101,6 +101,34 @@ test "the holder file is git's, and a lock git holds names its holder" {
     try testing.expectEqual(null, (try airlock.lockHolder(io, tmp.dir, "HEAD")).?.pid);
 }
 
+test "a holder file that cannot be written or removed leaves the lock taken, as git's, and says so" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [64]u8 = undefined;
+    // Asked for and written; asked for none and none there.
+    for ([_]airlock.Lock.Holder{ .pid_file, .none }) |holder| {
+        var lock = try airlock.lock(io, tmp.dir, "HEAD", .{ .holder = holder });
+        defer lock.release(io);
+        try testing.expectEqual(@as(std.meta.Tag(airlock.Lock.Marked), switch (holder) {
+            .pid_file => .recorded,
+            .none => .none,
+        }), std.meta.activeTag(lock.holder));
+    }
+    // A directory where the holder file goes: it can be neither written nor
+    // removed, and the lock is taken and committed all the same.
+    try tmp.dir.createDirPath(io, "HEAD~pid.lock/in");
+    for ([_]airlock.Lock.Holder{ .pid_file, .none }) |holder| {
+        var lock = try airlock.lock(io, tmp.dir, "HEAD", .{ .holder = holder });
+        defer lock.release(io);
+        try testing.expect(lock.holder == .not_recorded);
+        try lock.file().writePositionalAll(io, @tagName(holder), 0);
+        _ = try lock.commit(io, .{});
+        try testing.expectEqualStrings(@tagName(holder), contents(io, tmp.dir, "HEAD", &buffer).?);
+        try testing.expect(contents(io, tmp.dir, "HEAD.lock", &buffer) == null);
+    }
+}
+
 test "a holder file a crash left is this lock's to replace or remove" {
     const io = testing.io;
     var tmp = testing.tmpDir(.{});

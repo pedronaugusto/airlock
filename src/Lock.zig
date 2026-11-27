@@ -20,6 +20,8 @@ const Lock = @This();
 
 /// The lock file, which is also the new contents of `<path>`.
 pending: Pending,
+/// Whether the holder file beside the lock is as `Options.holder` asked.
+holder: Marked,
 
 /// What a lock does when it is taken.
 pub const Contention = union(enum) {
@@ -56,29 +58,45 @@ pub const Options = struct {
 };
 
 /// Taking a lock failed.
-pub const Error = Pending.CreateError || Io.Cancelable || HolderError || error{
-    /// `<path>~pid.lock` would be longer than a name may be.
-    NameTooLong,
+pub const Error = Pending.CreateError || Io.Cancelable || error{
     /// `<path>.lock` is there: another writer holds it. It is never removed
     /// here; `heldBy` says what it names.
     LockHeld,
 };
 
-/// Writing or removing the holder file failed; the lock was given up.
-pub const HolderError = Io.File.OpenError || Io.File.WritePositionalError || Io.Dir.DeleteFileError;
+/// Whether the holder file beside a lock is as `Options.holder` asked. A
+/// holder file is advisory, as git's: one that cannot be written or removed
+/// never gives the lock up, and is said here for the caller to report, as git
+/// warns.
+pub const Marked = union(enum) {
+    /// `Holder.none`, and no holder file beside the lock.
+    none,
+    /// `Holder.pid_file`, written: `<path>~pid.lock` names this process.
+    recorded,
+    /// The holder file is not as asked: it could not be written, or one a
+    /// crash left could not be removed, and `heldBy` may name its process.
+    not_recorded: HolderError,
+};
+
+/// Why a holder file is not as asked. Never `error.Canceled`, which `take`
+/// returns, giving the lock up.
+pub const HolderError = Io.File.OpenError || Io.File.WritePositionalError || Io.Dir.DeleteFileError || error{
+    /// `<path>~pid.lock` would be longer than a name may be.
+    NameTooLong,
+};
 
 /// Takes `<path>.lock` in `dir`. `path` is borrowed until the lock ends.
 pub fn take(io: Io, dir: Io.Dir, path: []const u8, options: Options) Error!Lock {
-    var lock: Lock = .{ .pending = try create(io, dir, path, options) };
+    var lock: Lock = .{ .pending = try create(io, dir, path, options), .holder = .none };
     errdefer lock.pending.discard(io);
-    try lock.mark(io, options.holder);
+    lock.holder = try lock.mark(io, options.holder);
     // The holder file was written through the parent, which bound it here.
     return lock.move();
 }
 
 /// The lock at its new address, as `Pending.move` says.
 pub fn move(l: *Lock) Lock {
-    return .{ .pending = l.pending.move() };
+    return .{ .pending = l.pending.move(), .holder = l.holder };
 }
 
 /// The lock, written to while it is held, as `Pending.file` says.
@@ -158,11 +176,12 @@ pub fn backoff(attempt: u32, random: u16) u64 {
 /// A holder file's name.
 const HolderName = aegis.bounded.Array(u8, Staged.max_temp_name);
 
-/// The holder file's name, `<base>~pid.lock`.
-fn holderName(base: []const u8) error{NameTooLong}!HolderName {
+/// The holder file's name, `<base>~pid.lock`; null when it does not fit,
+/// and no holder file can bear it.
+fn holderName(base: []const u8) ?HolderName {
     var out: HolderName = .init;
-    out.appendSlice(base) catch return error.NameTooLong;
-    out.appendSlice("~pid.lock") catch return error.NameTooLong;
+    out.appendSlice(base) catch return null;
+    out.appendSlice("~pid.lock") catch return null;
     return out;
 }
 
@@ -179,21 +198,36 @@ fn holderLine(text: *HolderLine, id: u32) []const u8 {
 }
 
 /// Writes the holder file, or removes one a crash left: while this lock is
-/// held, any holder file beside it is this lock's to keep or drop.
-fn mark(l: *Lock, io: Io, holder: Holder) (HolderError || error{NameTooLong})!void {
+/// held, any holder file beside it is this lock's to keep or drop. Only a
+/// cancel is an error: anything else leaves the lock held, and is said.
+fn mark(l: *Lock, io: Io, holder: Holder) Io.Cancelable!Marked {
+    return l.markAs(io, holder) catch |err| switch (err) {
+        error.Canceled => error.Canceled,
+        else => |e| .{ .not_recorded = e },
+    };
+}
+
+fn markAs(l: *Lock, io: Io, holder: Holder) HolderError!Marked {
     const staged = &l.pending.staged;
-    const holder_name = try holderName(staged.baseName());
+    const holder_name = holderName(staged.baseName()) orelse switch (holder) {
+        .none => return .none,
+        .pid_file => return error.NameTooLong,
+    };
     const name = holder_name.constItems();
     switch (holder) {
-        .none => staged.parent.dir().deleteFile(io, name) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => |e| return e,
+        .none => {
+            staged.parent.dir().deleteFile(io, name) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            };
+            return .none;
         },
         .pid_file => {
             const f = try staged.parent.dir().createFile(io, name, .{ .truncate = true });
             defer f.close(io);
             var text: HolderLine = undefined;
             try f.writePositionalAll(io, holderLine(&text, sys.processId()), 0);
+            return .recorded;
         },
     }
 }
@@ -208,7 +242,7 @@ fn unmark(l: *Lock, io: Io) void {
     // descriptor may now be another's. A commit removed the holder file
     // before it; one left beside no lock is harmless, as above.
     const parent = staged.parent.get() orelse return;
-    const holder_name = holderName(staged.baseName()) catch aegis.assert.never("Lock.unmark: a taken lock's holder name fit, take having refused one with no room for it");
+    const holder_name = holderName(staged.baseName()) orelse return;
     const name = holder_name.constItems();
     // One left behind is read only beside a held lock, and the next lock
     // writes or removes it: told to the caller all the same.

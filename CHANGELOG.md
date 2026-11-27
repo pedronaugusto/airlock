@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- A lock's holder file is advisory, as git's: `Lock.take` (`lock`) no longer gives the lock up when `<path>~pid.lock` cannot be written, or when one a crash left cannot be removed. git takes the lock all the same (`update-ref` with `core.lockfilePid` and the holder file's name blocked writes the ref), where `take` failed with the holder file's error. The lock says it in `Lock.holder`, a `Lock.Marked`: `none`, `recorded`, or `not_recorded` with the `Lock.HolderError` that stopped it, for the caller to report as git warns; a library prints nothing. `Lock.Error` (`LockError`) loses `Lock.HolderError` and `error.NameTooLong` for the holder file's name, which is `not_recorded` too; a cancel while the holder file is written still gives the lock up. A `Lock` written out field by field, `Lock.pending`, also names `Lock.holder`. Migration: a `switch` on `LockError` drops those arms; a caller that reported a holder file's failure reads `lock.holder`.
+
 ## [0.7.0] - 2026-11-21
 
 ### Breaking
