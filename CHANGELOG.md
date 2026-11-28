@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Pins aegis 0.5.0. Development on shakedown 73426f3: the crash test's `recover` and `check` take the recovery's allocator, as `everyCrash` hands it, and its seam in `setUp` takes the simulation's.
 - A handle closed through a `testing.Seam`'s `Io`, by std's `close` or by its aegis owner, is the seam's `close` call, made once through the route or the seam's base, where only the closes airlock made raw were. The files and directories airlock holds are aegis's `own.File` and `own.Dir`, released through the caller's `Io`, where they were owners of airlock's own that released through its raw seam.
 
 ## [0.7.0] - 2026-11-21

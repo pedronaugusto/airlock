@@ -61,7 +61,7 @@ pub const Operation = struct {
         if (s.kind == .rename or s.kind == .copy or s.kind == .clone or s.kind == .copy_batch) try fs.write("src", "new");
         // A source a writer is still appending to: the copy takes its first bytes.
         if (s.kind == .copy_batch) try fs.write("growing", "new, and more");
-        s.h = try Seam.create(testing.allocator, sim.io(), .{ .plan = s.plan, .trace = .off });
+        s.h = try Seam.create(sim.allocator(), sim.io(), .{ .plan = s.plan, .trace = .off });
         s.reached = .none;
         s.returned = false;
         s.ready = s.kind != .sym_link;
@@ -161,9 +161,9 @@ pub const Operation = struct {
 
     /// What a program does after the crash: removes the temps it left,
     /// through a seam over the recovery's own simulation.
-    pub fn recover(s: *Operation, io: Io) !void {
+    pub fn recover(s: *Operation, io: Io, gpa: std.mem.Allocator) !void {
         _ = s;
-        const h = try Seam.create(testing.allocator, io, .{ .trace = .off });
+        const h = try Seam.create(gpa, io, .{ .trace = .off });
         defer h.destroy();
         for ([_][]const u8{ ".", "sub" }) |path| {
             var dir = try Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
@@ -173,12 +173,12 @@ pub const Operation = struct {
     }
 
     /// What the disk came back with, against what the run promised.
-    pub fn check(s: *Operation, io: Io) !void {
+    pub fn check(s: *Operation, io: Io, gpa: std.mem.Allocator) !void {
         try expectNoTemps(io);
         if (!s.ready) return;
         const durable = s.returned and s.reached.atLeast(.data);
         const cwd = Io.Dir.cwd();
-        if (s.kind == .lock) try checkLock(io, durable);
+        if (s.kind == .lock) try checkLock(io, gpa, durable);
         switch (s.kind) {
             .sync_file => if (durable) try expectContents(io, "a", "new"),
             .remove => if (durable) try testing.expectError(error.FileNotFound, cwd.statFile(io, "a", .{})),
@@ -212,13 +212,13 @@ pub const Operation = struct {
 /// A committed lock is gone; one a crash left stays, as git leaves it
 /// (airlock never removes a lock it did not take): it reads as held,
 /// whatever its holder file came back as, and no second lock is taken.
-fn checkLock(io: Io, committed: bool) !void {
+fn checkLock(io: Io, gpa: std.mem.Allocator, committed: bool) !void {
     const cwd = Io.Dir.cwd();
     const held = try airlock.lockHolder(io, cwd, "a") orelse return;
     if (committed) return error.LockLeft;
     if (held.pid) |pid| try testing.expect(pid != 0);
     // airlock's own calls onto the recovered disk, as `recover` makes them.
-    const h = try Seam.create(testing.allocator, io, .{ .trace = .off });
+    const h = try Seam.create(gpa, io, .{ .trace = .off });
     defer h.destroy();
     try testing.expectError(error.LockHeld, airlock.lock(h.io(), cwd, "a", .{}));
 }
